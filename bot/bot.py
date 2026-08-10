@@ -12,6 +12,7 @@ from discord.ext import commands
 from bot.database.database import Database
 from bot.services.birthday_service import BirthdayService
 from bot.services.config_service import ConfigService
+from bot.services.statistics_service import StatisticsService
 from bot.tasks.background import BackgroundTasks
 
 log = logging.getLogger(__name__)
@@ -19,6 +20,7 @@ log = logging.getLogger(__name__)
 COG_MODULES = (
     "bot.cogs.config",
     "bot.cogs.birthdays",
+    "bot.cogs.statistics",
 )
 
 
@@ -42,6 +44,7 @@ class ErundaBot(commands.Bot):
         self.db = Database(database_path, default_timezone=default_timezone)
         self.config_service = ConfigService(self.db)
         self.birthday_service = BirthdayService(self.db)
+        self.statistics_service = StatisticsService(self.db)
         self.background = BackgroundTasks(self)
         self._synced = False
 

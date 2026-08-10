@@ -2,15 +2,13 @@
 
 ## Название проекта
 
-**Ерунда** — Discord-бот для небольшого Discord-сервера «Ерундульки» (примерно 10–50 участников).
+**Ерунда** — Discord-бот для небольшого Discord-сервера «Ерундульки».
 
 ## Цель проекта
 
-Ерунда — Discord-бот для небольшого сообщества, который делает сервер более живым, организованным и интерактивным.
+Бот для живого небольшого сообщества: дни рождения, статистика и топы, ивенты, цитаты, роли (RGB), демократия.
 
-Основные системы: дни рождения, статистика и топы, ивенты, цитаты, роли (включая RGB), серверная демократия.
-
-Не добавлять несогласованные системы (музыка, XP, уровни, достижения, экономика, история, мини-игры, репутация и т.п.).
+Не добавлять несогласованные системы (музыка, XP, уровни, экономика и т.п.).
 
 ---
 
@@ -20,9 +18,9 @@
 - [x] Подключение Discord
 - [x] SQLite
 - [x] Дни рождения
-- [ ] Статистика
-- [ ] Профиль
-- [ ] Топы
+- [x] Статистика
+- [x] Профиль
+- [x] Топы
 - [ ] Ивенты
 - [ ] Цитаты
 - [ ] Управление ролями
@@ -30,7 +28,7 @@
 - [ ] RGB-роли
 - [ ] Демократия
 - [ ] Автовыполнение решений демократии
-- [x] `/config` (настройки сервера)
+- [x] `/config`
 - [x] README и `.env.example`
 
 ---
@@ -43,23 +41,21 @@ ErundaBot/
 │   ├── bot.py
 │   ├── cogs/
 │   │   ├── config.py
-│   │   └── birthdays.py
+│   │   ├── birthdays.py
+│   │   └── statistics.py
 │   ├── database/
 │   │   ├── database.py
 │   │   └── models.py
 │   ├── services/
 │   │   ├── config_service.py
-│   │   └── birthday_service.py
+│   │   ├── birthday_service.py
+│   │   └── statistics_service.py
 │   ├── views/
 │   │   ├── config_views.py
-│   │   └── birthday_views.py
-│   ├── tasks/
-│   │   └── background.py
+│   │   ├── birthday_views.py
+│   │   └── top_views.py
+│   ├── tasks/background.py
 │   └── utils/
-│       ├── embeds.py
-│       ├── permissions.py
-│       ├── timezones.py
-│       └── formatting.py
 ├── data/
 ├── main.py
 ├── requirements.txt
@@ -73,11 +69,12 @@ ErundaBot/
 
 ## Архитектура
 
-Слои: `main` → `ErundaBot` → `cogs/views` → `services` → `database`; фоновые задачи в `BackgroundTasks`.
+`cogs/views` → `services` → `database`; `BackgroundTasks` для loops.
 
-### Background tasks
+Background:
 
-- `birthday_loop` (каждую минуту): поздравления и напоминания по timezone гильдии; дедуп через `birthday_notifications`.
+- `birthday_loop` (1 мин)
+- voice recovery при `on_ready` (один раз, guard)
 
 ---
 
@@ -85,100 +82,75 @@ ErundaBot/
 
 Таблицы: `guilds`, `users`, `birthdays`, `birthday_notifications`, `message_statistics`, `voice_sessions`, `reaction_statistics`, `events`, `event_participants`, `quotes`, `custom_roles`, `proposals`, `proposal_votes`.
 
-`birthday_notifications`: PK `(guild_id, user_id, event_date, kind)` — `announce` / `reminder`.
-
-RGB state в `custom_roles` (отдельной `role_animations` нет).
-
 ---
 
 ## Discord-команды
 
 ```text
 /config
-/birthday set
-/birthday remove
-/birthday list
-/birthday next
+/birthday set|remove|list|next
+/profile [user]
+/top
 ```
-
-План: `/profile`, `/top`, `/event *`, `/quote *`, context menu Add quote, `/role *`, `/myrole`, `/proposal *`.
-
----
-
-## Intents / Permissions
-
-Intents: guilds, members, guild_messages, message_content, guild_reactions, voice_states.
-
-Permissions: см. README.
 
 ---
 
 ## Реализованные функции
 
-### Ядро + `/config`
+### Дни рождения — реализовано
 
-Статус: реализовано
+### Статистика / профиль / топы — реализовано
 
-### Дни рождения
+- сообщения: guild/user/channel/date (timezone гильдии)
+- voice: сессии, AFK не считается; recovery после restart
+- реакции: полученные (не self, не боты); add/remove
+- флаг `statistics_enabled` в `/config`
+- `/profile` — сообщения, voice, реакции, время на сервере, ранги
+- `/top` — Select категория + период (сегодня / неделя / месяц / всё время)
 
-Статус: реализовано
-
-- Modal `/birthday set` (день, месяц, год опционально)
-- remove / list (сортировка по ближайшей дате) / next
-- автопоздравление в канал из `/config` в `birthday_announce_time`
-- напоминание за `birthday_reminder_days` дней
-- timezone гильдии; Feb 29 → Feb 28 в невисокосный год
-- возраст в поздравлении, если указан год
-- дедуп уведомлений в БД (устойчиво к restart)
-
-### Остальные системы
-
-Не начаты.
+**Общая активность:** `messages + voice_minutes + reactions`.
 
 ---
 
 ## Current Task
 
-Дни рождения завершены.
+Статистика/профиль/топы готовы.
 
-Следующий шаг: статистика (сообщения, voice, реакции) → затем `/profile` и `/top`.
+Следующий шаг: система ивентов.
 
 ---
 
 ## TODO
 
-- [ ] Статистика сообщений / voice / реакций
-- [ ] `/profile` и `/top`
 - [ ] Система ивентов
 - [ ] Система цитат (+ context menu)
 - [ ] Управление ролями + `/myrole`
 - [ ] RGB manager
 - [ ] Демократия + optional auto-actions
-- [ ] Проверка restart-recovery (voice, events, RGB, proposals)
+- [ ] Проверка restart-recovery (events, RGB, proposals)
 
 ---
 
 ## Known Issues
 
-- Global `tree.sync()` может задерживать появление slash-команд до нескольких минут.
+- Global `tree.sync()` может задерживать slash-команды.
+- `/top` View timeout 180с — после этого Select перестаёт работать (нужно вызвать `/top` снова).
 
 ---
 
 ## Technical Decisions
 
-- Python 3.12+, discord.py 2.x, aiosqlite, python-dotenv, tzdata (Windows zoneinfo)
-- Birthday loop: 1 мин; сравнение HH:MM в timezone гильдии
-- RGB interval ≥ 10 сек (ещё не реализован loop)
-- Personal roles: 1 на user/guild (позже)
-- Auto-execute proposals: default off
-- Vote defaults: 24h / quorum 3 / ratio 0.5
+- Python 3.12+, discord.py 2.x, aiosqlite, python-dotenv, tzdata
+- Overall score = messages + (voice_seconds // 60) + reactions
+- Voice overlap clipping при подсчёте за период
+- Birthday notify dedup в `birthday_notifications`
+- RGB interval ≥ 10 (ещё не реализовано)
 - Commit messages: English, lowercase, no trailing period
 
-### Открытые решения
+### Открытые
 
-1. Формула «общей активности» для `/top`.
-2. Набор `action_type` для автовыполнения предложений.
-3. Дефолтная скорость `/myrole` RGB.
+1. Набор `action_type` для автовыполнения предложений.
+2. Дефолтная скорость `/myrole` RGB.
 
 ---
 
@@ -190,26 +162,18 @@ Permissions: см. README.
 
 ## Правила разработки
 
-- Не хранить секреты в коде.
-- Не смешивать DB и Discord UI.
-- Один набор background tasks на lifecycle.
-- Админ-действия → permissions + иерархия ролей.
-- Значимые изменения → обновление этого файла в той же операции.
-- Не добавлять несогласованные крупные функции.
-- Код — источник истины при расхождении с этим файлом.
+- Секреты не в Git; не смешивать DB и UI; один набор background tasks; permissions + иерархия; обновлять PROJECT_CONTEXT; не добавлять лишние крупные функции.
 
 ---
 
 ## Recent Changes
 
-- 2026-08-10 — система дней рождения (команды + notifier + `birthday_notifications`)
-- 2026-08-10 — ядро бота, SQLite schema, `/config`, README
-- 2026-08-10 — init git + PROJECT_CONTEXT
+- 2026-08-10 — статистика, `/profile`, `/top`, voice recovery
+- 2026-08-10 — дни рождения
+- 2026-08-10 — ядро + `/config`
 
 ---
 
 ## Правило восстановления контекста
 
-1. Прочитай этот файл первым.
-2. Сверь структуру / Status / Current Task / TODO.
-3. При противоречии верь коду и обнови этот файл.
+Прочитай этот файл первым; при расхождении верь коду и обнови файл.

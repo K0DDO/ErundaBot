@@ -360,3 +360,238 @@ class Database:
             (guild_id, user_id, event_date, kind),
         )
         await self.connection.commit()
+
+    async def increment_messages(
+        self,
+        guild_id: int,
+        user_id: int,
+        channel_id: int,
+        day: str,
+        amount: int = 1,
+    ) -> None:
+        await self.ensure_guild(guild_id)
+        await self.connection.execute(
+            """
+            INSERT INTO message_statistics (guild_id, user_id, channel_id, date, count)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, channel_id, date) DO UPDATE SET
+                count = count + excluded.count
+            """,
+            (guild_id, user_id, channel_id, day, amount),
+        )
+        await self.connection.commit()
+
+    async def increment_reactions(
+        self,
+        guild_id: int,
+        user_id: int,
+        day: str,
+        amount: int = 1,
+    ) -> None:
+        await self.ensure_guild(guild_id)
+        await self.connection.execute(
+            """
+            INSERT INTO reaction_statistics (guild_id, user_id, date, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
+                count = MAX(0, count + excluded.count)
+            """,
+            (guild_id, user_id, day, amount),
+        )
+        await self.connection.commit()
+
+    async def open_voice_session(
+        self,
+        guild_id: int,
+        user_id: int,
+        channel_id: int,
+        started_at: str,
+    ) -> None:
+        await self.ensure_guild(guild_id)
+        # Avoid duplicate open sessions for same user.
+        await self.connection.execute(
+            """
+            UPDATE voice_sessions
+            SET ended_at = ?, duration_seconds = CAST(
+                (julianday(?) - julianday(started_at)) * 86400 AS INTEGER
+            )
+            WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL
+            """,
+            (started_at, started_at, guild_id, user_id),
+        )
+        await self.connection.execute(
+            """
+            INSERT INTO voice_sessions (guild_id, user_id, channel_id, started_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (guild_id, user_id, channel_id, started_at),
+        )
+        await self.connection.commit()
+
+    async def close_voice_session(
+        self,
+        guild_id: int,
+        user_id: int,
+        ended_at: str,
+    ) -> None:
+        await self.connection.execute(
+            """
+            UPDATE voice_sessions
+            SET ended_at = ?,
+                duration_seconds = CAST(
+                    (julianday(?) - julianday(started_at)) * 86400 AS INTEGER
+                )
+            WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL
+            """,
+            (ended_at, ended_at, guild_id, user_id),
+        )
+        await self.connection.commit()
+
+    async def close_all_open_voice_sessions(self, ended_at: str) -> int:
+        cursor = await self.connection.execute(
+            """
+            UPDATE voice_sessions
+            SET ended_at = ?,
+                duration_seconds = CAST(
+                    (julianday(?) - julianday(started_at)) * 86400 AS INTEGER
+                )
+            WHERE ended_at IS NULL
+            """,
+            (ended_at, ended_at),
+        )
+        await self.connection.commit()
+        return cursor.rowcount
+
+    async def sum_messages(
+        self,
+        guild_id: int,
+        user_id: int | None,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> int | list[tuple[int, int]]:
+        """If user_id set — return int total. Else return list[(user_id, count)]."""
+        clauses = ["guild_id = ?"]
+        params: list[Any] = [guild_id]
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if date_from is not None:
+            clauses.append("date >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            clauses.append("date <= ?")
+            params.append(date_to)
+        where = " AND ".join(clauses)
+        if user_id is not None:
+            cursor = await self.connection.execute(
+                f"SELECT COALESCE(SUM(count), 0) AS total FROM message_statistics WHERE {where}",
+                params,
+            )
+            row = await cursor.fetchone()
+            return int(row["total"])
+        cursor = await self.connection.execute(
+            f"""
+            SELECT user_id, SUM(count) AS total
+            FROM message_statistics
+            WHERE {where}
+            GROUP BY user_id
+            ORDER BY total DESC
+            """,
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [(int(r["user_id"]), int(r["total"])) for r in rows]
+
+    async def sum_reactions(
+        self,
+        guild_id: int,
+        user_id: int | None,
+        date_from: str | None,
+        date_to: str | None,
+    ) -> int | list[tuple[int, int]]:
+        clauses = ["guild_id = ?"]
+        params: list[Any] = [guild_id]
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if date_from is not None:
+            clauses.append("date >= ?")
+            params.append(date_from)
+        if date_to is not None:
+            clauses.append("date <= ?")
+            params.append(date_to)
+        where = " AND ".join(clauses)
+        if user_id is not None:
+            cursor = await self.connection.execute(
+                f"SELECT COALESCE(SUM(count), 0) AS total FROM reaction_statistics WHERE {where}",
+                params,
+            )
+            row = await cursor.fetchone()
+            return int(row["total"])
+        cursor = await self.connection.execute(
+            f"""
+            SELECT user_id, SUM(count) AS total
+            FROM reaction_statistics
+            WHERE {where}
+            GROUP BY user_id
+            ORDER BY total DESC
+            """,
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [(int(r["user_id"]), int(r["total"])) for r in rows]
+
+    async def sum_voice_seconds(
+        self,
+        guild_id: int,
+        user_id: int | None,
+        range_start_iso: str | None,
+        range_end_iso: str | None,
+        now_iso: str,
+    ) -> int | list[tuple[int, int]]:
+        """Sum voice seconds overlapping [range_start, range_end], open sessions use now_iso."""
+        # Overlap: started_at < end AND (ended_at IS NULL OR ended_at > start)
+        # Count clipped duration in Python for correctness.
+        clauses = ["guild_id = ?"]
+        params: list[Any] = [guild_id]
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if range_start_iso is not None:
+            clauses.append("(ended_at IS NULL OR ended_at > ?)")
+            params.append(range_start_iso)
+        if range_end_iso is not None:
+            clauses.append("started_at < ?")
+            params.append(range_end_iso)
+        where = " AND ".join(clauses)
+        cursor = await self.connection.execute(
+            f"""
+            SELECT user_id, started_at, ended_at
+            FROM voice_sessions
+            WHERE {where}
+            """,
+            params,
+        )
+        rows = await cursor.fetchall()
+        from datetime import datetime
+
+        def parse(ts: str) -> datetime:
+            return datetime.fromisoformat(ts)
+
+        start_bound = parse(range_start_iso) if range_start_iso else None
+        end_bound = parse(range_end_iso) if range_end_iso else parse(now_iso)
+        now_dt = parse(now_iso)
+
+        totals: dict[int, int] = {}
+        for row in rows:
+            uid = int(row["user_id"])
+            started = parse(row["started_at"])
+            ended = parse(row["ended_at"]) if row["ended_at"] else now_dt
+            lo = max(started, start_bound) if start_bound else started
+            hi = min(ended, end_bound)
+            seconds = max(0, int((hi - lo).total_seconds()))
+            totals[uid] = totals.get(uid, 0) + seconds
+
+        if user_id is not None:
+            return totals.get(user_id, 0)
+        return sorted(totals.items(), key=lambda item: item[1], reverse=True)
