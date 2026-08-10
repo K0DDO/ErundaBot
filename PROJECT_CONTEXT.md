@@ -23,9 +23,9 @@
 
 ## Status
 
-- [ ] Базовая структура бота
-- [ ] Подключение Discord
-- [ ] SQLite
+- [x] Базовая структура бота
+- [x] Подключение Discord
+- [x] SQLite
 - [ ] Дни рождения
 - [ ] Статистика
 - [ ] Профиль
@@ -37,55 +37,42 @@
 - [ ] RGB-роли
 - [ ] Демократия
 - [ ] Автовыполнение решений демократии
-- [ ] `/config` (настройки сервера)
-- [ ] README и `.env.example`
+- [x] `/config` (настройки сервера)
+- [x] README и `.env.example`
 
 ---
 
 ## Структура проекта
 
-Планируемая (ещё не создана — репозиторий пустой):
-
 ```text
 ErundaBot/
 ├── bot/
 │   ├── __init__.py
-│   ├── bot.py                 # класс бота, загрузка cogs, lifecycle
+│   ├── bot.py
 │   ├── cogs/
-│   │   ├── birthdays.py
-│   │   ├── statistics.py      # listeners + /profile + /top
-│   │   ├── events.py
-│   │   ├── quotes.py
-│   │   ├── roles.py           # /role + /myrole
-│   │   ├── democracy.py
-│   │   └── config.py          # /config
+│   │   ├── __init__.py
+│   │   └── config.py
 │   ├── database/
-│   │   ├── database.py        # connection, migrations/schema init
-│   │   └── models.py          # SQL / dataclasses / row mappers
+│   │   ├── __init__.py
+│   │   ├── database.py
+│   │   └── models.py
 │   ├── services/
-│   │   ├── birthday_service.py
-│   │   ├── statistics_service.py
-│   │   ├── event_service.py
-│   │   ├── quote_service.py
-│   │   ├── role_service.py
-│   │   ├── rgb_manager.py     # централизованный менеджер RGB
-│   │   ├── democracy_service.py
+│   │   ├── __init__.py
 │   │   └── config_service.py
-│   ├── views/                 # Buttons, Selects, Modals
-│   │   ├── event_views.py
-│   │   ├── top_views.py
-│   │   ├── proposal_views.py
-│   │   ├── birthday_views.py
-│   │   └── role_views.py
-│   ├── tasks/                 # фоновые задачи (один набор на lifecycle бота)
-│   │   ├── scheduler.py
+│   ├── views/
+│   │   ├── __init__.py
+│   │   └── config_views.py
+│   ├── tasks/
+│   │   ├── __init__.py
 │   │   └── background.py
 │   └── utils/
-│       ├── embeds.py          # единый стиль Embed
+│       ├── __init__.py
+│       ├── embeds.py
 │       ├── permissions.py
 │       ├── timezones.py
 │       └── formatting.py
-├── data/                      # SQLite (в .gitignore)
+├── data/
+│   └── .gitkeep
 ├── main.py
 ├── requirements.txt
 ├── .env.example
@@ -93,8 +80,6 @@ ErundaBot/
 ├── README.md
 └── PROJECT_CONTEXT.md
 ```
-
-Фактическое состояние: в корне пока только `.gitignore` и `PROJECT_CONTEXT.md`.
 
 ---
 
@@ -104,243 +89,140 @@ ErundaBot/
 
 | Слой | Ответственность |
 |------|-----------------|
-| `main.py` | Точка входа, загрузка `.env`, запуск бота |
-| `bot/bot.py` | `commands.Bot`, intents, setup_hook, sync commands, старт/стоп tasks |
+| `main.py` | Точка входа, `.env`, логирование, `bot.run` |
+| `bot/bot.py` | `ErundaBot`, intents, load cogs, sync commands, lifecycle |
 | `bot/cogs/*` | Slash Commands, listeners, Discord UI wiring |
 | `bot/views/*` | Buttons / Selects / Modals |
-| `bot/services/*` | Бизнес-логика (без прямого SQL в cogs) |
-| `bot/database/*` | SQLite schema, queries |
+| `bot/services/*` | Бизнес-логика |
+| `bot/database/*` | SQLite schema + queries |
 | `bot/tasks/*` | Централизованные background loops |
 | `bot/utils/*` | Embeds, permissions, timezone, форматирование |
 
 ### Принципы
 
 - Не смешивать Discord-команды, бизнес-логику и DB в одном файле.
-- Фоновые задачи запускаются один раз в lifecycle бота (не на каждое событие).
-- Все серверные данные привязаны к `guild_id` (мультигильд-готовность).
-- Токен Discord только в `.env`, никогда в БД.
-- Админ-действия всегда проверяют Discord permissions + иерархию ролей.
+- Фоновые задачи запускаются один раз за lifecycle (`BackgroundTasks`, guard от дублей).
+- Серверные данные привязаны к `guild_id`.
+- Токен только в `.env`.
+- Админ-действия проверяют permissions.
 
-### Background tasks (планируемые)
+### Background tasks
 
-1. **Birthday notifier** — проверка дней рождения по timezone гильдии; поздравление + optional reminder.
-2. **Event scheduler** — напоминания, уведомление перед стартом, перевод в `completed`, восстановление после restart.
-3. **Proposal closer** — завершение голосований, публикация результата, optional auto-actions.
-4. **RGB manager** — один центральный loop на все RGB-роли (не отдельный loop на роль).
-5. **Voice session recovery** — при старте закрыть «осиротевшие» open sessions / переоткрыть активные voice members.
+Сейчас: каркас `BackgroundTasks` (start/stop без loops).
+
+Планируются: birthday notifier, event scheduler, proposal closer, RGB manager, voice recovery.
 
 ---
 
-## База данных (план)
+## База данных
 
-SQLite, путь из `DATABASE_PATH` (по умолчанию `./data/erunda.db`).
+SQLite через `aiosqlite`, путь `DATABASE_PATH` (по умолчанию `./data/erunda.db`).
+
+Схема создаётся в `Database.connect()` (`SCHEMA` в `database.py`).
 
 ### Таблицы
 
-#### `guilds`
+| Таблица | Назначение |
+|--------|------------|
+| `guilds` | Настройки сервера (`/config`) |
+| `users` | Кэш участников |
+| `birthdays` | Дни рождения (year nullable) |
+| `message_statistics` | Сообщения по user/channel/date |
+| `voice_sessions` | Voice-сессии (open = `ended_at IS NULL`) |
+| `reaction_statistics` | Полученные реакции по user/date |
+| `events` | Мероприятия |
+| `event_participants` | Участники ивентов |
+| `quotes` | Цитаты + JSON snapshot реакций |
+| `custom_roles` | Managed/personal роли + RGB state |
+| `proposals` | Предложения / голосования |
+| `proposal_votes` | Голоса (один на user, можно менять) |
 
-Настройки сервера (единая точка `/config`).
+RGB хранится в `custom_roles` (отдельная `role_animations` не создана).
 
-Основные поля: `guild_id` PK, `timezone`, каналы (`birthday_channel_id`, `events_channel_id`, `proposals_channel_id`, `quotes_channel_id`), флаги (`statistics_enabled`, `personal_roles_enabled`, `auto_execute_proposals`, `rgb_enabled`), времена уведомлений (`birthday_announce_time`, `birthday_reminder_days`, `event_reminder_minutes`), RGB defaults (`rgb_interval_seconds`), правила голосования (`proposal_duration_hours`, `proposal_quorum`, `proposal_pass_ratio`), `afk_channel_id` (кэш/override при необходимости), timestamps.
+### `guilds` — основные поля
 
-#### `users`
-
-Кэш участников: `guild_id`, `user_id`, `joined_at`, `display_name_cache` (опционально), PK `(guild_id, user_id)`.
-
-#### `birthdays`
-
-`guild_id`, `user_id`, `day`, `month`, `year` NULLABLE, PK `(guild_id, user_id)`.
-
-#### `message_statistics`
-
-Счётчики сообщений: `guild_id`, `user_id`, `channel_id`, `date` (день в timezone гильдии), `count`.  
-Уникальность: `(guild_id, user_id, channel_id, date)`.
-
-#### `voice_sessions`
-
-Сессии voice: `id`, `guild_id`, `user_id`, `channel_id`, `started_at`, `ended_at` NULLABLE, `duration_seconds` NULLABLE.  
-Открытые сессии (`ended_at IS NULL`) восстанавливаются/закрываются при restart.
-
-#### `reaction_statistics`
-
-Полученные реакции: `guild_id`, `user_id` (автор сообщения), `emoji`, `date`, `count` — или агрегат `count` без emoji, если достаточно для топов.  
-Минимально для ТЗ: количество полученных реакций по пользователю/дате.
-
-#### `events`
-
-`id`, `guild_id`, `title`, `description`, `starts_at`, `max_participants`, `channel_id`, `organizer_id`, `message_id`, `status` (`scheduled`/`cancelled`/`completed`), timestamps.
-
-#### `event_participants`
-
-`event_id`, `user_id`, `joined_at`, PK `(event_id, user_id)`.
-
-#### `quotes`
-
-`id`, `guild_id`, `content`, `author_id`, `channel_id`, `message_id` NULLABLE, `added_by`, `created_at` (дата исходного сообщения), `saved_at`, `reactions_snapshot` (JSON: emoji→count).
-
-#### `custom_roles`
-
-Связь Discord-ролей с логикой бота: `id`, `guild_id`, `role_id`, `owner_id` NULLABLE (персональная), `kind` (`managed`/`personal`), `rgb_enabled`, `rgb_speed`, `rgb_hue`, timestamps.
-
-#### `role_animations`
-
-Состояние RGB: `guild_id`, `role_id`, `enabled`, `hue` (0–360), `interval_seconds`, `updated_at`.  
-Может быть объединено с `custom_roles`, если дублирование не нужно — решение при реализации: **предпочесть одну таблицу `custom_roles` + поля анимации**, отдельную `role_animations` только если понадобится история/несколько режимов.
-
-#### `proposals`
-
-`id`, `guild_id`, `number`, `title`/`content`, `author_id`, `channel_id`, `message_id`, `status` (`open`/`passed`/`rejected`/`cancelled`), `ends_at`, `action_type` NULLABLE, `action_payload` JSON NULLABLE, timestamps.
-
-#### `proposal_votes`
-
-`proposal_id`, `user_id`, `vote` (`yes`/`no`), `updated_at`, PK `(proposal_id, user_id)` — один голос, можно менять.
-
-### Связи
-
-- Всё ключевое → `guilds.guild_id`
-- `event_participants.event_id` → `events.id`
-- `proposal_votes.proposal_id` → `proposals.id`
-- `custom_roles.owner_id` → персональная роль пользователя
+`timezone`, каналы (`birthday`/`events`/`proposals`/`quotes`), флаги (`statistics_enabled`, `personal_roles_enabled`, `auto_execute_proposals`, `rgb_enabled`), `birthday_announce_time`, `birthday_reminder_days`, `event_reminder_minutes`, `rgb_interval_seconds` (≥10), `proposal_duration_hours`, `proposal_quorum`, `proposal_pass_ratio`.
 
 ---
 
-## Discord-команды (план)
+## Discord-команды
+
+Реализовано:
 
 ```text
-/birthday set
-/birthday remove
-/birthday list
-/birthday next
+/config
+```
 
+План (ещё нет):
+
+```text
+/birthday set|remove|list|next
 /profile [user]
 /top
-
-/event create
-/event list
-/event info
-/event join
-/event leave
-/event cancel
-
-/quote add
-/quote random
-/quote list
-/quote user
+/event create|list|info|join|leave|cancel
+/quote add|random|list|user
 (Message Context Menu) Add quote
-
-/role create
-/role edit
-/role delete
+/role create|edit|delete
 /myrole
-
-/proposal create
-/proposal list
-/proposal info
-/proposal cancel
-
-/config
+/proposal create|list|info|cancel
 ```
 
 ---
 
 ## Discord Intents
 
-Обязательные:
+Включены в `ErundaBot`:
 
-- `guilds`
-- `members` (Privileged) — профили, joined_at, роли
-- `guild_messages`
-- `message_content` (Privileged) — текст для статистики/цитат
-- `guild_reactions` — полученные реакции
-- `voice_states` — voice-статистика
+- `guilds`, `members` (privileged), `guild_messages`, `message_content` (privileged), `guild_reactions`, `voice_states`
 
 ---
 
-## Discord Permissions (приглашение бота)
+## Discord Permissions
 
-Минимально необходимые:
-
-- View Channels
-- Send Messages
-- Embed Links
-- Attach Files (если понадобится для иконок/вложений)
-- Read Message History
-- Add Reactions (опционально)
-- Manage Roles (роли + RGB + auto-actions)
-- Manage Channels (auto-actions демократии: создание каналов)
-- Use Application Commands
-
-Бот-роль должна стоять выше управляемых ролей.
+См. README: View Channels, Send Messages, Embed Links, Attach Files, Read Message History, Manage Roles, Manage Channels, Use Application Commands.
 
 ---
 
 ## Реализованные функции
 
-Пока ничего не реализовано (пустой репозиторий). Ниже — целевое описание по ТЗ.
+### Ядро
 
-### Дни рождения
+Статус: реализовано
 
-Статус: не начато
+- структура модулей;
+- `ErundaBot` + загрузка cogs + global command sync;
+- SQLite schema для всех планируемых таблиц;
+- `BackgroundTasks` lifecycle stub;
+- ensure guild on ready / guild_join.
 
-Цель: set/remove/list/next; автопоздравление; reminder; timezone гильдии; год опционален.
+### `/config`
 
-### Статистика / Профиль / Топы
+Статус: реализовано (базовый UX)
 
-Статус: не начато
+Реализовано:
 
-Цель: сообщения (user/channel/date), voice (без AFK), реакции; `/profile`; `/top` с Select (категория + период).
+- ephemeral overview embed;
+- Select → каналы / флаги / timezone / время / голосования / RGB;
+- ChannelSelect + Modals;
+- права: Administrator или Manage Server;
+- валидация timezone / HH:MM / числовых границ.
 
-### Ивенты
+### Остальные системы
 
-Статус: не начато
-
-Цель: CRUD + join/leave; Buttons; лимит; напоминания; restore после restart; статус `completed`.
-
-### Цитаты
-
-Статус: не начато
-
-Цель: slash + context menu; snapshot реакций; цитата живёт после удаления исходного сообщения.
-
-### Роли / myrole / RGB
-
-Статус: не начато
-
-Цель: admin `/role`; `/myrole` с лимитами; центральный RGB manager; HSV; безопасный интервал; restore из БД.
-
-### Демократия
-
-Статус: не начато
-
-Цель: предложения, один голос с возможностью смены; авторезультат; настраиваемые правила; optional auto-actions (отключаемые).
-
-### Config
-
-Статус: не начато
-
-Цель: централизованный `/config` для каналов, timezone, флагов, RGB, голосований, personal roles.
+Статус: не начато (дни рождения, статистика, топы, ивенты, цитаты, роли, RGB, демократия).
 
 ---
 
 ## Current Task
 
-Первоначальная инициализация проекта: создан `PROJECT_CONTEXT.md`, зафиксированы архитектура и план.
+Ядро и `/config` готовы.
 
-Следующий шаг:
-
-1. Создать базовую структуру (`main.py`, `bot/`, `requirements.txt`, `.env.example`).
-2. Подключить Discord + SQLite schema.
-3. Реализовать `/config` (минимум) и ядро lifecycle/tasks.
-4. Далее по порядку модулей (см. TODO).
+Следующий шаг: система дней рождения (`/birthday` + автопоздравления).
 
 ---
 
 ## TODO
 
-- [ ] Базовая структура проекта + `requirements.txt` + `.env.example` + README
-- [ ] SQLite schema + database layer
-- [ ] Ядро бота (intents, cogs load, task lifecycle)
-- [ ] `/config` (базовые настройки гильдии)
 - [ ] Система дней рождения
 - [ ] Статистика сообщений / voice / реакций
 - [ ] `/profile` и `/top`
@@ -355,68 +237,64 @@ SQLite, путь из `DATABASE_PATH` (по умолчанию `./data/erunda.db
 
 ## Known Issues
 
-Пока нет (код не написан).
+- Global `tree.sync()` может задерживать появление slash-команд до нескольких минут; при необходимости позже добавить guild-sync для dev.
 
 ---
 
 ## Technical Decisions
 
-- Python 3.12+ (локально обнаружен Python 3.14.2)
+- Python 3.12+ (локально 3.14.2)
 - discord.py 2.x
-- SQLite (stdlib `aiosqlite` для async)
-- Slash Commands + Discord UI (Buttons, Selects, Modals, Context Menus)
-- Бизнес-логика в `services/`, Discord UI в `cogs/` + `views/`
-- Фоновые задачи централизованы в `bot/tasks/`, старт в `setup_hook` / `on_ready` с guard от дублей
-- Timezone: `zoneinfo` + настройка на гильдию (`DEFAULT_TIMEZONE=Europe/Moscow`)
-- RGB: HSV hue step; **один** manager loop; default interval **≥ 10 секунд** на роль (настраиваемо); discord.py сам уважает 429/`retry_after`; не хардкодить bucket Discord
-- «Общая активность» для `/top`: взвешенная метрика (сообщения + voice-минуты + реакции) — точные веса зафиксировать при реализации модуля топов (техническая деталь, не новая подсистема)
-- Personal roles: одна персональная роль на пользователя на гильдию (если иначе — согласовать)
-- Auto-execute proposals: по умолчанию **выключено**; опасные действия только при флаге + проверке permissions
+- aiosqlite + schema bootstrap (без отдельного migration framework пока)
+- `tzdata` в зависимостях — нужен для `zoneinfo` на Windows
+- Slash Commands + UI components
+- бизнес-логика в `services/`, UI в `cogs/` + `views/`
+- фоновые задачи через `BackgroundTasks` (один старт)
+- RGB interval минимум 10 секунд
+- Personal roles: одна на пользователя на гильдию (при реализации)
+- Auto-execute proposals: default off
+- Дефолты голосований: 24ч, кворум 3, pass ratio 0.5
 - Git remote: `https://github.com/K0DDO/ErundaBot.git`, ветка `main`
-- Commit messages: English, lowercase, no trailing period (по ТЗ §42)
+- Commit messages: English, lowercase, no trailing period
 
-### Открытые решения (не блокируют старт ядра)
+### Открытые решения
 
-При реализации соответствующих модулей при необходимости уточнить у пользователя, если выбор меняет UX:
-
-1. Точная формула «общей активности».
-2. Дефолтные правила голосования (кворум / % «за» / длительность).
-3. Набор action_type для автовыполнения предложений.
-4. Минимальный/максимальный интервал RGB и дефолтная скорость `/myrole`.
+1. Точная формула «общей активности» для `/top`.
+2. Набор `action_type` для автовыполнения предложений.
+3. Дефолтная скорость `/myrole` RGB относительно `rgb_interval_seconds`.
 
 ---
 
-## Зависимости (план)
+## Зависимости
 
 | Пакет | Назначение |
 |-------|------------|
-| `discord.py` | Discord API / bots |
+| `discord.py` | Discord API |
 | `aiosqlite` | Async SQLite |
 | `python-dotenv` | `.env` |
-
-Версии зафиксировать в `requirements.txt` при создании структуры.
+| `tzdata` | IANA timezones на Windows |
 
 ---
 
 ## Правила разработки
 
-- Не хранить секреты в коде / Git.
+- Не хранить секреты в коде.
 - Не смешивать DB-логику и Discord UI.
 - Не создавать бесконтрольные background tasks.
 - Учитывать Discord API rate limits.
-- Все административные действия проверяют permissions + иерархию ролей.
-- Все значимые изменения отражаются в `PROJECT_CONTEXT.md` в той же операции.
+- Админ-действия проверяют permissions + иерархию ролей.
+- Значимые изменения отражаются в `PROJECT_CONTEXT.md` в той же операции.
 - Не добавлять несогласованные крупные функции.
-- При неоднозначности, влияющей на UX/архитектуру — сначала предложить варианты пользователю.
-- Код — источник истины при расхождении с `PROJECT_CONTEXT.md`; затем исправить контекст.
+- При неоднозначности UX/архитектуры — сначала предложить варианты.
+- Код — источник истины при расхождении с этим файлом.
 
 ---
 
 ## Recent Changes
 
-- 2026-08-10 — репозиторий пустой; создан `PROJECT_CONTEXT.md` с архитектурой и планом по ТЗ
-- 2026-08-10 — добавлен `.gitignore`
-- 2026-08-10 — инициализация Git (`main`) и remote `origin` → `https://github.com/K0DDO/ErundaBot.git`
+- 2026-08-10 — базовая структура, SQLite schema, `ErundaBot`, `/config`, README, `.env.example`
+- 2026-08-10 — добавлен `tzdata` для timezone на Windows
+- 2026-08-10 — создан `PROJECT_CONTEXT.md`, git init + remote
 
 ---
 
