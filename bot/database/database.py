@@ -8,7 +8,7 @@ from typing import Any
 
 import aiosqlite
 
-from .models import GUILD_CONFIG_FIELDS, GuildConfig
+from .models import GUILD_CONFIG_FIELDS, Birthday, GuildConfig
 
 log = logging.getLogger(__name__)
 
@@ -171,6 +171,16 @@ CREATE TABLE IF NOT EXISTS proposal_votes (
     PRIMARY KEY (proposal_id, user_id),
     FOREIGN KEY (proposal_id) REFERENCES proposals(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS birthday_notifications (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    event_date TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('announce', 'reminder')),
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id, event_date, kind),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
 """
 
 
@@ -261,3 +271,92 @@ class Database:
         cursor = await self.connection.execute("SELECT guild_id FROM guilds")
         rows = await cursor.fetchall()
         return [int(row["guild_id"]) for row in rows]
+
+    async def list_guilds(self) -> list[GuildConfig]:
+        cursor = await self.connection.execute("SELECT * FROM guilds")
+        rows = await cursor.fetchall()
+        return [GuildConfig.from_row(row) for row in rows]
+
+    async def upsert_birthday(
+        self,
+        guild_id: int,
+        user_id: int,
+        day: int,
+        month: int,
+        year: int | None,
+    ) -> Birthday:
+        await self.ensure_guild(guild_id)
+        await self.connection.execute(
+            """
+            INSERT INTO birthdays (guild_id, user_id, day, month, year)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                day = excluded.day,
+                month = excluded.month,
+                year = excluded.year
+            """,
+            (guild_id, user_id, day, month, year),
+        )
+        await self.connection.commit()
+        birthday = await self.get_birthday(guild_id, user_id)
+        assert birthday is not None
+        return birthday
+
+    async def get_birthday(self, guild_id: int, user_id: int) -> Birthday | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM birthdays WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return Birthday.from_row(row)
+
+    async def remove_birthday(self, guild_id: int, user_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM birthdays WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def list_birthdays(self, guild_id: int) -> list[Birthday]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM birthdays WHERE guild_id = ?",
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        return [Birthday.from_row(row) for row in rows]
+
+    async def was_birthday_notified(
+        self,
+        guild_id: int,
+        user_id: int,
+        event_date: str,
+        kind: str,
+    ) -> bool:
+        cursor = await self.connection.execute(
+            """
+            SELECT 1 FROM birthday_notifications
+            WHERE guild_id = ? AND user_id = ? AND event_date = ? AND kind = ?
+            """,
+            (guild_id, user_id, event_date, kind),
+        )
+        return await cursor.fetchone() is not None
+
+    async def mark_birthday_notified(
+        self,
+        guild_id: int,
+        user_id: int,
+        event_date: str,
+        kind: str,
+    ) -> None:
+        await self.connection.execute(
+            """
+            INSERT OR IGNORE INTO birthday_notifications
+                (guild_id, user_id, event_date, kind)
+            VALUES (?, ?, ?, ?)
+            """,
+            (guild_id, user_id, event_date, kind),
+        )
+        await self.connection.commit()

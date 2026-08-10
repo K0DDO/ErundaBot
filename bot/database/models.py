@@ -53,6 +53,25 @@ class GuildConfig:
         )
 
 
+@dataclass(slots=True)
+class Birthday:
+    guild_id: int
+    user_id: int
+    day: int
+    month: int
+    year: int | None = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> Birthday:
+        return cls(
+            guild_id=row["guild_id"],
+            user_id=row["user_id"],
+            day=row["day"],
+            month=row["month"],
+            year=row["year"],
+        )
+
+
 # Columns that /config may update (whitelist).
 GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
     {
