@@ -8,10 +8,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.bot import ErundaBot
 from bot.utils.embeds import base_embed, error_embed, success_embed
-
-if TYPE_CHECKING:
-    from bot.bot import ErundaBot
 
 
 class QuotesCog(commands.Cog):
@@ -106,30 +104,38 @@ class QuotesCog(commands.Cog):
             embed.add_field(name=f"#{q.id}", value=f'"{preview}"', inline=False)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.context_menu(name="Add quote")
-    @app_commands.guild_only()
-    async def add_quote_context(self, interaction: discord.Interaction, message: discord.Message) -> None:
-        if message.author.bot:
-            await interaction.response.send_message(
-                embed=error_embed("Нельзя цитировать ботов"),
-                ephemeral=True,
-            )
-            return
-        try:
-            quote = await self.bot.quote_service.add_from_message(message, interaction.user.id)
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
+
+@app_commands.context_menu(name="Add quote")
+@app_commands.guild_only()
+async def add_quote_context(
+    interaction: discord.Interaction,
+    message: discord.Message,
+) -> None:
+    bot = interaction.client
+    if not isinstance(bot, ErundaBot):
+        return
+    if message.guild is None or message.author.bot:
         await interaction.response.send_message(
-            embed=success_embed("Цитата сохранена"),
+            embed=error_embed("Нельзя цитировать это сообщение"),
             ephemeral=True,
         )
-        config = await self.bot.config_service.get(message.guild.id)
-        if config.quotes_channel_id:
-            channel = message.guild.get_channel(config.quotes_channel_id)
-            if channel and hasattr(channel, "send"):
-                await channel.send(embed=self.bot.quote_service.format_quote_embed(quote))
+        return
+    try:
+        quote = await bot.quote_service.add_from_message(message, interaction.user.id)
+    except ValueError as exc:
+        await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+        return
+    await interaction.response.send_message(
+        embed=success_embed("Цитата сохранена"),
+        ephemeral=True,
+    )
+    config = await bot.config_service.get(message.guild.id)
+    if config.quotes_channel_id:
+        channel = message.guild.get_channel(config.quotes_channel_id)
+        if channel and hasattr(channel, "send"):
+            await channel.send(embed=bot.quote_service.format_quote_embed(quote))
 
 
 async def setup(bot: ErundaBot) -> None:
     await bot.add_cog(QuotesCog(bot))
+    bot.tree.add_command(add_quote_context)
