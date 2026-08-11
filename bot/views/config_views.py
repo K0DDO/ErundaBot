@@ -26,7 +26,6 @@ FLAG_OPTIONS = (
     ("statistics_enabled", "Статистика"),
     ("personal_roles_enabled", "Персональные роли"),
     ("auto_execute_proposals", "Автовыполнение предложений"),
-    ("rgb_enabled", "RGB-роли"),
 )
 
 
@@ -51,8 +50,7 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
         value=(
             f"Статистика: {bool_label(config.statistics_enabled)}\n"
             f"Персональные роли: {bool_label(config.personal_roles_enabled)}\n"
-            f"Автовыполнение: {bool_label(config.auto_execute_proposals)}\n"
-            f"RGB: {bool_label(config.rgb_enabled)}"
+            f"Автовыполнение: {bool_label(config.auto_execute_proposals)}"
         ),
         inline=False,
     )
@@ -63,7 +61,6 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
             f"Поздравления: `{config.birthday_announce_time}`\n"
             f"Напоминание ДР (дней): `{config.birthday_reminder_days}`\n"
             f"Напоминание ивента (мин): `{config.event_reminder_minutes}`\n"
-            f"RGB интервал (сек): `{config.rgb_interval_seconds}`\n"
             f"Длительность голосования (ч): `{config.proposal_duration_hours}`\n"
             f"Кворум: `{config.proposal_quorum}`\n"
             f"Порог принятия: `{config.proposal_pass_ratio:.0%}`"
@@ -109,7 +106,6 @@ class ConfigPanel(discord.ui.View):
             discord.SelectOption(label="Timezone", value="timezone", emoji="🌍"),
             discord.SelectOption(label="Время уведомлений", value="times", emoji="⏰"),
             discord.SelectOption(label="Голосования", value="votes", emoji="🗳️"),
-            discord.SelectOption(label="RGB", value="rgb", emoji="🌈"),
         ],
     )
     async def section_select(
@@ -136,8 +132,6 @@ class ConfigPanel(discord.ui.View):
             await interaction.response.send_modal(TimesModal(self.bot, self.guild_id))
         elif value == "votes":
             await interaction.response.send_modal(VotesModal(self.bot, self.guild_id))
-        elif value == "rgb":
-            await interaction.response.send_modal(RgbModal(self.bot, self.guild_id))
 
 
 class ChannelFieldSelect(discord.ui.Select):
@@ -391,42 +385,6 @@ class VotesModal(discord.ui.Modal, title="Правила голосований"
                     f"Кворум: `{config.proposal_quorum}`\n"
                     f"Порог: `{config.proposal_pass_ratio:.0%}`"
                 ),
-            ),
-            ephemeral=True,
-        )
-
-
-class RgbModal(discord.ui.Modal, title="RGB настройки"):
-    interval = discord.ui.TextInput(
-        label="Интервал смены цвета (сек, мин. 10)",
-        placeholder="10",
-        required=True,
-        max_length=4,
-    )
-
-    def __init__(self, bot: ErundaBot, guild_id: int) -> None:
-        super().__init__()
-        self.bot = bot
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        try:
-            config = await self.bot.config_service.set_int(
-                self.guild_id,
-                "rgb_interval_seconds",
-                int(str(self.interval.value).strip()),
-            )
-        except ValueError as exc:
-            await interaction.response.send_message(
-                embed=error_embed("Ошибка", str(exc)),
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            embed=success_embed(
-                "RGB обновлён",
-                f"Интервал: `{config.rgb_interval_seconds}` сек",
             ),
             ephemeral=True,
         )

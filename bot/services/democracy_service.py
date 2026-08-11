@@ -143,7 +143,7 @@ class DemocracyService:
         elif proposal.action_type == "bot_config":
             field = payload.get("field")
             value = payload.get("value")
-            if field not in {"statistics_enabled", "personal_roles_enabled", "rgb_enabled"}:
+            if field not in {"statistics_enabled", "personal_roles_enabled"}:
                 raise ValueError("Недопустимое поле конфигурации")
             await self.db.update_guild(guild.id, **{field: int(bool(value))})
 

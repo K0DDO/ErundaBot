@@ -1,0 +1,52 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: erunda-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy over SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          ERUNDA_PATH: ${{ secrets.ERUNDA_PATH }}
+        run: |
+          set -euo pipefail
+          ssh -o StrictHostKeyChecking=yes "${VPS_USER}@${VPS_HOST}" \
+            "export ERUNDA_PATH='${ERUNDA_PATH:-}'; bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          APP_DIR=""
+          for candidate in ${ERUNDA_PATH:-} "$HOME/erunda" /opt/erunda; do
+            if [[ -n "${candidate}" && -d "${candidate}" && -f "${candidate}/docker-compose.yml" ]]; then
+              APP_DIR="${candidate}"
+              break
+            fi
+          done
+          if [[ -z "${APP_DIR}" ]]; then
+            echo "Erunda install not found (tried ERUNDA_PATH, ~/erunda, /opt/erunda)" >&2
+            exit 1
+          fi
+
+          cd "${APP_DIR}"
+          bash scripts/deploy.sh
+          REMOTE

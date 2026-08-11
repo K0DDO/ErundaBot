@@ -41,7 +41,6 @@ class BackgroundTasks:
             self.event_loop.start()
         if not self.proposal_loop.is_running():
             self.proposal_loop.start()
-        await self.bot.rgb_manager.start()
         log.info("Background tasks started")
 
     async def stop(self) -> None:
@@ -51,7 +50,6 @@ class BackgroundTasks:
         for loop in (self.birthday_loop, self.event_loop, self.proposal_loop):
             if loop.is_running():
                 loop.cancel()
-        await self.bot.rgb_manager.stop()
         log.info("Background tasks stopped")
 
     @tasks.loop(minutes=1)

@@ -45,7 +45,6 @@ ErundaBot/
 │   │   ├── event_service.py
 │   │   ├── quote_service.py
 │   │   ├── role_service.py
-│   │   ├── rgb_manager.py
 │   │   └── democracy_service.py
 │   ├── views/
 │   │   ├── config_views.py
@@ -72,7 +71,7 @@ ErundaBot/
 /profile [user]
 /top
 /event create|list|info|join|leave|cancel
-/quote add|random|list|user
+/quote add|random|list|user|edit|delete
 Apps → Add quote (context menu)
 /myrole edit|delete
 /proposal create|list|info|cancel
@@ -83,7 +82,12 @@ Apps → Add quote (context menu)
 - `birthday_loop` — поздравления и напоминания
 - `event_loop` — напоминания, старт, auto-complete (+2ч)
 - `proposal_loop` — закрытие голосований, результат, auto-actions
-- `RgbManager` — централизованный HSV loop (≥10 сек)
+
+## Deployment
+
+- Docker + `docker-compose.yml`, env: `.env.production` (server-only)
+- GitHub Actions: push `main` → SSH deploy на `deploy@107.172.44.182`
+- См. `DEPLOY.md`
 
 ## База данных
 
@@ -98,7 +102,10 @@ Apps → Add quote (context menu)
 Slash + context menu; автор показывается текстом (`author_display`), без упоминания; `/quote add` — параметры `name` и/или `author`.
 
 ### Роли
-Только персональные: `/myrole edit`, `/myrole delete` (нужен флаг в `/config`). RGB через `custom_roles`.
+Только персональные: `/myrole edit`, `/myrole delete` (нужен флаг в `/config`).
+
+### Цитаты
+Редактирование/удаление по `#id`; дата через `/quote edit date:`.
 
 ### Ивенты
 Modal create, list/info/join/leave/cancel, кнопки на embed, лимит участников, restore views после restart, напоминания по `event_reminder_minutes`.
@@ -119,13 +126,12 @@ Modal create, list/info/join/leave/cancel, кнопки на embed, лимит �
 ## Technical Decisions
 
 - Overall activity = messages + voice_minutes + reactions
-- RGB: один `RgbManager`, hue step по speed, min interval 10s
 - Auto-execute: default off
 - Vote defaults: 24h / quorum 3 / ratio 0.5
 
 ## Recent Changes
 
-- 2026-08-11 — доска ДР в канале, цитаты без @, только `/myrole edit|delete`
+- 2026-08-11 — quote edit/delete/date, RGB removed, docker deploy
 - 2026-08-11 — ивенты, цитаты, роли/RGB, демократия
 - 2026-08-10 — статистика, дни рождения, ядро
 

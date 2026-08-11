@@ -1,0 +1,9 @@
+services:
+  erunda-bot:
+    build: .
+    container_name: erunda-bot
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    volumes:
+      - ./data:/app/data

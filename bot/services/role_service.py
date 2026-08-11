@@ -6,7 +6,7 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import CustomRole
-from bot.utils.colors import hsv_to_discord_color, parse_hex_color
+from bot.utils.colors import parse_hex_color
 from bot.utils.permissions import bot_can_manage_role, is_guild_admin
 
 
@@ -20,7 +20,6 @@ class RoleService:
         bot_member: discord.Member,
         name: str,
         color: int | None = None,
-        rgb: bool = False,
     ) -> tuple[discord.Role, CustomRole]:
         if not bot_member.guild_permissions.manage_roles:
             raise ValueError("У бота нет права Manage Roles")
@@ -30,8 +29,6 @@ class RoleService:
             role.id,
             owner_id=None,
             kind="managed",
-            rgb_enabled=rgb,
-            rgb_hue=0.0,
         )
         return role, record
 
@@ -43,23 +40,18 @@ class RoleService:
         *,
         name: str | None = None,
         color: int | None = None,
-        rgb: bool | None = None,
     ) -> CustomRole:
         if not bot_can_manage_role(bot_member, role):
             raise ValueError("Бот не может изменить эту роль")
         kwargs: dict = {}
         if name is not None:
             kwargs["name"] = name[:100]
-        if color is not None and rgb is not True:
+        if color is not None:
             kwargs["colour"] = discord.Colour(color)
         await role.edit(**kwargs)
         record = await self.db.get_custom_role_by_role_id(guild.id, role.id)
         if record is None:
             record = await self.db.save_custom_role(guild.id, role.id, None, "managed")
-        if rgb is not None:
-            record = await self.db.update_custom_role(
-                guild.id, role.id, rgb_enabled=int(rgb)
-            )
         return record
 
     async def delete_role(
@@ -116,8 +108,6 @@ class RoleService:
         *,
         name: str | None = None,
         color: int | None = None,
-        rgb_enabled: bool | None = None,
-        rgb_speed: float | None = None,
     ) -> tuple[discord.Role, CustomRole]:
         record = await self.db.get_personal_role(guild.id, member.id)
         if record is None:
@@ -133,17 +123,10 @@ class RoleService:
         edit_kwargs: dict = {}
         if name is not None:
             edit_kwargs["name"] = name[:100]
-        if color is not None and not (rgb_enabled or record.rgb_enabled):
+        if color is not None:
             edit_kwargs["colour"] = discord.Colour(color)
         if edit_kwargs:
             await role.edit(**edit_kwargs)
-        updates: dict = {}
-        if rgb_enabled is not None:
-            updates["rgb_enabled"] = int(rgb_enabled)
-        if rgb_speed is not None:
-            updates["rgb_speed"] = max(0.1, min(rgb_speed, 5.0))
-        if updates:
-            record = await self.db.update_custom_role(guild.id, role.id, **updates)
         return role, record
 
     async def delete_personal_role(

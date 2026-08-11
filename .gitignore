@@ -1,4 +1,7 @@
 .env
+.env.production
+data/*
+!data/.gitkeep
 data/*.db
 data/*.db-*
 __pycache__/

@@ -57,6 +57,94 @@ class QuotesCog(commands.Cog):
             embed=self.bot.quote_service.format_quote_embed(quote, interaction.guild),
         )
 
+    @quote.command(name="edit", description="Изменить цитату по номеру")
+    @app_commands.describe(
+        quote_id="Номер цитаты (см. /quote list или footer у цитаты)",
+        text="Новый текст",
+        author="Новый автор для поиска (необязательно)",
+        name="Новое имя для отображения (без @, необязательно)",
+        date="Новая дата (ДД.ММ.ГГГГ, необязательно)",
+    )
+    @app_commands.guild_only()
+    async def quote_edit(
+        self,
+        interaction: discord.Interaction,
+        quote_id: int,
+        text: str | None = None,
+        author: discord.Member | None = None,
+        name: str | None = None,
+        date: str | None = None,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        if text is None and author is None and name is None and date is None:
+            await interaction.response.send_message(
+                embed=error_embed("Укажи текст, имя, автора или дату для изменения"),
+                ephemeral=True,
+            )
+            return
+
+        update_author_id = author is not None
+        update_author_display = name is not None or author is not None
+        author_display: str | None = None
+        author_id: int | None = None
+        if author is not None:
+            author_id = author.id
+            author_display = name.strip() if name else author.display_name
+        elif name is not None:
+            author_display = name.strip()
+
+        created_at: str | None = None
+        if date is not None:
+            try:
+                created_at = self.bot.quote_service.parse_date(date)
+            except ValueError as exc:
+                await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+                return
+
+        try:
+            quote = await self.bot.quote_service.update(
+                interaction.guild.id,
+                quote_id,
+                interaction.user,
+                content=text,
+                author_id=author_id,
+                author_display=author_display,
+                update_author_id=update_author_id,
+                update_author_display=update_author_display,
+                created_at=created_at,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            embed=self.bot.quote_service.format_quote_embed(quote, interaction.guild),
+        )
+
+    @quote.command(name="delete", description="Удалить цитату по номеру")
+    @app_commands.describe(quote_id="Номер цитаты")
+    @app_commands.guild_only()
+    async def quote_delete(
+        self,
+        interaction: discord.Interaction,
+        quote_id: int,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        try:
+            await self.bot.quote_service.delete(
+                interaction.guild.id,
+                quote_id,
+                interaction.user,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            embed=success_embed(f"Цитата #{quote_id} удалена"),
+            ephemeral=True,
+        )
+
     @quote.command(name="random", description="Случайная цитата")
     @app_commands.guild_only()
     async def quote_random(self, interaction: discord.Interaction) -> None:

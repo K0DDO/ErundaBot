@@ -35,7 +35,6 @@ class ConfigService:
             "statistics_enabled",
             "personal_roles_enabled",
             "auto_execute_proposals",
-            "rgb_enabled",
         }
         if field not in allowed:
             raise ValueError(f"Invalid flag field: {field}")
@@ -55,7 +54,6 @@ class ConfigService:
         bounds: dict[str, tuple[int, int]] = {
             "birthday_reminder_days": (0, 30),
             "event_reminder_minutes": (5, 10080),
-            "rgb_interval_seconds": (10, 3600),
             "proposal_duration_hours": (1, 720),
             "proposal_quorum": (1, 1000),
         }

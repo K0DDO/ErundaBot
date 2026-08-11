@@ -857,6 +857,32 @@ class Database:
         row = await cursor.fetchone()
         return int(row["c"])
 
+    async def save_quote(self, quote: Quote) -> None:
+        await self.connection.execute(
+            """
+            UPDATE quotes
+            SET content = ?, author_id = ?, author_display = ?, created_at = ?
+            WHERE id = ? AND guild_id = ?
+            """,
+            (
+                quote.content,
+                quote.author_id,
+                quote.author_display,
+                quote.created_at,
+                quote.id,
+                quote.guild_id,
+            ),
+        )
+        await self.connection.commit()
+
+    async def delete_quote(self, quote_id: int, guild_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM quotes WHERE id = ? AND guild_id = ?",
+            (quote_id, guild_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
     # --- Custom roles ---
 
     async def save_custom_role(

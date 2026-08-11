@@ -15,7 +15,6 @@ from bot.services.config_service import ConfigService
 from bot.services.democracy_service import DemocracyService
 from bot.services.event_service import EventService
 from bot.services.quote_service import QuoteService
-from bot.services.rgb_manager import RgbManager
 from bot.services.role_service import RoleService
 from bot.services.statistics_service import StatisticsService
 from bot.tasks.background import BackgroundTasks
@@ -58,7 +57,6 @@ class ErundaBot(commands.Bot):
         self.quote_service = QuoteService(self.db)
         self.role_service = RoleService(self.db)
         self.democracy_service = DemocracyService(self.db)
-        self.rgb_manager = RgbManager(self)
         self.background = BackgroundTasks(self)
         self._synced = False
 
