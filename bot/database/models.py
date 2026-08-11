@@ -72,6 +72,120 @@ class Birthday:
         )
 
 
+@dataclass(slots=True)
+class Event:
+    id: int
+    guild_id: int
+    title: str
+    description: str
+    starts_at: str
+    max_participants: int | None
+    channel_id: int | None
+    organizer_id: int
+    message_id: int | None
+    status: str
+
+    @classmethod
+    def from_row(cls, row: Any) -> Event:
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            title=row["title"],
+            description=row["description"],
+            starts_at=row["starts_at"],
+            max_participants=row["max_participants"],
+            channel_id=row["channel_id"],
+            organizer_id=row["organizer_id"],
+            message_id=row["message_id"],
+            status=row["status"],
+        )
+
+
+@dataclass(slots=True)
+class Quote:
+    id: int
+    guild_id: int
+    content: str
+    author_id: int
+    channel_id: int | None
+    message_id: int | None
+    added_by: int
+    created_at: str | None
+    saved_at: str
+    reactions_snapshot: str
+
+    @classmethod
+    def from_row(cls, row: Any) -> Quote:
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            content=row["content"],
+            author_id=row["author_id"],
+            channel_id=row["channel_id"],
+            message_id=row["message_id"],
+            added_by=row["added_by"],
+            created_at=row["created_at"],
+            saved_at=row["saved_at"],
+            reactions_snapshot=row["reactions_snapshot"],
+        )
+
+
+@dataclass(slots=True)
+class CustomRole:
+    id: int
+    guild_id: int
+    role_id: int
+    owner_id: int | None
+    kind: str
+    rgb_enabled: bool
+    rgb_speed: float
+    rgb_hue: float
+
+    @classmethod
+    def from_row(cls, row: Any) -> CustomRole:
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            role_id=row["role_id"],
+            owner_id=row["owner_id"],
+            kind=row["kind"],
+            rgb_enabled=bool(row["rgb_enabled"]),
+            rgb_speed=float(row["rgb_speed"]),
+            rgb_hue=float(row["rgb_hue"]),
+        )
+
+
+@dataclass(slots=True)
+class Proposal:
+    id: int
+    guild_id: int
+    number: int
+    content: str
+    author_id: int
+    channel_id: int | None
+    message_id: int | None
+    status: str
+    ends_at: str
+    action_type: str | None
+    action_payload: str | None
+
+    @classmethod
+    def from_row(cls, row: Any) -> Proposal:
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            number=row["number"],
+            content=row["content"],
+            author_id=row["author_id"],
+            channel_id=row["channel_id"],
+            message_id=row["message_id"],
+            status=row["status"],
+            ends_at=row["ends_at"],
+            action_type=row["action_type"],
+            action_payload=row["action_payload"],
+        )
+
+
 # Columns that /config may update (whitelist).
 GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
     {

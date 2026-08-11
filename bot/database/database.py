@@ -8,7 +8,15 @@ from typing import Any
 
 import aiosqlite
 
-from .models import GUILD_CONFIG_FIELDS, Birthday, GuildConfig
+from .models import (
+    GUILD_CONFIG_FIELDS,
+    Birthday,
+    CustomRole,
+    Event,
+    GuildConfig,
+    Proposal,
+    Quote,
+)
 
 log = logging.getLogger(__name__)
 
@@ -180,6 +188,14 @@ CREATE TABLE IF NOT EXISTS birthday_notifications (
     sent_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (guild_id, user_id, event_date, kind),
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS event_notifications (
+    event_id INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('reminder', 'start')),
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (event_id, kind),
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
 );
 """
 
@@ -595,3 +611,443 @@ class Database:
         if user_id is not None:
             return totals.get(user_id, 0)
         return sorted(totals.items(), key=lambda item: item[1], reverse=True)
+
+    # --- Events ---
+
+    async def create_event(
+        self,
+        guild_id: int,
+        title: str,
+        description: str,
+        starts_at: str,
+        organizer_id: int,
+        max_participants: int | None,
+        channel_id: int | None,
+    ) -> Event:
+        await self.ensure_guild(guild_id)
+        cursor = await self.connection.execute(
+            """
+            INSERT INTO events (
+                guild_id, title, description, starts_at,
+                max_participants, channel_id, organizer_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, title, description, starts_at, max_participants, channel_id, organizer_id),
+        )
+        await self.connection.commit()
+        event = await self.get_event(cursor.lastrowid)
+        assert event is not None
+        return event
+
+    async def get_event(self, event_id: int) -> Event | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM events WHERE id = ?",
+            (event_id,),
+        )
+        row = await cursor.fetchone()
+        return Event.from_row(row) if row else None
+
+    async def get_event_by_message(self, message_id: int) -> Event | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM events WHERE message_id = ?",
+            (message_id,),
+        )
+        row = await cursor.fetchone()
+        return Event.from_row(row) if row else None
+
+    async def update_event(self, event_id: int, **fields: Any) -> Event:
+        allowed = {"title", "description", "starts_at", "max_participants", "channel_id", "message_id", "status"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Unknown event fields: {sorted(unknown)}")
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [event_id]
+        await self.connection.execute(
+            f"UPDATE events SET {assignments}, updated_at = datetime('now') WHERE id = ?",
+            values,
+        )
+        await self.connection.commit()
+        event = await self.get_event(event_id)
+        assert event is not None
+        return event
+
+    async def list_events(
+        self,
+        guild_id: int,
+        status: str | None = None,
+    ) -> list[Event]:
+        if status:
+            cursor = await self.connection.execute(
+                "SELECT * FROM events WHERE guild_id = ? AND status = ? ORDER BY starts_at",
+                (guild_id, status),
+            )
+        else:
+            cursor = await self.connection.execute(
+                "SELECT * FROM events WHERE guild_id = ? ORDER BY starts_at DESC",
+                (guild_id,),
+            )
+        rows = await cursor.fetchall()
+        return [Event.from_row(r) for r in rows]
+
+    async def list_scheduled_events(self) -> list[Event]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM events WHERE status = 'scheduled' ORDER BY starts_at",
+        )
+        rows = await cursor.fetchall()
+        return [Event.from_row(r) for r in rows]
+
+    async def add_event_participant(self, event_id: int, user_id: int) -> None:
+        await self.connection.execute(
+            "INSERT OR IGNORE INTO event_participants (event_id, user_id) VALUES (?, ?)",
+            (event_id, user_id),
+        )
+        await self.connection.commit()
+
+    async def remove_event_participant(self, event_id: int, user_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM event_participants WHERE event_id = ? AND user_id = ?",
+            (event_id, user_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def is_event_participant(self, event_id: int, user_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "SELECT 1 FROM event_participants WHERE event_id = ? AND user_id = ?",
+            (event_id, user_id),
+        )
+        return await cursor.fetchone() is not None
+
+    async def count_event_participants(self, event_id: int) -> int:
+        cursor = await self.connection.execute(
+            "SELECT COUNT(*) AS c FROM event_participants WHERE event_id = ?",
+            (event_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["c"])
+
+    async def list_event_participants(self, event_id: int) -> list[int]:
+        cursor = await self.connection.execute(
+            "SELECT user_id FROM event_participants WHERE event_id = ? ORDER BY joined_at",
+            (event_id,),
+        )
+        rows = await cursor.fetchall()
+        return [int(r["user_id"]) for r in rows]
+
+    async def was_event_notified(self, event_id: int, kind: str) -> bool:
+        cursor = await self.connection.execute(
+            "SELECT 1 FROM event_notifications WHERE event_id = ? AND kind = ?",
+            (event_id, kind),
+        )
+        return await cursor.fetchone() is not None
+
+    async def mark_event_notified(self, event_id: int, kind: str) -> None:
+        await self.connection.execute(
+            "INSERT OR IGNORE INTO event_notifications (event_id, kind) VALUES (?, ?)",
+            (event_id, kind),
+        )
+        await self.connection.commit()
+
+    # --- Quotes ---
+
+    async def add_quote(
+        self,
+        guild_id: int,
+        content: str,
+        author_id: int,
+        added_by: int,
+        channel_id: int | None,
+        message_id: int | None,
+        created_at: str | None,
+        reactions_snapshot: str,
+    ) -> Quote:
+        await self.ensure_guild(guild_id)
+        cursor = await self.connection.execute(
+            """
+            INSERT INTO quotes (
+                guild_id, content, author_id, channel_id, message_id,
+                added_by, created_at, reactions_snapshot
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id, content, author_id, channel_id, message_id,
+                added_by, created_at, reactions_snapshot,
+            ),
+        )
+        await self.connection.commit()
+        quote = await self.get_quote(cursor.lastrowid)
+        assert quote is not None
+        return quote
+
+    async def get_quote(self, quote_id: int) -> Quote | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM quotes WHERE id = ?",
+            (quote_id,),
+        )
+        row = await cursor.fetchone()
+        return Quote.from_row(row) if row else None
+
+    async def list_quotes(
+        self,
+        guild_id: int,
+        author_id: int | None = None,
+        limit: int = 10,
+    ) -> list[Quote]:
+        if author_id is not None:
+            cursor = await self.connection.execute(
+                """
+                SELECT * FROM quotes WHERE guild_id = ? AND author_id = ?
+                ORDER BY saved_at DESC LIMIT ?
+                """,
+                (guild_id, author_id, limit),
+            )
+        else:
+            cursor = await self.connection.execute(
+                "SELECT * FROM quotes WHERE guild_id = ? ORDER BY saved_at DESC LIMIT ?",
+                (guild_id, limit),
+            )
+        rows = await cursor.fetchall()
+        return [Quote.from_row(r) for r in rows]
+
+    async def random_quote(self, guild_id: int) -> Quote | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM quotes WHERE guild_id = ? ORDER BY RANDOM() LIMIT 1",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return Quote.from_row(row) if row else None
+
+    async def count_quotes(self, guild_id: int, author_id: int | None = None) -> int:
+        if author_id is not None:
+            cursor = await self.connection.execute(
+                "SELECT COUNT(*) AS c FROM quotes WHERE guild_id = ? AND author_id = ?",
+                (guild_id, author_id),
+            )
+        else:
+            cursor = await self.connection.execute(
+                "SELECT COUNT(*) AS c FROM quotes WHERE guild_id = ?",
+                (guild_id,),
+            )
+        row = await cursor.fetchone()
+        return int(row["c"])
+
+    # --- Custom roles ---
+
+    async def save_custom_role(
+        self,
+        guild_id: int,
+        role_id: int,
+        owner_id: int | None,
+        kind: str,
+        rgb_enabled: bool = False,
+        rgb_speed: float = 1.0,
+        rgb_hue: float = 0.0,
+    ) -> CustomRole:
+        await self.ensure_guild(guild_id)
+        cursor = await self.connection.execute(
+            """
+            INSERT INTO custom_roles (
+                guild_id, role_id, owner_id, kind, rgb_enabled, rgb_speed, rgb_hue
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, role_id) DO UPDATE SET
+                owner_id = excluded.owner_id,
+                kind = excluded.kind,
+                rgb_enabled = excluded.rgb_enabled,
+                rgb_speed = excluded.rgb_speed,
+                rgb_hue = excluded.rgb_hue,
+                updated_at = datetime('now')
+            """,
+            (guild_id, role_id, owner_id, kind, int(rgb_enabled), rgb_speed, rgb_hue),
+        )
+        await self.connection.commit()
+        role = await self.get_custom_role_by_role_id(guild_id, role_id)
+        assert role is not None
+        return role
+
+    async def get_custom_role_by_role_id(
+        self, guild_id: int, role_id: int
+    ) -> CustomRole | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM custom_roles WHERE guild_id = ? AND role_id = ?",
+            (guild_id, role_id),
+        )
+        row = await cursor.fetchone()
+        return CustomRole.from_row(row) if row else None
+
+    async def get_personal_role(self, guild_id: int, owner_id: int) -> CustomRole | None:
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM custom_roles
+            WHERE guild_id = ? AND owner_id = ? AND kind = 'personal'
+            """,
+            (guild_id, owner_id),
+        )
+        row = await cursor.fetchone()
+        return CustomRole.from_row(row) if row else None
+
+    async def update_custom_role(self, guild_id: int, role_id: int, **fields: Any) -> CustomRole:
+        allowed = {"rgb_enabled", "rgb_speed", "rgb_hue", "owner_id", "kind"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Unknown custom role fields: {sorted(unknown)}")
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [guild_id, role_id]
+        await self.connection.execute(
+            f"""
+            UPDATE custom_roles SET {assignments}, updated_at = datetime('now')
+            WHERE guild_id = ? AND role_id = ?
+            """,
+            values,
+        )
+        await self.connection.commit()
+        role = await self.get_custom_role_by_role_id(guild_id, role_id)
+        assert role is not None
+        return role
+
+    async def delete_custom_role_record(self, guild_id: int, role_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM custom_roles WHERE guild_id = ? AND role_id = ?",
+            (guild_id, role_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def list_rgb_roles(self) -> list[CustomRole]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM custom_roles WHERE rgb_enabled = 1",
+        )
+        rows = await cursor.fetchall()
+        return [CustomRole.from_row(r) for r in rows]
+
+    # --- Proposals ---
+
+    async def next_proposal_number(self, guild_id: int) -> int:
+        cursor = await self.connection.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM proposals WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"])
+
+    async def create_proposal(
+        self,
+        guild_id: int,
+        number: int,
+        content: str,
+        author_id: int,
+        ends_at: str,
+        channel_id: int | None,
+        action_type: str | None = None,
+        action_payload: str | None = None,
+    ) -> Proposal:
+        await self.ensure_guild(guild_id)
+        cursor = await self.connection.execute(
+            """
+            INSERT INTO proposals (
+                guild_id, number, content, author_id, ends_at,
+                channel_id, action_type, action_payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, number, content, author_id, ends_at, channel_id, action_type, action_payload),
+        )
+        await self.connection.commit()
+        proposal = await self.get_proposal(cursor.lastrowid)
+        assert proposal is not None
+        return proposal
+
+    async def get_proposal(self, proposal_id: int) -> Proposal | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM proposals WHERE id = ?",
+            (proposal_id,),
+        )
+        row = await cursor.fetchone()
+        return Proposal.from_row(row) if row else None
+
+    async def get_proposal_by_message(self, message_id: int) -> Proposal | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM proposals WHERE message_id = ?",
+            (message_id,),
+        )
+        row = await cursor.fetchone()
+        return Proposal.from_row(row) if row else None
+
+    async def update_proposal(self, proposal_id: int, **fields: Any) -> Proposal:
+        allowed = {"status", "message_id", "channel_id", "content", "ends_at"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Unknown proposal fields: {sorted(unknown)}")
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [proposal_id]
+        await self.connection.execute(
+            f"UPDATE proposals SET {assignments}, updated_at = datetime('now') WHERE id = ?",
+            values,
+        )
+        await self.connection.commit()
+        proposal = await self.get_proposal(proposal_id)
+        assert proposal is not None
+        return proposal
+
+    async def list_proposals(
+        self,
+        guild_id: int,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> list[Proposal]:
+        if status:
+            cursor = await self.connection.execute(
+                """
+                SELECT * FROM proposals WHERE guild_id = ? AND status = ?
+                ORDER BY number DESC LIMIT ?
+                """,
+                (guild_id, status, limit),
+            )
+        else:
+            cursor = await self.connection.execute(
+                "SELECT * FROM proposals WHERE guild_id = ? ORDER BY number DESC LIMIT ?",
+                (guild_id, limit),
+            )
+        rows = await cursor.fetchall()
+        return [Proposal.from_row(r) for r in rows]
+
+    async def list_open_proposals(self) -> list[Proposal]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM proposals WHERE status = 'open' ORDER BY ends_at",
+        )
+        rows = await cursor.fetchall()
+        return [Proposal.from_row(r) for r in rows]
+
+    async def set_proposal_vote(
+        self, proposal_id: int, user_id: int, vote: str
+    ) -> None:
+        await self.connection.execute(
+            """
+            INSERT INTO proposal_votes (proposal_id, user_id, vote)
+            VALUES (?, ?, ?)
+            ON CONFLICT(proposal_id, user_id) DO UPDATE SET
+                vote = excluded.vote,
+                updated_at = datetime('now')
+            """,
+            (proposal_id, user_id, vote),
+        )
+        await self.connection.commit()
+
+    async def get_proposal_vote(self, proposal_id: int, user_id: int) -> str | None:
+        cursor = await self.connection.execute(
+            "SELECT vote FROM proposal_votes WHERE proposal_id = ? AND user_id = ?",
+            (proposal_id, user_id),
+        )
+        row = await cursor.fetchone()
+        return row["vote"] if row else None
+
+    async def count_proposal_votes(self, proposal_id: int) -> tuple[int, int]:
+        cursor = await self.connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN vote = 'yes' THEN 1 ELSE 0 END) AS yes_count,
+                SUM(CASE WHEN vote = 'no' THEN 1 ELSE 0 END) AS no_count
+            FROM proposal_votes WHERE proposal_id = ?
+            """,
+            (proposal_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["yes_count"] or 0), int(row["no_count"] or 0)

@@ -2,15 +2,7 @@
 
 ## Название проекта
 
-**Ерунда** — Discord-бот для небольшого Discord-сервера «Ерундульки».
-
-## Цель проекта
-
-Бот для живого небольшого сообщества: дни рождения, статистика и топы, ивенты, цитаты, роли (RGB), демократия.
-
-Не добавлять несогласованные системы (музыка, XP, уровни, экономика и т.п.).
-
----
+**Ерунда** — Discord-бот для сервера «Ерундульки».
 
 ## Status
 
@@ -18,20 +10,16 @@
 - [x] Подключение Discord
 - [x] SQLite
 - [x] Дни рождения
-- [x] Статистика
-- [x] Профиль
-- [x] Топы
-- [ ] Ивенты
-- [ ] Цитаты
-- [ ] Управление ролями
-- [ ] Пользовательские роли (`/myrole`)
-- [ ] RGB-роли
-- [ ] Демократия
-- [ ] Автовыполнение решений демократии
+- [x] Статистика / профиль / топы
+- [x] Ивенты
+- [x] Цитаты
+- [x] Управление ролями
+- [x] Пользовательские роли (`/myrole`)
+- [x] RGB-роли
+- [x] Демократия
+- [x] Автовыполнение решений (опционально, `/config`)
 - [x] `/config`
 - [x] README и `.env.example`
-
----
 
 ## Структура проекта
 
@@ -42,47 +30,39 @@ ErundaBot/
 │   ├── cogs/
 │   │   ├── config.py
 │   │   ├── birthdays.py
-│   │   └── statistics.py
+│   │   ├── statistics.py
+│   │   ├── events.py
+│   │   ├── quotes.py
+│   │   ├── roles.py
+│   │   └── democracy.py
 │   ├── database/
 │   │   ├── database.py
 │   │   └── models.py
 │   ├── services/
 │   │   ├── config_service.py
 │   │   ├── birthday_service.py
-│   │   └── statistics_service.py
+│   │   ├── statistics_service.py
+│   │   ├── event_service.py
+│   │   ├── quote_service.py
+│   │   ├── role_service.py
+│   │   ├── rgb_manager.py
+│   │   └── democracy_service.py
 │   ├── views/
 │   │   ├── config_views.py
 │   │   ├── birthday_views.py
-│   │   └── top_views.py
+│   │   ├── top_views.py
+│   │   ├── event_views.py
+│   │   ├── role_views.py
+│   │   └── proposal_views.py
 │   ├── tasks/background.py
 │   └── utils/
 ├── data/
 ├── main.py
 ├── requirements.txt
 ├── .env.example
-├── .gitignore
 ├── README.md
 └── PROJECT_CONTEXT.md
 ```
-
----
-
-## Архитектура
-
-`cogs/views` → `services` → `database`; `BackgroundTasks` для loops.
-
-Background:
-
-- `birthday_loop` (1 мин)
-- voice recovery при `on_ready` (один раз, guard)
-
----
-
-## База данных
-
-Таблицы: `guilds`, `users`, `birthdays`, `birthday_notifications`, `message_statistics`, `voice_sessions`, `reaction_statistics`, `events`, `event_participants`, `quotes`, `custom_roles`, `proposals`, `proposal_votes`.
-
----
 
 ## Discord-команды
 
@@ -91,88 +71,60 @@ Background:
 /birthday set|remove|list|next
 /profile [user]
 /top
+/event create|list|info|join|leave|cancel
+/quote add|random|list|user
+Apps → Add quote (context menu)
+/role create|edit|delete
+/myrole
+/proposal create|list|info|cancel
 ```
 
----
+## Background tasks
+
+- `birthday_loop` — поздравления и напоминания
+- `event_loop` — напоминания, старт, auto-complete (+2ч)
+- `proposal_loop` — закрытие голосований, результат, auto-actions
+- `RgbManager` — централизованный HSV loop (≥10 сек)
+
+## База данных
+
+Таблицы: `guilds`, `birthdays`, `birthday_notifications`, `message_statistics`, `voice_sessions`, `reaction_statistics`, `events`, `event_participants`, `event_notifications`, `quotes`, `custom_roles`, `proposals`, `proposal_votes`.
 
 ## Реализованные функции
 
-### Дни рождения — реализовано
+### Ивенты
+Modal create, list/info/join/leave/cancel, кнопки на embed, лимит участников, restore views после restart, напоминания по `event_reminder_minutes`.
 
-### Статистика / профиль / топы — реализовано
+### Цитаты
+Slash + context menu, snapshot реакций, сохранение после удаления сообщения.
 
-- сообщения: guild/user/channel/date (timezone гильдии)
-- voice: сессии, AFK не считается; recovery после restart
-- реакции: полученные (не self, не боты); add/remove
-- флаг `statistics_enabled` в `/config`
-- `/profile` — сообщения, voice, реакции, время на сервере, ранги
-- `/top` — Select категория + период (сегодня / неделя / месяц / всё время)
+### Роли
+Admin `/role create|edit|delete`, `/myrole` (если включено в config), RGB через `custom_roles`, cleanup при удалении роли.
 
-**Общая активность:** `messages + voice_minutes + reactions`.
-
----
+### Демократия
+Предложения с 👍/👎, смена голоса, кворум и % из config, auto-actions (`create_role`, `delete_role`, `create_channel`, `bot_config`) если `auto_execute_proposals` включён.
 
 ## Current Task
 
-Статистика/профиль/топы готовы.
-
-Следующий шаг: система ивентов.
-
----
-
-## TODO
-
-- [ ] Система ивентов
-- [ ] Система цитат (+ context menu)
-- [ ] Управление ролями + `/myrole`
-- [ ] RGB manager
-- [ ] Демократия + optional auto-actions
-- [ ] Проверка restart-recovery (events, RGB, proposals)
-
----
+Все системы по ТЗ реализованы. Дальнейшая работа — багфиксы по feedback с сервера.
 
 ## Known Issues
 
-- Global `tree.sync()` может задерживать slash-команды.
-- `/top` View timeout 180с — после этого Select перестаёт работать (нужно вызвать `/top` снова).
-
----
+- Global `tree.sync()` может задерживать slash-команды
+- `/top` view timeout 180с
+- Auto-actions предложений без UI — только через democracy service payload (расширение при необходимости)
 
 ## Technical Decisions
 
-- Python 3.12+, discord.py 2.x, aiosqlite, python-dotenv, tzdata
-- Overall score = messages + (voice_seconds // 60) + reactions
-- Voice overlap clipping при подсчёте за период
-- Birthday notify dedup в `birthday_notifications`
-- RGB interval ≥ 10 (ещё не реализовано)
-- Commit messages: English, lowercase, no trailing period
-
-### Открытые
-
-1. Набор `action_type` для автовыполнения предложений.
-2. Дефолтная скорость `/myrole` RGB.
-
----
-
-## Зависимости
-
-`discord.py`, `aiosqlite`, `python-dotenv`, `tzdata`
-
----
-
-## Правила разработки
-
-- Секреты не в Git; не смешивать DB и UI; один набор background tasks; permissions + иерархия; обновлять PROJECT_CONTEXT; не добавлять лишние крупные функции.
-
----
+- Overall activity = messages + voice_minutes + reactions
+- RGB: один `RgbManager`, hue step по speed, min interval 10s
+- Auto-execute: default off
+- Vote defaults: 24h / quorum 3 / ratio 0.5
 
 ## Recent Changes
 
-- 2026-08-10 — статистика, `/profile`, `/top`, voice recovery
-- 2026-08-10 — дни рождения
-- 2026-08-10 — ядро + `/config`
-
----
+- 2026-08-11 — ивенты, цитаты, роли/RGB, демократия
+- 2026-08-10 — статистика, дни рождения, ядро
 
 ## Правило восстановления контекста
 
