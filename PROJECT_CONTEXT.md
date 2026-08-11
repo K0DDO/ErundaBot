@@ -74,8 +74,7 @@ ErundaBot/
 /event create|list|info|join|leave|cancel
 /quote add|random|list|user
 Apps → Add quote (context menu)
-/role create|edit|delete
-/myrole
+/myrole edit|delete
 /proposal create|list|info|cancel
 ```
 
@@ -88,18 +87,21 @@ Apps → Add quote (context menu)
 
 ## База данных
 
-Таблицы: `guilds`, `birthdays`, `birthday_notifications`, `message_statistics`, `voice_sessions`, `reaction_statistics`, `events`, `event_participants`, `event_notifications`, `quotes`, `custom_roles`, `proposals`, `proposal_votes`.
+Таблицы: `guilds` (+ `birthday_board_message_id`), `birthdays`, `birthday_notifications`, … `quotes` (+ `author_display`), …
 
 ## Реализованные функции
 
-### Ивенты
-Modal create, list/info/join/leave/cancel, кнопки на embed, лимит участников, restore views после restart, напоминания по `event_reminder_minutes`.
+### Дни рождения
+Команды + доска в канале ДР (инструкция + список без @), авто-edit при set/remove и при выборе канала в `/config`.
 
 ### Цитаты
-Slash + context menu, snapshot реакций, сохранение после удаления сообщения.
+Slash + context menu; автор показывается текстом (`author_display`), без упоминания; `/quote add` — параметры `name` и/или `author`.
 
 ### Роли
-Admin `/role create|edit|delete`, `/myrole` (если включено в config), RGB через `custom_roles`, cleanup при удалении роли.
+Только персональные: `/myrole edit`, `/myrole delete` (нужен флаг в `/config`). RGB через `custom_roles`.
+
+### Ивенты
+Modal create, list/info/join/leave/cancel, кнопки на embed, лимит участников, restore views после restart, напоминания по `event_reminder_minutes`.
 
 ### Демократия
 Предложения с 👍/👎, смена голоса, кворум и % из config, auto-actions (`create_role`, `delete_role`, `create_channel`, `bot_config`) если `auto_execute_proposals` включён.

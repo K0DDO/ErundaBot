@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import calendar
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
+
+import discord
 
 from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
+from bot.utils.embeds import base_embed
 from bot.utils.timezones import parse_hhmm
+
+if TYPE_CHECKING:
+    pass
+
+log = logging.getLogger(__name__)
 
 MONTH_GENITIVE = (
     "",
@@ -58,7 +68,6 @@ def validate_birthday(day: int, month: int, year: int | None) -> None:
 
 
 def occurrence_on_year(day: int, month: int, year: int) -> date:
-    """Birthday date in a given year; Feb 29 → Feb 28 on non-leap years."""
     if month == 2 and day == 29 and not calendar.isleap(year):
         return date(year, 2, 28)
     return date(year, month, day)
@@ -81,7 +90,21 @@ def age_on(birthday: Birthday, on_date: date) -> int | None:
     return max(years, 0)
 
 
+def member_display(guild: discord.Guild, user_id: int) -> str:
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member.display_name
+    return f"участник #{user_id}"
+
+
 class BirthdayService:
+    BOARD_HELP = (
+        "**Как добавить свой день рождения:**\n"
+        "• `/birthday set` — указать дату\n"
+        "• `/birthday remove` — удалить дату\n\n"
+        "**Ближайшие дни рождения:**"
+    )
+
     def __init__(self, db: Database) -> None:
         self.db = db
 
@@ -121,8 +144,64 @@ class BirthdayService:
         entries = await self.list_sorted(guild_id, tz_name)
         return entries[0] if entries else None
 
+    def format_board_lines(
+        self,
+        guild: discord.Guild,
+        entries: list[BirthdayEntry],
+        *,
+        limit: int = 30,
+    ) -> str:
+        if not entries:
+            return "_Пока никто не указал день рождения._"
+        lines: list[str] = []
+        for entry in entries[:limit]:
+            bday = entry.birthday
+            when = format_birthday_date(bday.day, bday.month)
+            name = member_display(guild, bday.user_id)
+            if entry.days_until == 0:
+                suffix = "сегодня"
+            elif entry.days_until == 1:
+                suffix = "завтра"
+            else:
+                suffix = f"через {entry.days_until} дн."
+            lines.append(f"• **{name}** — {when} ({suffix})")
+        if len(entries) > limit:
+            lines.append(f"_…и ещё {len(entries) - limit}_")
+        return "\n".join(lines)
+
+    async def build_board_embed(self, guild: discord.Guild, config: GuildConfig) -> discord.Embed:
+        entries = await self.list_sorted(guild.id, config.timezone)
+        body = self.BOARD_HELP + "\n" + self.format_board_lines(guild, entries)
+        return base_embed(title="🎂 Дни рождения на сервере", description=body)
+
+    async def sync_board(self, guild: discord.Guild) -> None:
+        config = await self.db.get_guild(guild.id)
+        if config is None or config.birthday_channel_id is None:
+            return
+        channel = guild.get_channel(config.birthday_channel_id)
+        if channel is None or not isinstance(channel, discord.TextChannel):
+            return
+
+        embed = await self.build_board_embed(guild, config)
+
+        if config.birthday_board_message_id:
+            try:
+                message = await channel.fetch_message(config.birthday_board_message_id)
+                await message.edit(embed=embed)
+                return
+            except discord.NotFound:
+                await self.db.set_birthday_board_message_id(guild.id, None)
+            except discord.HTTPException:
+                log.warning("Failed to edit birthday board in guild %s", guild.id)
+                return
+
+        try:
+            message = await channel.send(embed=embed)
+            await self.db.set_birthday_board_message_id(guild.id, message.id)
+        except discord.HTTPException:
+            log.exception("Failed to post birthday board in guild %s", guild.id)
+
     async def due_announcements(self, config: GuildConfig, now: datetime) -> list[Birthday]:
-        """Birthdays to congratulate right now (timezone + announce time)."""
         if config.birthday_channel_id is None:
             return []
 

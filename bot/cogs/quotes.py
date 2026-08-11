@@ -17,28 +17,44 @@ class QuotesCog(commands.Cog):
     quote = app_commands.Group(name="quote", description="Цитаты")
 
     @quote.command(name="add", description="Добавить цитату вручную")
-    @app_commands.describe(text="Текст цитаты", author="Автор цитаты")
+    @app_commands.describe(
+        text="Текст цитаты",
+        author="Участник (необязательно, для поиска по /quote user)",
+        name="Имя для отображения (без @, необязательно)",
+    )
     @app_commands.guild_only()
     async def quote_add(
         self,
         interaction: discord.Interaction,
         text: str,
-        author: discord.Member,
+        author: discord.Member | None = None,
+        name: str | None = None,
     ) -> None:
         if interaction.guild is None:
             return
+        display = name.strip() if name else None
+        author_id = author.id if author else 0
+        if author is None and not display:
+            await interaction.response.send_message(
+                embed=error_embed("Укажи имя автора или выбери участника"),
+                ephemeral=True,
+            )
+            return
+        if author is not None and display is None:
+            display = author.display_name
         try:
             quote = await self.bot.quote_service.add_text(
                 interaction.guild.id,
                 text,
-                author.id,
                 interaction.user.id,
+                author_id=author_id,
+                author_display=display,
             )
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         await interaction.response.send_message(
-            embed=self.bot.quote_service.format_quote_embed(quote),
+            embed=self.bot.quote_service.format_quote_embed(quote, interaction.guild),
         )
 
     @quote.command(name="random", description="Случайная цитата")
@@ -53,7 +69,7 @@ class QuotesCog(commands.Cog):
             )
             return
         await interaction.response.send_message(
-            embed=self.bot.quote_service.format_quote_embed(quote),
+            embed=self.bot.quote_service.format_quote_embed(quote, interaction.guild),
         )
 
     @quote.command(name="list", description="Последние цитаты")
@@ -70,9 +86,10 @@ class QuotesCog(commands.Cog):
         embed = base_embed(title="Последние цитаты")
         for q in quotes:
             preview = q.content if len(q.content) <= 80 else q.content[:77] + "…"
+            author = self.bot.quote_service.author_label(q, interaction.guild)
             embed.add_field(
                 name=f"#{q.id}",
-                value=f'"{preview}" — <@{q.author_id}>',
+                value=f'"{preview}" — {author}',
                 inline=False,
             )
         await interaction.response.send_message(embed=embed)
@@ -131,7 +148,7 @@ async def add_quote_context(
     if config.quotes_channel_id:
         channel = message.guild.get_channel(config.quotes_channel_id)
         if channel and hasattr(channel, "send"):
-            await channel.send(embed=bot.quote_service.format_quote_embed(quote))
+            await channel.send(embed=bot.quote_service.format_quote_embed(quote, message.guild))
 
 
 async def setup(bot: ErundaBot) -> None:

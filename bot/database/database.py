@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS guilds (
     proposal_duration_hours INTEGER NOT NULL DEFAULT 24,
     proposal_quorum INTEGER NOT NULL DEFAULT 3,
     proposal_pass_ratio REAL NOT NULL DEFAULT 0.5,
+    birthday_board_message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -133,6 +134,7 @@ CREATE TABLE IF NOT EXISTS quotes (
     created_at TEXT,
     saved_at TEXT NOT NULL DEFAULT (datetime('now')),
     reactions_snapshot TEXT NOT NULL DEFAULT '{}',
+    author_display TEXT,
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
 );
 
@@ -218,8 +220,21 @@ class Database:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA foreign_keys = ON")
         await self._db.executescript(SCHEMA)
+        await self._migrate()
         await self._db.commit()
         log.info("Database ready at %s", self.path)
+
+    async def _migrate(self) -> None:
+        """Add columns to existing databases."""
+        migrations = (
+            "ALTER TABLE guilds ADD COLUMN birthday_board_message_id INTEGER",
+            "ALTER TABLE quotes ADD COLUMN author_display TEXT",
+        )
+        for sql in migrations:
+            try:
+                await self._db.execute(sql)
+            except Exception:
+                pass  # column already exists
 
     async def close(self) -> None:
         if self._db is not None:
@@ -282,6 +297,16 @@ class Database:
         config = await self.get_guild(guild_id)
         assert config is not None
         return config
+
+    async def set_birthday_board_message_id(
+        self, guild_id: int, message_id: int | None
+    ) -> None:
+        await self.ensure_guild(guild_id)
+        await self.connection.execute(
+            "UPDATE guilds SET birthday_board_message_id = ?, updated_at = datetime('now') WHERE guild_id = ?",
+            (message_id, guild_id),
+        )
+        await self.connection.commit()
 
     async def list_guild_ids(self) -> list[int]:
         cursor = await self.connection.execute("SELECT guild_id FROM guilds")
@@ -760,18 +785,19 @@ class Database:
         message_id: int | None,
         created_at: str | None,
         reactions_snapshot: str,
+        author_display: str | None = None,
     ) -> Quote:
         await self.ensure_guild(guild_id)
         cursor = await self.connection.execute(
             """
             INSERT INTO quotes (
                 guild_id, content, author_id, channel_id, message_id,
-                added_by, created_at, reactions_snapshot
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                added_by, created_at, reactions_snapshot, author_display
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id, content, author_id, channel_id, message_id,
-                added_by, created_at, reactions_snapshot,
+                added_by, created_at, reactions_snapshot, author_display,
             ),
         )
         await self.connection.commit()

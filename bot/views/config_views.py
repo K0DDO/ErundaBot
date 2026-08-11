@@ -189,6 +189,13 @@ class ChannelPicker(discord.ui.ChannelSelect):
             ),
             ephemeral=True,
         )
+        if field == "birthday_channel_id" and interaction.guild is not None:
+            await self.parent_view.bot.db.set_birthday_board_message_id(
+                self.parent_view.guild_id, None
+            )
+            from bot.views.birthday_views import refresh_birthday_board
+
+            await refresh_birthday_board(self.parent_view.bot, interaction.guild)
 
 
 class ChannelConfigView(discord.ui.View):

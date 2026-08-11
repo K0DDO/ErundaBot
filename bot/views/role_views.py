@@ -67,7 +67,7 @@ class MyRoleModal(discord.ui.Modal, title="Моя роль"):
         await interaction.response.send_message(
             embed=success_embed(
                 "Роль обновлена",
-                f"{role.mention}\nRGB: {rgb_label}",
+                f"**{role.name}**\nRGB: {rgb_label}",
             ),
             ephemeral=True,
         )

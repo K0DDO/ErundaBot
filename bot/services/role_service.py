@@ -146,6 +146,24 @@ class RoleService:
             record = await self.db.update_custom_role(guild.id, role.id, **updates)
         return role, record
 
+    async def delete_personal_role(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        bot_member: discord.Member,
+    ) -> None:
+        record = await self.db.get_personal_role(guild.id, member.id)
+        if record is None:
+            raise ValueError("У вас нет персональной роли")
+        if record.owner_id != member.id:
+            raise ValueError("Можно удалить только свою роль")
+        role = guild.get_role(record.role_id)
+        if role is not None:
+            if not bot_can_manage_role(bot_member, role):
+                raise ValueError("Бот не может удалить эту роль")
+            await role.delete(reason="Ерунда: удаление персональной роли")
+        await self.db.delete_custom_role_record(guild.id, record.role_id)
+
     @staticmethod
     def parse_color(value: str | None) -> int | None:
         if not value or not value.strip():

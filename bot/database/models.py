@@ -25,6 +25,7 @@ class GuildConfig:
     proposal_duration_hours: int = 24
     proposal_quorum: int = 3
     proposal_pass_ratio: float = 0.5
+    birthday_board_message_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -48,6 +49,9 @@ class GuildConfig:
             proposal_duration_hours=row["proposal_duration_hours"],
             proposal_quorum=row["proposal_quorum"],
             proposal_pass_ratio=float(row["proposal_pass_ratio"]),
+            birthday_board_message_id=row["birthday_board_message_id"]
+            if "birthday_board_message_id" in row.keys()
+            else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -113,9 +117,11 @@ class Quote:
     created_at: str | None
     saved_at: str
     reactions_snapshot: str
+    author_display: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> Quote:
+        keys = row.keys()
         return cls(
             id=row["id"],
             guild_id=row["guild_id"],
@@ -127,6 +133,7 @@ class Quote:
             created_at=row["created_at"],
             saved_at=row["saved_at"],
             reactions_snapshot=row["reactions_snapshot"],
+            author_display=row["author_display"] if "author_display" in keys else None,
         )
 
 

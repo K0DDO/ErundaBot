@@ -13,6 +13,15 @@ if TYPE_CHECKING:
     from bot.bot import ErundaBot
 
 
+async def refresh_birthday_board(bot: ErundaBot, guild: discord.Guild | None) -> None:
+    if guild is None:
+        return
+    try:
+        await bot.birthday_service.sync_board(guild)
+    except Exception:
+        pass
+
+
 class BirthdaySetModal(discord.ui.Modal, title="Указать день рождения"):
     day = discord.ui.TextInput(
         label="День",
@@ -66,3 +75,4 @@ class BirthdaySetModal(discord.ui.Modal, title="Указать день рожд
             ),
             ephemeral=True,
         )
+        await refresh_birthday_board(self.bot, interaction.guild)
