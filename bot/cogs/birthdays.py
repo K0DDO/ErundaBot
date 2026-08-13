@@ -33,7 +33,7 @@ class BirthdaysCog(commands.Cog):
             config = await self.bot.config_service.get(guild.id)
             if config.birthday_channel_id:
                 try:
-                    await self.bot.birthday_service.sync_board(guild)
+                    await self.bot.birthday_service.sync_board(guild, self.bot)
                 except Exception:
                     log.exception("Failed to sync birthday board for guild %s", guild.id)
 
@@ -120,7 +120,6 @@ class BirthdaysCog(commands.Cog):
         view = BirthdayPreviewView(
             self.bot,
             interaction.guild.id,
-            interaction.user.id,
             text,
         )
         await interaction.response.send_message(view=view, ephemeral=True)

@@ -19,39 +19,41 @@ async def refresh_birthday_board(bot: ErundaBot, guild: discord.Guild | None) ->
     if guild is None:
         return
     try:
-        await bot.birthday_service.sync_board(guild)
+        await bot.birthday_service.sync_board(guild, bot)
     except Exception:
         pass
 
 
 class BirthdayAddButton(ui.Button):
-    def __init__(self, bot: ErundaBot, guild_id: int, user_id: int) -> None:
+    def __init__(self, bot: ErundaBot, guild_id: int) -> None:
         super().__init__(label="Добавить ДР", emoji="🎂", style=discord.ButtonStyle.secondary)
         self.bot = bot
         self.guild_id = guild_id
-        self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(
-            BirthdaySetModal(self.bot, self.guild_id, self.user_id)
+            BirthdaySetModal(self.bot, self.guild_id, interaction.user.id)
         )
 
 
-class BirthdayPreviewView(ui.LayoutView):
+class BirthdayListView(ui.LayoutView):
     def __init__(
         self,
         bot: ErundaBot,
         guild_id: int,
-        user_id: int,
         text: str,
     ) -> None:
         super().__init__(timeout=None)
         container = ui.Container(accent_color=BRAND_COLOR)
         container.add_item(ui.TextDisplay(text))
         row = ui.ActionRow()
-        row.add_item(BirthdayAddButton(bot, guild_id, user_id))
+        row.add_item(BirthdayAddButton(bot, guild_id))
         container.add_item(row)
         self.add_item(container)
+
+
+class BirthdayPreviewView(BirthdayListView):
+    """Ephemeral preview uses the same layout as the channel board."""
 
 
 class BirthdaySetModal(discord.ui.Modal, title="Указать день рождения"):

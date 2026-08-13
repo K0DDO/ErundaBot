@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import discord
-from discord import ui
 
 from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
@@ -19,7 +18,7 @@ from bot.utils.embeds import BRAND_COLOR
 from bot.utils.timezones import parse_hhmm
 
 if TYPE_CHECKING:
-    pass
+    from bot.bot import ErundaBot
 
 log = logging.getLogger(__name__)
 
@@ -162,13 +161,13 @@ class BirthdayService:
             return "завтра"
         return f"через {entry.days_until} дн."
 
-    async def build_board_view(
+    async def build_board_text(
         self,
         guild: discord.Guild,
         config: GuildConfig,
         *,
         person_limit: int | None = None,
-    ) -> ui.LayoutView:
+    ) -> str:
         limit = person_limit if person_limit is not None else self.MAX_BOARD_ENTRIES
         entries = await self.list_sorted(guild.id, config.timezone)
 
@@ -181,12 +180,7 @@ class BirthdayService:
             parts.extend(["", "_Пока никто не указал день рождения._"])
         else:
             parts.extend(["", self.format_preview_lines(guild, entries, limit=limit)])
-
-        view = ui.LayoutView(timeout=None)
-        container = ui.Container(accent_color=BRAND_COLOR)
-        container.add_item(ui.TextDisplay("\n".join(parts)))
-        view.add_item(container)
-        return view
+        return "\n".join(parts)
 
     async def build_preview_text(
         self,
@@ -228,29 +222,9 @@ class BirthdayService:
             lines.append(f"📌 …и ещё {len(entries) - limit}")
         return "\n".join(lines)
 
-    def format_entry_line(self, guild: discord.Guild, entry: BirthdayEntry) -> str:
-        bday = entry.birthday
-        when = format_birthday_date(bday.day, bday.month)
-        name = member_display(guild, bday.user_id)
-        return f"**{name}** — {when} ({self.entry_timing(entry)})"
+    async def sync_board(self, guild: discord.Guild, bot: ErundaBot) -> None:
+        from bot.views.birthday_views import BirthdayListView
 
-    def format_board_lines(
-        self,
-        guild: discord.Guild,
-        entries: list[BirthdayEntry],
-        *,
-        limit: int = 30,
-    ) -> str:
-        if not entries:
-            return "_Пока никто не указал день рождения._"
-        lines: list[str] = []
-        for entry in entries[:limit]:
-            lines.append(f"• {self.format_entry_line(guild, entry)}")
-        if len(entries) > limit:
-            lines.append(f"_…и ещё {len(entries) - limit}_")
-        return "\n".join(lines)
-
-    async def sync_board(self, guild: discord.Guild) -> None:
         config = await self.db.get_guild(guild.id)
         if config is None or config.birthday_channel_id is None:
             return
@@ -260,7 +234,8 @@ class BirthdayService:
 
         await self.cleanup_stale_list_messages(guild, channel)
 
-        view = await self.build_board_view(guild, config)
+        text = await self.build_board_text(guild, config)
+        view = BirthdayListView(bot, guild.id, text)
 
         if config.birthday_board_message_id:
             try:

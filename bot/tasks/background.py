@@ -73,7 +73,7 @@ class BackgroundTasks:
             try:
                 local_now = now.astimezone(ZoneInfo(config.timezone))
                 if local_now.hour == 0 and local_now.minute == 0:
-                    await self.bot.birthday_service.sync_board(guild)
+                    await self.bot.birthday_service.sync_board(guild, self.bot)
 
                 local_today = local_now.date()
                 announcements = await self.bot.birthday_service.due_announcements(config, now)
