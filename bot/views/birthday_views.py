@@ -70,7 +70,7 @@ class BirthdayPreviewView(BirthdayListView):
     """Ephemeral preview uses the same layout as the channel board."""
 
 
-class BirthdaySetModal(discord.ui.Modal, title="Указать день рождения"):
+class BirthdaySetModal(discord.ui.Modal, title="Указать / изменить день рождения"):
     day = discord.ui.TextInput(
         label="День",
         placeholder="15",

@@ -101,8 +101,9 @@ def member_display(guild: discord.Guild, user_id: int) -> str:
 class BirthdayService:
     BOARD_HELP = (
         "**Как добавить свой день рождения:**\n"
-        "• `/birthday set` — указать дату\n"
-        "• `/birthday remove` — удалить дату"
+        "• `/birthday set` — указать / изменить дату\n"
+        "• `/birthday remove` — удалить дату\n"
+        "• эмодзи: серверный или обычный — сначала скопируй его и вставь в форму"
     )
     MAX_BOARD_ENTRIES = 30
 

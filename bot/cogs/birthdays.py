@@ -39,7 +39,7 @@ class BirthdaysCog(commands.Cog):
 
     birthday = app_commands.Group(name="birthday", description="Дни рождения")
 
-    @birthday.command(name="set", description="Указать свой день рождения")
+    @birthday.command(name="set", description="Указать / изменить дату")
     @app_commands.guild_only()
     async def birthday_set(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
