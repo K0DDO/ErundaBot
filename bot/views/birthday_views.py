@@ -46,9 +46,12 @@ class BirthdayListView(ui.LayoutView):
         super().__init__(timeout=None)
         container = ui.Container(accent_color=BRAND_COLOR)
         container.add_item(ui.TextDisplay(text))
-        row = ui.ActionRow()
-        row.add_item(BirthdayAddButton(bot, guild_id))
-        container.add_item(row)
+        container.add_item(
+            ui.Section(
+                "*← это кнопка, жми*",
+                accessory=BirthdayAddButton(bot, guild_id),
+            )
+        )
         self.add_item(container)
 
 
