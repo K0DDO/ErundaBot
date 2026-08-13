@@ -358,6 +358,8 @@ class Database:
                     (json.dumps([int(row["author_id"])]), row["id"]),
                 )
             await self._db.execute("PRAGMA user_version = 8")
+
+    async def close(self) -> None:
         if self._db is not None:
             await self._db.close()
             self._db = None
