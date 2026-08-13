@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import re
-
-import httpx
+import urllib.error
+import urllib.request
 
 from bot.database.models import Birthday
 
@@ -61,33 +63,42 @@ class AIService:
             f"{age_line}\n"
             "Напиши одно поздравление только по-русски, без английских слов и без подписи."
         )
+        payload = json.dumps(
+            {
+                "model": self.model,
+                "temperature": 0.9,
+                "max_tokens": 220,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+            }
+        ).encode("utf-8")
         try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                response = await client.post(
-                    GROQ_URL,
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.model,
-                        "temperature": 0.9,
-                        "max_tokens": 220,
-                        "messages": [
-                            {"role": "system", "content": SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                    },
-                )
-            response.raise_for_status()
-            data = response.json()
-            text = (
-                data.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
+            text = await asyncio.to_thread(self._request_groq, payload)
             return self._sanitize_congrats(text)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+            log.exception("Groq birthday generation failed")
+            return None
+
+    def _request_groq(self, payload: bytes) -> str:
+        request = urllib.request.Request(
+            GROQ_URL,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
 
     @staticmethod
     def _sanitize_congrats(text: str | None) -> str | None:
@@ -103,9 +114,6 @@ class AIService:
             log.warning("Dropped birthday congrats because it contained Latin words")
             return None
         return cleaned
-        except Exception:
-            log.exception("Groq birthday generation failed")
-            return None
 
     async def build_announce_embed_description(
         self,

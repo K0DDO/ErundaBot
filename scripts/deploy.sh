@@ -22,7 +22,7 @@ PREV_SHA="$(git rev-parse HEAD)"
 rollback() {
   echo "Deploy failed — rolling back to ${PREV_SHA}" >&2
   git reset --hard "${PREV_SHA}"
-  "${COMPOSE[@]}" up -d --build --force-recreate
+  "${COMPOSE[@]}" up -d --force-recreate || true
   exit 1
 }
 
@@ -33,7 +33,10 @@ git reset --hard origin/main
 echo "Host SHA $(git rev-parse --short HEAD)"
 
 echo "==> Build and restart"
-if ! "${COMPOSE[@]}" up -d --build; then
+if ! "${COMPOSE[@]}" build --no-cache; then
+  rollback
+fi
+if ! "${COMPOSE[@]}" up -d --force-recreate; then
   rollback
 fi
 
