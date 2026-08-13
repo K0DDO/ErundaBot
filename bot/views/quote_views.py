@@ -18,18 +18,29 @@ if TYPE_CHECKING:
 class QuoteCardView(ui.LayoutView):
     def __init__(
         self,
-        text: str,
         *,
+        number_text: str,
+        quote_text: str,
+        author_text: str,
+        date_text: str | None = None,
+        reactions_text: str = "",
         accent_color: int = BRAND_COLOR,
         avatar_url: str | None = None,
         avatar_description: str | None = None,
     ) -> None:
         super().__init__(timeout=None)
         container = ui.Container(accent_color=accent_color)
+        container.add_item(ui.TextDisplay(number_text))
+        container.add_item(ui.TextDisplay(quote_text))
+
+        author_items = [ui.TextDisplay(author_text)]
+        if date_text:
+            author_items.append(ui.TextDisplay(date_text))
+
         if avatar_url:
             container.add_item(
                 ui.Section(
-                    ui.TextDisplay(text),
+                    *author_items,
                     accessory=ui.Thumbnail(
                         media=avatar_url,
                         description=(avatar_description or "автор")[:256],
@@ -37,7 +48,11 @@ class QuoteCardView(ui.LayoutView):
                 )
             )
         else:
-            container.add_item(ui.TextDisplay(text))
+            meta = author_text if not date_text else f"{author_text}\n{date_text}"
+            container.add_item(ui.TextDisplay(meta))
+
+        if reactions_text:
+            container.add_item(ui.TextDisplay(reactions_text))
         self.add_item(container)
 
 
