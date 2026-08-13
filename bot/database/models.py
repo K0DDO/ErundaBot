@@ -118,6 +118,8 @@ class Quote:
     saved_at: str
     reactions_snapshot: str
     author_display: str | None = None
+    posted_channel_id: int | None = None
+    posted_message_id: int | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> Quote:
@@ -134,6 +136,8 @@ class Quote:
             saved_at=row["saved_at"],
             reactions_snapshot=row["reactions_snapshot"],
             author_display=row["author_display"] if "author_display" in keys else None,
+            posted_channel_id=row["posted_channel_id"] if "posted_channel_id" in keys else None,
+            posted_message_id=row["posted_message_id"] if "posted_message_id" in keys else None,
         )
 
 

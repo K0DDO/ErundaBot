@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import logging
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from bot.bot import ErundaBot
-from bot.database.models import Quote
 from bot.utils.embeds import base_embed, error_embed, success_embed
+from bot.utils.permissions import is_guild_admin
+
+log = logging.getLogger(__name__)
 
 
 async def publish_quote(
     bot: ErundaBot,
     guild: discord.Guild,
-    quote: Quote,
+    quote,
 ) -> discord.TextChannel | None:
     """Post quote embed to configured quotes channel, if set."""
     config = await bot.config_service.get(guild.id)
@@ -23,13 +27,36 @@ async def publish_quote(
     channel = guild.get_channel(config.quotes_channel_id)
     if not isinstance(channel, discord.TextChannel):
         return None
-    await channel.send(embed=bot.quote_service.format_quote_embed(quote, guild))
+    await bot.quote_service.publish_to_channel(guild, quote, channel)
     return channel
 
 
 class QuotesCog(commands.Cog):
     def __init__(self, bot: ErundaBot) -> None:
         self.bot = bot
+        self._cleaned_guilds: set[int] = set()
+
+    async def cog_load(self) -> None:
+        self.bot.loop.create_task(self._cleanup_all_guilds())
+
+    async def _cleanup_all_guilds(self) -> None:
+        await self.bot.wait_until_ready()
+        for guild in self.bot.guilds:
+            await self._cleanup_guild_quotes(guild)
+
+    async def _cleanup_guild_quotes(self, guild: discord.Guild) -> None:
+        if guild.id in self._cleaned_guilds:
+            return
+        config = await self.bot.config_service.get(guild.id)
+        if not config.quotes_channel_id:
+            return
+        channel = guild.get_channel(config.quotes_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        removed = await self.bot.quote_service.cleanup_channel(guild, channel)
+        if removed:
+            log.info("Removed %s orphan quote message(s) in guild %s", removed, guild.id)
+        self._cleaned_guilds.add(guild.id)
 
     quote = app_commands.Group(name="quote", description="Цитаты")
 
@@ -138,6 +165,7 @@ class QuotesCog(commands.Cog):
                 update_author_display=update_author_display,
                 created_at=created_at,
             )
+            await self.bot.quote_service.sync_posted_message(interaction.guild, quote)
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
@@ -157,6 +185,7 @@ class QuotesCog(commands.Cog):
             return
         try:
             await self.bot.quote_service.delete(
+                interaction.guild,
                 interaction.guild.id,
                 quote_id,
                 interaction.user,
@@ -167,6 +196,41 @@ class QuotesCog(commands.Cog):
         await interaction.response.send_message(
             embed=success_embed(f"Цитата #{quote_id} удалена"),
             ephemeral=True,
+        )
+
+    @quote.command(name="cleanup", description="Удалить осиротевшие сообщения в канале цитат")
+    @app_commands.guild_only()
+    async def quote_cleanup(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        if not is_guild_admin(interaction.user):
+            await interaction.response.send_message(
+                embed=error_embed("Нужны права администратора"),
+                ephemeral=True,
+            )
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if not config.quotes_channel_id:
+            await interaction.response.send_message(
+                embed=error_embed("Канал цитат не настроен в /config"),
+                ephemeral=True,
+            )
+            return
+        channel = interaction.guild.get_channel(config.quotes_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                embed=error_embed("Канал цитат недоступен"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        removed = await self.bot.quote_service.cleanup_channel(interaction.guild, channel)
+        self._cleaned_guilds.add(interaction.guild.id)
+        await interaction.followup.send(
+            embed=success_embed(
+                "Очистка завершена",
+                f"Удалено сообщений: **{removed}** в {channel.mention}",
+            ),
         )
 
     @quote.command(name="random", description="Случайная цитата")

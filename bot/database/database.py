@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS quotes (
     saved_at TEXT NOT NULL DEFAULT (datetime('now')),
     reactions_snapshot TEXT NOT NULL DEFAULT '{}',
     author_display TEXT,
+    posted_channel_id INTEGER,
+    posted_message_id INTEGER,
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
 );
 
@@ -229,6 +231,8 @@ class Database:
         migrations = (
             "ALTER TABLE guilds ADD COLUMN birthday_board_message_id INTEGER",
             "ALTER TABLE quotes ADD COLUMN author_display TEXT",
+            "ALTER TABLE quotes ADD COLUMN posted_channel_id INTEGER",
+            "ALTER TABLE quotes ADD COLUMN posted_message_id INTEGER",
         )
         for sql in migrations:
             try:
@@ -856,6 +860,30 @@ class Database:
             )
         row = await cursor.fetchone()
         return int(row["c"])
+
+    async def list_quote_ids(self, guild_id: int) -> set[int]:
+        cursor = await self.connection.execute(
+            "SELECT id FROM quotes WHERE guild_id = ?",
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        return {int(row["id"]) for row in rows}
+
+    async def set_quote_posted_message(
+        self,
+        quote_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        await self.connection.execute(
+            """
+            UPDATE quotes
+            SET posted_channel_id = ?, posted_message_id = ?
+            WHERE id = ?
+            """,
+            (channel_id, message_id, quote_id),
+        )
+        await self.connection.commit()
 
     async def save_quote(self, quote: Quote) -> None:
         await self.connection.execute(
