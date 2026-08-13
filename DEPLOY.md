@@ -15,7 +15,7 @@ ssh deploy@107.172.44.182
 git clone https://github.com/K0DDO/ErundaBot.git ~/erunda
 cd ~/erunda
 cp .env.production.example .env.production
-# заполнить DISCORD_TOKEN в .env.production
+# заполнить DISCORD_TOKEN и GROQ_API_KEY в .env.production
 mkdir -p data
 docker compose --env-file .env.production up -d --build
 docker logs erunda-bot --tail 50

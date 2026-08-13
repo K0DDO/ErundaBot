@@ -345,3 +345,45 @@ class BirthdayService:
             event_date.isoformat(),
             kind,
         )
+
+    def reminder_embed(
+        self,
+        guild: discord.Guild,
+        birthday: Birthday,
+        *,
+        days: int,
+    ) -> discord.Embed:
+        name = member_display(guild, birthday.user_id)
+        when = format_birthday_date(birthday.day, birthday.month)
+        if days == 1:
+            timing = "завтра"
+        else:
+            timing = f"через {days} дн."
+        return discord.Embed(
+            title="Скоро день рождения",
+            description=f"{timing.capitalize()} день рождения у **{name}** ({when}).",
+            color=BRAND_COLOR,
+        ).set_footer(text="Ерунда")
+
+    async def announce_embed(
+        self,
+        guild: discord.Guild,
+        birthday: Birthday,
+        today: date,
+        ai_service,
+        *,
+        mention: bool = True,
+    ) -> tuple[discord.Embed, bool]:
+        description, used_ai = await ai_service.build_announce_embed_description(
+            guild,
+            birthday,
+            today,
+            mention=mention,
+        )
+        embed = discord.Embed(
+            title="День рождения",
+            description=description,
+            color=BRAND_COLOR,
+        )
+        embed.set_footer(text="Ерунда")
+        return embed, used_ai

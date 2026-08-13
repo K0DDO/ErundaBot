@@ -56,6 +56,9 @@ class RolesCog(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_role_delete(self, role: discord.Role) -> None:
         await self.bot.db.delete_custom_role_record(role.guild.id, role.id)
+        config = await self.bot.db.get_guild(role.guild.id)
+        if config is not None and config.birthday_star_role_id == role.id:
+            await self.bot.db.set_birthday_star_role_id(role.guild.id, None)
 
 
 async def setup(bot: ErundaBot) -> None:

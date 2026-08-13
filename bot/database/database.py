@@ -13,6 +13,7 @@ from bot.utils.birthday_emojis import clean_birthday_emoji, pick_birthday_emoji
 from .models import (
     GUILD_CONFIG_FIELDS,
     Birthday,
+    BirthdayStarGrant,
     CustomRole,
     Event,
     GuildConfig,
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS guilds (
     proposal_quorum INTEGER NOT NULL DEFAULT 3,
     proposal_pass_ratio REAL NOT NULL DEFAULT 0.5,
     birthday_board_message_id INTEGER,
+    birthday_star_role_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -187,6 +189,15 @@ CREATE TABLE IF NOT EXISTS proposal_votes (
     FOREIGN KEY (proposal_id) REFERENCES proposals(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS birthday_star_grants (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    hidden_role_ids TEXT NOT NULL DEFAULT '[]',
+    granted_on TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS birthday_notifications (
     guild_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -282,6 +293,25 @@ class Database:
                         (cleaned, row["guild_id"], row["user_id"]),
                     )
             await self._db.execute("PRAGMA user_version = 5")
+        if version < 6:
+            for sql in (
+                "ALTER TABLE guilds ADD COLUMN birthday_star_role_id INTEGER",
+                """
+                CREATE TABLE IF NOT EXISTS birthday_star_grants (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    hidden_role_ids TEXT NOT NULL DEFAULT '[]',
+                    granted_on TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, user_id),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                )
+                """,
+            ):
+                try:
+                    await self._db.execute(sql)
+                except Exception:
+                    pass
+            await self._db.execute("PRAGMA user_version = 6")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1048,6 +1078,63 @@ class Database:
         cursor = await self.connection.execute(
             "DELETE FROM custom_roles WHERE guild_id = ? AND role_id = ?",
             (guild_id, role_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def set_birthday_star_role_id(self, guild_id: int, role_id: int | None) -> None:
+        await self.ensure_guild(guild_id)
+        await self.connection.execute(
+            "UPDATE guilds SET birthday_star_role_id = ?, updated_at = datetime('now') WHERE guild_id = ?",
+            (role_id, guild_id),
+        )
+        await self.connection.commit()
+
+    async def get_birthday_star_grant(
+        self, guild_id: int, user_id: int
+    ) -> BirthdayStarGrant | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM birthday_star_grants WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        row = await cursor.fetchone()
+        return BirthdayStarGrant.from_row(row) if row else None
+
+    async def list_birthday_star_grants(self, guild_id: int) -> list[BirthdayStarGrant]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM birthday_star_grants WHERE guild_id = ?",
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        return [BirthdayStarGrant.from_row(row) for row in rows]
+
+    async def save_birthday_star_grant(
+        self,
+        guild_id: int,
+        user_id: int,
+        hidden_role_ids: str,
+        granted_on: str,
+    ) -> BirthdayStarGrant:
+        await self.ensure_guild(guild_id)
+        await self.connection.execute(
+            """
+            INSERT INTO birthday_star_grants (guild_id, user_id, hidden_role_ids, granted_on)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                hidden_role_ids = excluded.hidden_role_ids,
+                granted_on = excluded.granted_on
+            """,
+            (guild_id, user_id, hidden_role_ids, granted_on),
+        )
+        await self.connection.commit()
+        grant = await self.get_birthday_star_grant(guild_id, user_id)
+        assert grant is not None
+        return grant
+
+    async def delete_birthday_star_grant(self, guild_id: int, user_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM birthday_star_grants WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
         )
         await self.connection.commit()
         return cursor.rowcount > 0

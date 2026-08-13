@@ -10,7 +10,9 @@ import discord
 from discord.ext import commands
 
 from bot.database.database import Database
+from bot.services.ai_service import AIService
 from bot.services.birthday_service import BirthdayService
+from bot.services.birthday_star_service import BirthdayStarService
 from bot.services.config_service import ConfigService
 from bot.services.democracy_service import DemocracyService
 from bot.services.event_service import EventService
@@ -52,6 +54,8 @@ class ErundaBot(commands.Bot):
         self.db = Database(database_path, default_timezone=default_timezone)
         self.config_service = ConfigService(self.db)
         self.birthday_service = BirthdayService(self.db)
+        self.birthday_star_service = BirthdayStarService(self.db)
+        self.ai_service = AIService()
         self.statistics_service = StatisticsService(self.db)
         self.event_service = EventService(self.db)
         self.quote_service = QuoteService(self.db)

@@ -26,6 +26,7 @@ class GuildConfig:
     proposal_quorum: int = 3
     proposal_pass_ratio: float = 0.5
     birthday_board_message_id: int | None = None
+    birthday_star_role_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -51,6 +52,9 @@ class GuildConfig:
             proposal_pass_ratio=float(row["proposal_pass_ratio"]),
             birthday_board_message_id=row["birthday_board_message_id"]
             if "birthday_board_message_id" in row.keys()
+            else None,
+            birthday_star_role_id=row["birthday_star_role_id"]
+            if "birthday_star_role_id" in row.keys()
             else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -145,6 +149,23 @@ class Quote:
 
 
 @dataclass(slots=True)
+class BirthdayStarGrant:
+    guild_id: int
+    user_id: int
+    hidden_role_ids: str = "[]"
+    granted_on: str | None = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> BirthdayStarGrant:
+        return cls(
+            guild_id=row["guild_id"],
+            user_id=row["user_id"],
+            hidden_role_ids=row["hidden_role_ids"] or "[]",
+            granted_on=row["granted_on"],
+        )
+
+
+@dataclass(slots=True)
 class CustomRole:
     id: int
     guild_id: int
@@ -219,5 +240,6 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "proposal_duration_hours",
         "proposal_quorum",
         "proposal_pass_ratio",
+        "birthday_star_role_id",
     }
 )

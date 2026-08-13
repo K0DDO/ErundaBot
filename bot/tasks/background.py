@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 from discord.ext import tasks
 
-from bot.services.birthday_service import age_on, format_birthday_date
 from bot.utils.embeds import base_embed
 from bot.views.proposal_views import build_proposal_embed
 
@@ -41,13 +40,20 @@ class BackgroundTasks:
             self.event_loop.start()
         if not self.proposal_loop.is_running():
             self.proposal_loop.start()
+        if not self.birthday_rgb_loop.is_running():
+            self.birthday_rgb_loop.start()
         log.info("Background tasks started")
 
     async def stop(self) -> None:
         if not self._started:
             return
         self._started = False
-        for loop in (self.birthday_loop, self.event_loop, self.proposal_loop):
+        for loop in (
+            self.birthday_loop,
+            self.event_loop,
+            self.proposal_loop,
+            self.birthday_rgb_loop,
+        ):
             if loop.is_running():
                 loop.cancel()
         log.info("Background tasks stopped")
@@ -64,28 +70,42 @@ class BackgroundTasks:
 
         for config in guilds:
             guild = self.bot.get_guild(config.guild_id)
-            if guild is None or config.birthday_channel_id is None:
+            if guild is None:
                 continue
-            channel = guild.get_channel(config.birthday_channel_id)
-            if channel is None or not hasattr(channel, "send"):
-                continue
-
             try:
                 local_now = now.astimezone(ZoneInfo(config.timezone))
-                if local_now.hour == 0 and local_now.minute == 0:
-                    await self.bot.birthday_service.sync_board(guild, self.bot)
-
                 local_today = local_now.date()
+                if local_now.hour == 0 and local_now.minute == 0:
+                    if config.birthday_channel_id:
+                        await self.bot.birthday_service.sync_board(guild, self.bot)
+                    await self.bot.birthday_star_service.sync_today(
+                        guild, config, local_today, self.bot
+                    )
+
+                channel = (
+                    guild.get_channel(config.birthday_channel_id)
+                    if config.birthday_channel_id
+                    else None
+                )
+                if channel is None or not hasattr(channel, "send"):
+                    continue
+
                 announcements = await self.bot.birthday_service.due_announcements(config, now)
                 for birthday in announcements:
-                    age = age_on(birthday, local_today)
-                    age_part = f" Исполняется {age}!" if age is not None else ""
-                    embed = base_embed(
-                        title="День рождения",
-                        description=(
-                            f"Сегодня день рождения у <@{birthday.user_id}>!\n"
-                            f"Поздравляем!{age_part}"
-                        ),
+                    member = guild.get_member(birthday.user_id)
+                    if member is not None:
+                        try:
+                            await self.bot.birthday_star_service.grant(
+                                guild, member, granted_on=local_today
+                            )
+                        except Exception:
+                            log.exception("Failed to grant birthday star to %s", birthday.user_id)
+                    embed, _used_ai = await self.bot.birthday_service.announce_embed(
+                        guild,
+                        birthday,
+                        local_today,
+                        self.bot.ai_service,
+                        mention=True,
                     )
                     await channel.send(embed=embed)
                     await self.bot.birthday_service.mark_notified(
@@ -97,13 +117,10 @@ class BackgroundTasks:
 
                 reminders = await self.bot.birthday_service.due_reminders(config, now)
                 for birthday, event_date in reminders:
-                    embed = base_embed(
-                        title="Скоро день рождения",
-                        description=(
-                            f"Через {config.birthday_reminder_days} дн. день рождения у "
-                            f"<@{birthday.user_id}> "
-                            f"({format_birthday_date(birthday.day, birthday.month)})."
-                        ),
+                    embed = self.bot.birthday_service.reminder_embed(
+                        guild,
+                        birthday,
+                        days=config.birthday_reminder_days,
                     )
                     await channel.send(embed=embed)
                     await self.bot.birthday_service.mark_notified(
@@ -220,4 +237,13 @@ class BackgroundTasks:
 
     @proposal_loop.before_loop
     async def before_proposal_loop(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(seconds=8)
+    async def birthday_rgb_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        await self.bot.birthday_star_service.tick_rgb(self.bot)
+
+    @birthday_rgb_loop.before_loop
+    async def before_birthday_rgb_loop(self) -> None:
         await self.bot.wait_until_ready()
