@@ -24,6 +24,18 @@ async def refresh_birthday_board(bot: ErundaBot, guild: discord.Guild | None) ->
         pass
 
 
+class BirthdayHintLabel(ui.Button):
+    def __init__(self) -> None:
+        super().__init__(
+            label="← это кнопка, жми",
+            style=discord.ButtonStyle.secondary,
+            disabled=True,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        pass
+
+
 class BirthdayAddButton(ui.Button):
     def __init__(self, bot: ErundaBot, guild_id: int) -> None:
         super().__init__(label="Добавить ДР", emoji="🎂", style=discord.ButtonStyle.secondary)
@@ -46,12 +58,10 @@ class BirthdayListView(ui.LayoutView):
         super().__init__(timeout=None)
         container = ui.Container(accent_color=BRAND_COLOR)
         container.add_item(ui.TextDisplay(text))
-        container.add_item(
-            ui.Section(
-                "*← это кнопка, жми*",
-                accessory=BirthdayAddButton(bot, guild_id),
-            )
-        )
+        row = ui.ActionRow()
+        row.add_item(BirthdayAddButton(bot, guild_id))
+        row.add_item(BirthdayHintLabel())
+        container.add_item(row)
         self.add_item(container)
 
 
