@@ -214,13 +214,8 @@ class BirthdayService:
                 io.BytesIO(png_bytes),
                 filename=self.PREVIEW_IMAGE_FILENAME,
             )
-            gallery = ui.MediaGallery()
-            gallery.add_item(
-                media=f"attachment://{self.PREVIEW_IMAGE_FILENAME}",
-                description="Ближайшие дни рождения",
-            )
             container.add_item(ui.Separator())
-            container.add_item(gallery)
+            container.add_item(ui.File(f"attachment://{self.PREVIEW_IMAGE_FILENAME}"))
 
         view.add_item(container)
         return view, image_file
