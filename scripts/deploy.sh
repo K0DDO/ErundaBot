@@ -40,18 +40,24 @@ fi
 echo "==> Status"
 "${COMPOSE[@]}" ps
 
-sleep 3
+sleep 5
 ok=0
-for _ in $(seq 1 20); do
-  if docker logs erunda-bot --tail 40 2>&1 | grep -q "Logged in as"; then
+for _ in $(seq 1 45); do
+  logs="$(docker logs erunda-bot --tail 120 2>&1 || true)"
+  if echo "${logs}" | grep -q "Logged in as"; then
     ok=1
     break
   fi
-  sleep 2
+  if echo "${logs}" | grep -Eqi "Traceback|ModuleNotFoundError|DISCORD_TOKEN is not set|RuntimeError"; then
+    echo "Bot crashed during startup — check logs:" >&2
+    echo "${logs}" >&2
+    rollback
+  fi
+  sleep 3
 done
 if [[ "${ok}" -ne 1 ]]; then
   echo "Bot did not log in — check logs:" >&2
-  docker logs erunda-bot --tail 80 >&2 || true
+  docker logs erunda-bot --tail 120 >&2 || true
   rollback
 fi
 
