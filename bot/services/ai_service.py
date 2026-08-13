@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 import httpx
 
@@ -12,13 +13,20 @@ from bot.database.models import Birthday
 log = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+LATIN_WORD_RE = re.compile(r"\b[A-Za-z]{2,}\b")
+SIGN_OFF_RE = re.compile(
+    r"(?im)^\s*(sincerely|с уважением|с любовью|your friends|друзья сервера).*$"
+)
 SYSTEM_PROMPT = (
     "Ты пишешь короткие тёплые поздравления с днём рождения для Discord-сервера. "
-    "Язык: русский. Тон: дружеский, чуть ироничный, без канцелярита. "
+    "Пиши ТОЛЬКО на русском языке. Ни одного английского слова, даже в подписи. "
+    "Запрещены: Sincerely, Happy birthday, Best wishes, Congratulations и любые латиница-слова. "
+    "Не ставь подпись в конце («С уважением», «Ерундульки», имя сервера). "
+    "Тон: дружеский, чуть ироничный, без канцелярита. "
     "2–4 предложения. Можно использовать эмодзи. "
     "Не оскорбляй, не шути про смерть, политику и NSFW. "
     "Не выдумывай факты о человеке. Если возраст неизвестен — не упоминай возраст. "
-    "В тексте обязательно обратись к человеку по имени, без Discord-упоминаний <@id>."
+    "В тексте обратись к человеку по имени, без Discord-упоминаний <@id>."
 )
 
 
@@ -51,7 +59,7 @@ class AIService:
             f"Имя: {display_name}\n"
             f"Дата: {date_text}\n"
             f"{age_line}\n"
-            "Напиши одно поздравление."
+            "Напиши одно поздравление только по-русски, без английских слов и без подписи."
         )
         try:
             async with httpx.AsyncClient(timeout=20.0) as client:
@@ -79,7 +87,22 @@ class AIService:
                 .get("content", "")
                 .strip()
             )
-            return text or None
+            return self._sanitize_congrats(text)
+
+    @staticmethod
+    def _sanitize_congrats(text: str | None) -> str | None:
+        if not text:
+            return None
+        lines = [line.rstrip() for line in text.strip().splitlines()]
+        while lines and SIGN_OFF_RE.match(lines[-1] or ""):
+            lines.pop()
+        cleaned = "\n".join(line for line in lines if line is not None).strip()
+        if not cleaned:
+            return None
+        if LATIN_WORD_RE.search(cleaned):
+            log.warning("Dropped birthday congrats because it contained Latin words")
+            return None
+        return cleaned
         except Exception:
             log.exception("Groq birthday generation failed")
             return None
