@@ -97,6 +97,7 @@ class QuoteService:
         *,
         author_id: int = 0,
         author_display: str | None = None,
+        created_at: str | None = None,
     ) -> Quote:
         if not content.strip():
             raise ValueError("Текст не может быть пустым")
@@ -109,7 +110,7 @@ class QuoteService:
             added_by,
             None,
             None,
-            datetime.utcnow().isoformat(),
+            created_at or datetime.utcnow().isoformat(),
             "{}",
             author_display=author_display,
         )

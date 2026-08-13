@@ -111,7 +111,7 @@ class BirthdayStarService:
         if existing is None and len(holders) >= MAX_STAR_HOLDERS and not force:
             raise ValueError(
                 f"Уже выдано {MAX_STAR_HOLDERS} ролей именинника. "
-                "Снимите одну через `/birthday test-rgb-off`"
+                "Сегодня уже максимум именинников с RGB-ролью"
             )
         hidden_roles = await self._personal_roles_to_hide(guild, member, star_role)
         if hidden_roles:

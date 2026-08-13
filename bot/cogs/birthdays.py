@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
 from typing import TYPE_CHECKING
-from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.database.models import Birthday
 from bot.services.birthday_service import format_birthday_date, member_display
 from bot.utils.embeds import base_embed, error_embed, success_embed
 from bot.views.birthday_views import BirthdayPreviewView, BirthdaySetModal, refresh_birthday_board
@@ -162,139 +159,6 @@ class BirthdaysCog(commands.Cog):
             embed=base_embed(
                 title="Ближайший день рождения",
                 description=f"**{name}** — {when} ({timing})",
-            ),
-            ephemeral=True,
-        )
-
-    async def _debug_birthday_for(
-        self,
-        guild: discord.Guild,
-        member: discord.Member,
-    ) -> Birthday:
-        existing = await self.bot.birthday_service.get_birthday(guild.id, member.id)
-        if existing is not None:
-            return existing
-        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
-        return Birthday(
-            guild_id=guild.id,
-            user_id=member.id,
-            day=today.day,
-            month=today.month,
-            year=None,
-        )
-
-    @birthday.command(
-        name="test-reminder",
-        description="[тест] Напоминание о ДР без пинга (только тебе)",
-    )
-    @app_commands.describe(member="Участник")
-    @app_commands.guild_only()
-    async def birthday_test_reminder(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member,
-    ) -> None:
-        if interaction.guild is None:
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        birthday = await self._debug_birthday_for(interaction.guild, member)
-        embed = self.bot.birthday_service.reminder_embed(
-            interaction.guild,
-            birthday,
-            days=max(config.birthday_reminder_days, 1),
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @birthday.command(
-        name="test-announce",
-        description="[тест] ИИ-поздравление в день ДР с пингом (только тебе)",
-    )
-    @app_commands.describe(member="Участник")
-    @app_commands.guild_only()
-    async def birthday_test_announce(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member,
-    ) -> None:
-        if interaction.guild is None:
-            return
-        await interaction.response.defer(ephemeral=True)
-        birthday = await self._debug_birthday_for(interaction.guild, member)
-        today = datetime.now(ZoneInfo("Europe/Moscow")).date()
-        embed, _used_ai = await self.bot.birthday_service.announce_embed(
-            interaction.guild,
-            birthday,
-            today,
-            self.bot.ai_service,
-            mention=True,
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @birthday.command(
-        name="test-rgb-on",
-        description="[тест] Выдать RGB-роль именинника",
-    )
-    @app_commands.describe(member="Участник")
-    @app_commands.guild_only()
-    async def birthday_test_rgb_on(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member,
-    ) -> None:
-        if interaction.guild is None:
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            result = await self.bot.birthday_star_service.grant(
-                interaction.guild,
-                member,
-                granted_on=date.today(),
-                force=True,
-            )
-        except ValueError as exc:
-            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        await interaction.followup.send(content=result, ephemeral=True)
-
-    @birthday.command(
-        name="test-rgb-off",
-        description="[тест] Снять RGB-роль именинника",
-    )
-    @app_commands.describe(member="Участник")
-    @app_commands.guild_only()
-    async def birthday_test_rgb_off(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member,
-    ) -> None:
-        if interaction.guild is None:
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            result = await self.bot.birthday_star_service.revoke(interaction.guild, member)
-        except ValueError as exc:
-            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        await interaction.followup.send(content=result, ephemeral=True)
-
-    @birthday.command(
-        name="test-rgb-ensure",
-        description="[тест] Создать роль 🎂 Именинник, если её ещё нет",
-    )
-    @app_commands.guild_only()
-    async def birthday_test_rgb_ensure(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            role = await self.bot.birthday_star_service.get_or_create_star_role(interaction.guild)
-        except ValueError as extra:
-            await interaction.followup.send(embed=error_embed(str(extra)), ephemeral=True)
-            return
-        await interaction.followup.send(
-            embed=success_embed(
-                "Роль именинника",
-                f"{role.mention} готова. RGB крутится, пока роль на ком-то надета.",
             ),
             ephemeral=True,
         )
