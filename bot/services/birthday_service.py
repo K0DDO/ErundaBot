@@ -171,7 +171,7 @@ class BirthdayService:
         if not entries:
             parts.extend(["", "_Пока никто не указал день рождения._"])
         else:
-            parts.extend(["", self.format_board_lines(entries, limit=limit)])
+            parts.extend(["", self.format_board_lines(guild, entries, limit=limit)])
 
         view = ui.LayoutView(timeout=None)
         container = ui.Container(accent_color=BRAND_COLOR)
@@ -179,13 +179,15 @@ class BirthdayService:
         view.add_item(container)
         return view
 
-    def format_entry_line(self, entry: BirthdayEntry) -> str:
+    def format_entry_line(self, guild: discord.Guild, entry: BirthdayEntry) -> str:
         bday = entry.birthday
         when = format_birthday_date(bday.day, bday.month)
-        return f"<@{bday.user_id}> — {when} ({self.entry_timing(entry)})"
+        name = member_display(guild, bday.user_id)
+        return f"**{name}** — {when} ({self.entry_timing(entry)})"
 
     def format_board_lines(
         self,
+        guild: discord.Guild,
         entries: list[BirthdayEntry],
         *,
         limit: int = 30,
@@ -194,7 +196,7 @@ class BirthdayService:
             return "_Пока никто не указал день рождения._"
         lines: list[str] = []
         for entry in entries[:limit]:
-            lines.append(f"• {self.format_entry_line(entry)}")
+            lines.append(f"• {self.format_entry_line(guild, entry)}")
         if len(entries) > limit:
             lines.append(f"_…и ещё {len(entries) - limit}_")
         return "\n".join(lines)
@@ -214,12 +216,7 @@ class BirthdayService:
         if config.birthday_board_message_id:
             try:
                 message = await channel.fetch_message(config.birthday_board_message_id)
-                await message.edit(
-                    content=None,
-                    embeds=[],
-                    view=view,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                await message.edit(content=None, embeds=[], view=view)
                 return
             except discord.NotFound:
                 await self.db.set_birthday_board_message_id(guild.id, None)
@@ -228,10 +225,7 @@ class BirthdayService:
                 return
 
         try:
-            message = await channel.send(
-                view=view,
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
+            message = await channel.send(view=view)
             await self.db.set_birthday_board_message_id(guild.id, message.id)
         except discord.HTTPException:
             log.exception("Failed to post birthday board in guild %s", guild.id)

@@ -92,7 +92,9 @@ class BirthdaysCog(commands.Cog):
 
         lines: list[str] = []
         for entry in entries[:25]:
-            lines.append(self.bot.birthday_service.format_entry_line(entry))
+            lines.append(
+                self.bot.birthday_service.format_entry_line(interaction.guild, entry)
+            )
 
         more = ""
         if len(entries) > 25:
@@ -103,7 +105,6 @@ class BirthdaysCog(commands.Cog):
                 title="Дни рождения",
                 description="\n".join(lines) + more,
             ),
-            allowed_mentions=discord.AllowedMentions.none(),
             ephemeral=True,
         )
 
@@ -120,11 +121,7 @@ class BirthdaysCog(commands.Cog):
             interaction.guild,
             config,
         )
-        await interaction.response.send_message(
-            view=view,
-            allowed_mentions=discord.AllowedMentions.none(),
-            ephemeral=True,
-        )
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @birthday.command(name="next", description="Ближайший день рождения")
     @app_commands.guild_only()
