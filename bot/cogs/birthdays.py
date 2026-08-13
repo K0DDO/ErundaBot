@@ -11,7 +11,6 @@ from discord.ext import commands
 
 from bot.services.birthday_service import format_birthday_date, member_display
 from bot.utils.embeds import base_embed, error_embed, success_embed
-from bot.utils.permissions import is_guild_admin
 from bot.views.birthday_views import BirthdayPreviewView, BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
@@ -60,13 +59,7 @@ class BirthdaysCog(commands.Cog):
         interaction: discord.Interaction,
         member: discord.Member,
     ) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        if not is_guild_admin(interaction.user):
-            await interaction.response.send_message(
-                embed=error_embed("Нужны права администратора или Manage Server"),
-                ephemeral=True,
-            )
+        if interaction.guild is None:
             return
         await interaction.response.send_modal(
             BirthdaySetModal(self.bot, interaction.guild.id, member.id)
