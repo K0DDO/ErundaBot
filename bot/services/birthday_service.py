@@ -159,6 +159,7 @@ class BirthdayService:
         config: GuildConfig,
         *,
         person_limit: int | None = None,
+        colored_names: bool = False,
     ) -> ui.LayoutView:
         limit = person_limit if person_limit is not None else self.MAX_BOARD_ENTRIES
         entries = await self.list_sorted(guild.id, config.timezone)
@@ -171,7 +172,15 @@ class BirthdayService:
         if not entries:
             parts.extend(["", "_Пока никто не указал день рождения._"])
         else:
-            parts.extend(["", self.format_board_lines(guild, entries, limit=limit)])
+            parts.extend([
+                "",
+                self.format_board_lines(
+                    guild,
+                    entries,
+                    limit=limit,
+                    colored_names=colored_names,
+                ),
+            ])
 
         view = ui.LayoutView(timeout=None)
         container = ui.Container(accent_color=BRAND_COLOR)
