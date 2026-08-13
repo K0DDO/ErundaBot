@@ -10,7 +10,6 @@ from discord.ext import commands
 
 from bot.bot import ErundaBot
 from bot.utils.embeds import base_embed, error_embed, success_embed
-from bot.utils.permissions import is_guild_admin
 from bot.views.quote_views import QuoteComposeModal, QuoteEditModal
 
 log = logging.getLogger(__name__)
@@ -147,12 +146,6 @@ class QuotesCog(commands.Cog):
     @app_commands.guild_only()
     async def quote_cleanup(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        if not is_guild_admin(interaction.user):
-            await interaction.response.send_message(
-                embed=error_embed("Нужны права администратора"),
-                ephemeral=True,
-            )
             return
         config = await self.bot.config_service.get(interaction.guild.id)
         if not config.quotes_channel_id:
