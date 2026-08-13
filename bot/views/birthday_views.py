@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 import discord
 from discord import ui
 
-from bot.database.models import Birthday
 from bot.services.birthday_service import format_birthday_date
 from bot.utils.birthday_emojis import resolve_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR, error_embed, success_embed
@@ -132,18 +131,8 @@ class BirthdaySetModal(discord.ui.Modal, title="Указать / изменит�
         await interaction.response.send_message(
             embed=success_embed(
                 "День рождения сохранён",
-                self._success_description(interaction, birthday),
+                f"{birthday.emoji} {format_birthday_date(birthday.day, birthday.month, birthday.year)}",
             ),
             ephemeral=True,
         )
         await refresh_birthday_board(self.bot, interaction.guild)
-
-    def _success_description(self, interaction: discord.Interaction, birthday: Birthday) -> str:
-        date_text = format_birthday_date(birthday.day, birthday.month, birthday.year)
-        line = f"{birthday.emoji} {date_text}"
-        if interaction.guild is None or self.user_id == interaction.user.id:
-            return line
-        target = interaction.guild.get_member(self.user_id)
-        if target is None:
-            return f"<@{self.user_id}>: {line}"
-        return f"{target.mention}: {line}"

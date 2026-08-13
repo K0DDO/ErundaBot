@@ -48,23 +48,6 @@ class BirthdaysCog(commands.Cog):
             BirthdaySetModal(self.bot, interaction.guild.id, interaction.user.id)
         )
 
-    @birthday.command(
-        name="set-for",
-        description="[временно] Указать день рождения другому участнику",
-    )
-    @app_commands.describe(member="Участник")
-    @app_commands.guild_only()
-    async def birthday_set_for(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member,
-    ) -> None:
-        if interaction.guild is None:
-            return
-        await interaction.response.send_modal(
-            BirthdaySetModal(self.bot, interaction.guild.id, member.id)
-        )
-
     @birthday.command(name="remove", description="Удалить свой день рождения")
     @app_commands.guild_only()
     async def birthday_remove(self, interaction: discord.Interaction) -> None:
