@@ -8,7 +8,7 @@ import discord
 from discord import ui
 
 from bot.services.birthday_service import format_birthday_date
-from bot.utils.birthday_emojis import normalize_birthday_emoji
+from bot.utils.birthday_emojis import resolve_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR, error_embed, success_embed
 
 if TYPE_CHECKING:
@@ -75,9 +75,9 @@ class BirthdaySetModal(discord.ui.Modal, title="Указать день рожд
     )
     emoji = discord.ui.TextInput(
         label="Эмодзи перед именем",
-        placeholder="🎂",
+        placeholder=":cristo: или 🎂",
         required=False,
-        max_length=8,
+        max_length=64,
     )
 
     def __init__(self, bot: ErundaBot, guild_id: int, user_id: int) -> None:
@@ -93,7 +93,11 @@ class BirthdaySetModal(discord.ui.Modal, title="Указать день рожд
             year_raw = str(self.year.value).strip() if self.year.value else ""
             year = int(year_raw) if year_raw else None
             emoji_raw = str(self.emoji.value).strip() if self.emoji.value else ""
-            emoji = normalize_birthday_emoji(emoji_raw or "🎂", user_id=self.user_id)
+            emoji = resolve_birthday_emoji(
+                interaction.guild,
+                emoji_raw if emoji_raw else "🎂",
+                user_id=self.user_id,
+            )
             birthday = await self.bot.birthday_service.set_birthday(
                 self.guild_id,
                 self.user_id,
