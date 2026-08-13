@@ -203,14 +203,7 @@ class BirthdaysCog(commands.Cog):
             birthday,
             days=max(config.birthday_reminder_days, 1),
         )
-        await interaction.response.send_message(
-            content=(
-                f"Тест для {member.mention}. Пинга нет, только имя.\n"
-                f"Дата: {format_birthday_date(birthday.day, birthday.month)}"
-            ),
-            embed=embed,
-            ephemeral=True,
-        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @birthday.command(
         name="test-announce",
@@ -228,26 +221,18 @@ class BirthdaysCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         birthday = await self._debug_birthday_for(interaction.guild, member)
         today = datetime.now(ZoneInfo("Europe/Moscow")).date()
-        embed, used_ai = await self.bot.birthday_service.announce_embed(
+        embed, _used_ai = await self.bot.birthday_service.announce_embed(
             interaction.guild,
             birthday,
             today,
             self.bot.ai_service,
             mention=True,
         )
-        source = "Groq" if used_ai else "шаблон (ИИ недоступен или ключ не задан)"
-        await interaction.followup.send(
-            content=(
-                f"Тест поздравления для {member.mention}.\n"
-                f"Источник текста: **{source}**"
-            ),
-            embed=embed,
-            ephemeral=True,
-        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @birthday.command(
         name="test-rgb-on",
-        description="[тест] Выдать RGB-роль именинника и скрыть цветные роли",
+        description="[тест] Выдать RGB-роль именинника",
     )
     @app_commands.describe(member="Участник")
     @app_commands.guild_only()
@@ -269,14 +254,11 @@ class BirthdaysCog(commands.Cog):
         except ValueError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.followup.send(
-            embed=success_embed("RGB именинник", result),
-            ephemeral=True,
-        )
+        await interaction.followup.send(content=result, ephemeral=True)
 
     @birthday.command(
         name="test-rgb-off",
-        description="[тест] Снять RGB-роль именинника и вернуть цветные роли",
+        description="[тест] Снять RGB-роль именинника",
     )
     @app_commands.describe(member="Участник")
     @app_commands.guild_only()
@@ -293,10 +275,7 @@ class BirthdaysCog(commands.Cog):
         except ValueError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.followup.send(
-            embed=success_embed("RGB снята", result),
-            ephemeral=True,
-        )
+        await interaction.followup.send(content=result, ephemeral=True)
 
     @birthday.command(
         name="test-rgb-ensure",

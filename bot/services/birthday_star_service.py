@@ -74,19 +74,25 @@ class BirthdayStarService:
         except discord.HTTPException:
             log.warning("Could not reposition birthday star role %s", role.id)
 
-    def _colored_roles_to_hide(
+    async def _personal_roles_to_hide(
         self,
+        guild: discord.Guild,
         member: discord.Member,
         star_role: discord.Role,
     ) -> list[discord.Role]:
-        hidden: list[discord.Role] = []
-        for role in member.roles:
-            if role.is_default() or role.managed or role.id == star_role.id:
-                continue
-            if role.colour.value == 0:
-                continue
-            hidden.append(role)
-        return hidden
+        record = await self.db.get_personal_role(guild.id, member.id)
+        if record is None:
+            return []
+        role = guild.get_role(record.role_id)
+        if (
+            role is None
+            or role.id == star_role.id
+            or role not in member.roles
+            or role.is_default()
+            or role.managed
+        ):
+            return []
+        return [role]
 
     async def grant(
         self,
@@ -105,14 +111,14 @@ class BirthdayStarService:
         if existing is None and len(holders) >= MAX_STAR_HOLDERS and not force:
             raise ValueError(
                 f"Уже выдано {MAX_STAR_HOLDERS} ролей именинника. "
-                "Снимите одну через `/birthday debug rgb-off`"
+                "Снимите одну через `/birthday test-rgb-off`"
             )
-        hidden_roles = self._colored_roles_to_hide(member, star_role)
+        hidden_roles = await self._personal_roles_to_hide(guild, member, star_role)
         if hidden_roles:
             try:
                 await member.remove_roles(*hidden_roles, reason="Ерунда: RGB именинника поверх цвета")
-            except discord.HTTPException as exc:
-                raise ValueError("Не удалось временно снять цветные роли") from exc
+            except discord.HTTPException as extra:
+                raise ValueError("Не удалось временно снять персональную роль") from extra
         try:
             await member.add_roles(star_role, reason="Ерунда: день рождения")
         except discord.HTTPException as exc:
@@ -129,11 +135,7 @@ class BirthdayStarService:
             json.dumps([role.id for role in hidden_roles]),
             today.isoformat(),
         )
-        hidden_names = ", ".join(role.name for role in hidden_roles) if hidden_roles else "нет"
-        return (
-            f"{member.mention} получил роль **{star_role.name}**. "
-            f"Временно скрыты цветные роли: {hidden_names}"
-        )
+        return f"{member.mention} получил роль **{star_role.name}**"
 
     async def revoke(
         self,
@@ -143,7 +145,6 @@ class BirthdayStarService:
         grant = await self.db.get_birthday_star_grant(guild.id, member.id)
         config = await self.db.ensure_guild(guild.id)
         star_role = guild.get_role(config.birthday_star_role_id) if config.birthday_star_role_id else None
-        restored: list[str] = []
         if grant is not None:
             try:
                 hidden_ids = [int(value) for value in json.loads(grant.hidden_role_ids or "[]")]
@@ -153,7 +154,6 @@ class BirthdayStarService:
             if restore_roles:
                 try:
                     await member.add_roles(*restore_roles, reason="Ерунда: вернуть цвет после ДР")
-                    restored = [role.name for role in restore_roles]
                 except discord.HTTPException:
                     log.warning("Could not restore roles for %s in guild %s", member.id, guild.id)
             await self.db.delete_birthday_star_grant(guild.id, member.id)
@@ -162,8 +162,7 @@ class BirthdayStarService:
                 await member.remove_roles(star_role, reason="Ерунда: день рождения закончился")
             except discord.HTTPException:
                 log.warning("Could not remove star role from %s", member.id)
-        restored_text = ", ".join(restored) if restored else "нет"
-        return f"Роль именинника снята с {member.mention}. Возвращены роли: {restored_text}"
+        return f"Роль именинника снята с {member.mention}"
 
     async def sync_today(
         self,
