@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from bot.services.birthday_service import format_birthday_date, member_display
 from bot.utils.embeds import base_embed, error_embed, success_embed
+from bot.utils.permissions import is_guild_admin
 from bot.views.birthday_views import BirthdayPreviewView, BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
@@ -46,6 +47,29 @@ class BirthdaysCog(commands.Cog):
             return
         await interaction.response.send_modal(
             BirthdaySetModal(self.bot, interaction.guild.id, interaction.user.id)
+        )
+
+    @birthday.command(
+        name="set-for",
+        description="[временно] Указать день рождения другому участнику",
+    )
+    @app_commands.describe(member="Участник")
+    @app_commands.guild_only()
+    async def birthday_set_for(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        if not is_guild_admin(interaction.user):
+            await interaction.response.send_message(
+                embed=error_embed("Нужны права администратора или Manage Server"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            BirthdaySetModal(self.bot, interaction.guild.id, member.id)
         )
 
     @birthday.command(name="remove", description="Удалить свой день рождения")
