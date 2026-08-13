@@ -18,14 +18,23 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-PREVIEW_WIDTH = 520
-PADDING = 16
-AVATAR_SIZE = 40
-ROW_HEIGHT = 56
-ROW_GAP = 4
+SCALE = 2
+
+PREVIEW_WIDTH = 520 * SCALE
+PADDING = 16 * SCALE
+AVATAR_SIZE = 40 * SCALE
+ROW_HEIGHT = 56 * SCALE
+ROW_GAP = 4 * SCALE
+TEXT_GAP = 12 * SCALE
+NAME_Y_OFFSET = 6 * SCALE
+DATE_Y_OFFSET = 28 * SCALE
+MORE_Y_OFFSET = 18 * SCALE
+NAME_FONT_SIZE = 16 * SCALE
+DATE_FONT_SIZE = 14 * SCALE
+AVATAR_FETCH_SIZE = 256
 
 BG_COLOR = (49, 51, 56)  # #313338
-NAME_COLOR = (242, 243, 245)  # #f2f3f5
+DEFAULT_NAME_COLOR = (242, 243, 245)  # #f2f3f5
 DATE_COLOR = (148, 155, 164)  # #949ba4
 MORE_COLOR = (114, 118, 125)  # #72767d
 
@@ -66,10 +75,20 @@ def _circle_avatar(image: Image.Image, size: int) -> Image.Image:
     return output
 
 
+def _member_name_color(guild: discord.Guild, user_id: int) -> tuple[int, int, int]:
+    member = guild.get_member(user_id)
+    if member is None:
+        return DEFAULT_NAME_COLOR
+    colour = member.colour
+    if colour.value == 0:
+        return DEFAULT_NAME_COLOR
+    return colour.to_rgb()
+
+
 def _avatar_url(guild: discord.Guild, user_id: int) -> str:
     member = guild.get_member(user_id)
     if member is not None:
-        return member.display_avatar.replace(size=128).url
+        return member.display_avatar.replace(size=AVATAR_FETCH_SIZE).url
     return f"https://cdn.discordapp.com/embed/avatars/{user_id % 5}.png"
 
 
@@ -110,16 +129,17 @@ async def render_birthday_preview_image(
 
     canvas = Image.new("RGB", (PREVIEW_WIDTH, height), BG_COLOR)
     draw = ImageDraw.Draw(canvas)
-    name_font = _load_font(16, bold=True)
-    date_font = _load_font(14)
+    name_font = _load_font(NAME_FONT_SIZE, bold=True)
+    date_font = _load_font(DATE_FONT_SIZE)
 
     async with aiohttp.ClientSession() as session:
         for index, entry in enumerate(shown):
             y = PADDING + index * (ROW_HEIGHT + ROW_GAP)
             avatar_x = PADDING
-            text_x = PADDING + AVATAR_SIZE + 12
+            text_x = PADDING + AVATAR_SIZE + TEXT_GAP
+            user_id = entry.birthday.user_id
 
-            avatar = await _fetch_avatar(session, _avatar_url(guild, entry.birthday.user_id))
+            avatar = await _fetch_avatar(session, _avatar_url(guild, user_id))
             if avatar is not None:
                 circled = _circle_avatar(avatar, AVATAR_SIZE)
                 canvas.paste(
@@ -128,17 +148,27 @@ async def render_birthday_preview_image(
                     circled,
                 )
 
-            name = member_display(guild, entry.birthday.user_id)
+            name = member_display(guild, user_id)
             when = format_birthday_date(entry.birthday.day, entry.birthday.month)
             date_line = f"{when} ({_entry_timing(entry)})"
 
-            draw.text((text_x, y + 6), name, fill=NAME_COLOR, font=name_font)
-            draw.text((text_x, y + 28), date_line, fill=DATE_COLOR, font=date_font)
+            draw.text(
+                (text_x, y + NAME_Y_OFFSET),
+                name,
+                fill=_member_name_color(guild, user_id),
+                font=name_font,
+            )
+            draw.text(
+                (text_x, y + DATE_Y_OFFSET),
+                date_line,
+                fill=DATE_COLOR,
+                font=date_font,
+            )
 
         if extra > 0:
             y = PADDING + len(shown) * (ROW_HEIGHT + ROW_GAP)
             draw.text(
-                (PADDING, y + 18),
+                (PADDING, y + MORE_Y_OFFSET),
                 f"…и ещё {extra}",
                 fill=MORE_COLOR,
                 font=date_font,
