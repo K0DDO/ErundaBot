@@ -159,7 +159,6 @@ class BirthdayService:
         config: GuildConfig,
         *,
         person_limit: int | None = None,
-        colored_names: bool = False,
     ) -> ui.LayoutView:
         limit = person_limit if person_limit is not None else self.MAX_BOARD_ENTRIES
         entries = await self.list_sorted(guild.id, config.timezone)
@@ -172,15 +171,7 @@ class BirthdayService:
         if not entries:
             parts.extend(["", "_Пока никто не указал день рождения._"])
         else:
-            parts.extend([
-                "",
-                self.format_board_lines(
-                    guild,
-                    entries,
-                    limit=limit,
-                    colored_names=colored_names,
-                ),
-            ])
+            parts.extend(["", self.format_board_lines(guild, entries, limit=limit)])
 
         view = ui.LayoutView(timeout=None)
         container = ui.Container(accent_color=BRAND_COLOR)
@@ -188,20 +179,68 @@ class BirthdayService:
         view.add_item(container)
         return view
 
-    def format_entry_line(
+    async def build_preview_view(
         self,
         guild: discord.Guild,
-        entry: BirthdayEntry,
-        *,
-        colored_names: bool = False,
-    ) -> str:
+        config: GuildConfig,
+    ) -> ui.LayoutView:
+        limit = self.MAX_BOARD_ENTRIES
+        entries = await self.list_sorted(guild.id, config.timezone)
+
+        parts = [
+            "## 🎂 Дни рождения на сервере",
+            "",
+            "**Как добавить свой день рождения**",
+            "• `/birthday set` — указать дату",
+            "• `/birthday remove` — удалить дату",
+        ]
+        if not entries:
+            parts.extend(["", "_Пока никто не указал день рождения._"])
+        else:
+            parts.extend(["", "### 📋 Ближайшие", "", self.format_preview_lines(guild, entries, limit=limit)])
+
+        view = ui.LayoutView(timeout=None)
+        container = ui.Container(accent_color=BRAND_COLOR)
+        container.add_item(ui.TextDisplay("\n".join(parts)))
+        view.add_item(container)
+        return view
+
+    @staticmethod
+    def _timing_emoji(entry: BirthdayEntry) -> str:
+        if entry.days_until == 0:
+            return "🎉"
+        if entry.days_until == 1:
+            return "⏰"
+        return "📅"
+
+    def format_preview_entry(self, guild: discord.Guild, entry: BirthdayEntry) -> str:
         bday = entry.birthday
         when = format_birthday_date(bday.day, bday.month)
-        timing = self.entry_timing(entry)
-        if colored_names:
-            return f"<@{bday.user_id}> — {when} ({timing})"
         name = member_display(guild, bday.user_id)
-        return f"**{name}** — {when} ({timing})"
+        timing = self.entry_timing(entry)
+        emoji = self._timing_emoji(entry)
+        return f"👤 **{name}**\n{emoji} {when} · _{timing}_"
+
+    def format_preview_lines(
+        self,
+        guild: discord.Guild,
+        entries: list[BirthdayEntry],
+        *,
+        limit: int = 30,
+    ) -> str:
+        blocks = [
+            self.format_preview_entry(guild, entry)
+            for entry in entries[:limit]
+        ]
+        if len(entries) > limit:
+            blocks.append(f"📌 _…и ещё {len(entries) - limit}_")
+        return "\n\n".join(blocks)
+
+    def format_entry_line(self, guild: discord.Guild, entry: BirthdayEntry) -> str:
+        bday = entry.birthday
+        when = format_birthday_date(bday.day, bday.month)
+        name = member_display(guild, bday.user_id)
+        return f"**{name}** — {when} ({self.entry_timing(entry)})"
 
     def format_board_lines(
         self,
@@ -209,15 +248,12 @@ class BirthdayService:
         entries: list[BirthdayEntry],
         *,
         limit: int = 30,
-        colored_names: bool = False,
     ) -> str:
         if not entries:
             return "_Пока никто не указал день рождения._"
         lines: list[str] = []
         for entry in entries[:limit]:
-            lines.append(
-                f"• {self.format_entry_line(guild, entry, colored_names=colored_names)}"
-            )
+            lines.append(f"• {self.format_entry_line(guild, entry)}")
         if len(entries) > limit:
             lines.append(f"_…и ещё {len(entries) - limit}_")
         return "\n".join(lines)

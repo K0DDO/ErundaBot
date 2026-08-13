@@ -117,16 +117,11 @@ class BirthdaysCog(commands.Cog):
         if interaction.guild is None:
             return
         config = await self.bot.config_service.get(interaction.guild.id)
-        view = await self.bot.birthday_service.build_board_view(
+        view = await self.bot.birthday_service.build_preview_view(
             interaction.guild,
             config,
-            colored_names=True,
         )
-        await interaction.response.send_message(
-            view=view,
-            allowed_mentions=discord.AllowedMentions.none(),
-            ephemeral=True,
-        )
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @birthday.command(name="next", description="Ближайший день рождения")
     @app_commands.guild_only()
