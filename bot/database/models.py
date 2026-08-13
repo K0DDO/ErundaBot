@@ -15,7 +15,7 @@ class GuildConfig:
     proposals_channel_id: int | None = None
     quotes_channel_id: int | None = None
     statistics_enabled: bool = True
-    personal_roles_enabled: bool = False
+    personal_roles_enabled: bool = True
     auto_execute_proposals: bool = False
     rgb_enabled: bool = True
     birthday_announce_time: str = "09:00"
