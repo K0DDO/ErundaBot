@@ -40,13 +40,6 @@ class RolesCog(commands.Cog):
     async def myrole_delete(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not config.personal_roles_enabled:
-            await interaction.response.send_message(
-                embed=error_embed("Персональные роли отключены"),
-                ephemeral=True,
-            )
-            return
         try:
             await self.bot.role_service.delete_personal_role(
                 interaction.guild,

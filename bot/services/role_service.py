@@ -18,6 +18,25 @@ class RoleService:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    async def _resolve_personal_role(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+    ) -> tuple[discord.Role, CustomRole] | None:
+        """Return the member's personal role or None if the DB record is stale."""
+        record = await self.db.get_personal_role(guild.id, member.id)
+        if record is None:
+            return None
+        role = guild.get_role(record.role_id)
+        if (
+            role is None
+            or record.owner_id != member.id
+            or role not in member.roles
+        ):
+            await self.db.delete_personal_role_record(guild.id, member.id)
+            return None
+        return role, record
+
     @staticmethod
     async def position_personal_role(bot_member: discord.Member, role: discord.Role) -> None:
         """Move personal role high enough so its colour is visible in the member list."""
@@ -96,14 +115,11 @@ class RoleService:
         config = await self.db.ensure_guild(guild.id)
         if not config.personal_roles_enabled:
             raise ValueError("Персональные роли отключены в /config")
-        existing = await self.db.get_personal_role(guild.id, member.id)
-        if existing:
-            role = guild.get_role(existing.role_id)
-            if role is None:
-                await self.db.delete_custom_role_record(guild.id, existing.role_id)
-            else:
-                await self.position_personal_role(bot_member, role)
-                return role, existing
+        resolved = await self._resolve_personal_role(guild, member)
+        if resolved is not None:
+            role, record = resolved
+            await self.position_personal_role(bot_member, role)
+            return role, record
         if not bot_member.guild_permissions.manage_roles:
             raise ValueError("У бота нет права Manage Roles")
         role = await guild.create_role(
@@ -134,15 +150,14 @@ class RoleService:
         color: int | None = None,
     ) -> tuple[discord.Role, CustomRole]:
         bot_member = bot_member or await fetch_bot_member(guild)
-        record = await self.db.get_personal_role(guild.id, member.id)
-        if record is None:
+        config = await self.db.ensure_guild(guild.id)
+        if not config.personal_roles_enabled:
+            raise ValueError("Персональные роли отключены в /config")
+        resolved = await self._resolve_personal_role(guild, member)
+        if resolved is None:
             role, record = await self.get_or_create_personal_role(guild, member, bot_member)
         else:
-            role = guild.get_role(record.role_id)
-            if role is None:
-                raise ValueError("Роль не найдена, создайте заново через /myrole")
-        if record.owner_id != member.id:
-            raise ValueError("Это не ваша роль")
+            role, record = resolved
         await self.position_personal_role(bot_member, role)
         role = guild.get_role(role.id)
         if role is None:
@@ -171,10 +186,10 @@ class RoleService:
         if record.owner_id != member.id:
             raise ValueError("Можно удалить только свою роль")
         role = guild.get_role(record.role_id)
-        if role is not None:
+        if role is not None and role in member.roles:
             assert_bot_can_manage_role(bot_member, role)
             await role.delete(reason="Ерунда: удаление персональной роли")
-        await self.db.delete_custom_role_record(guild.id, record.role_id)
+        await self.db.delete_personal_role_record(guild.id, member.id)
 
     @staticmethod
     def parse_color(value: str | None) -> int | None:

@@ -268,6 +268,9 @@ class Database:
                     (pick_birthday_emoji(int(row["user_id"])), row["guild_id"], row["user_id"]),
                 )
             await self._db.execute("PRAGMA user_version = 3")
+        if version < 4:
+            await self._db.execute("UPDATE guilds SET personal_roles_enabled = 1")
+            await self._db.execute("PRAGMA user_version = 4")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1018,6 +1021,17 @@ class Database:
         role = await self.get_custom_role_by_role_id(guild_id, role_id)
         assert role is not None
         return role
+
+    async def delete_personal_role_record(self, guild_id: int, owner_id: int) -> bool:
+        cursor = await self.connection.execute(
+            """
+            DELETE FROM custom_roles
+            WHERE guild_id = ? AND owner_id = ? AND kind = 'personal'
+            """,
+            (guild_id, owner_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
 
     async def delete_custom_role_record(self, guild_id: int, role_id: int) -> bool:
         cursor = await self.connection.execute(
