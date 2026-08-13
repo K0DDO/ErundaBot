@@ -104,12 +104,21 @@ class QuoteService:
             return created_at[:10]
 
     def author_avatar_url(self, quote: Quote, guild: discord.Guild | None) -> str | None:
-        if not quote.author_id or guild is None:
+        if guild is None:
             return None
-        member = guild.get_member(quote.author_id)
-        if member is None:
-            return None
-        return member.display_avatar.with_size(64).url
+        for author_id in quote.linked_author_ids():
+            member = guild.get_member(author_id)
+            if member is not None:
+                return member.display_avatar.with_size(64).url
+        return None
+
+    @staticmethod
+    def collect_author_ids(*members: discord.Member | None) -> list[int]:
+        ids: list[int] = []
+        for member in members:
+            if member is not None and member.id not in ids:
+                ids.append(member.id)
+        return ids
 
     def build_quote_card(self, quote: Quote, guild: discord.Guild | None = None):
         from bot.views.quote_views import QuoteCardView
@@ -165,6 +174,7 @@ class QuoteService:
             created,
             self.reactions_snapshot(message),
             author_display=display,
+            author_ids=[message.author.id],
         )
 
     async def add_text(
@@ -176,22 +186,27 @@ class QuoteService:
         author_id: int = 0,
         author_display: str | None = None,
         created_at: str | None = None,
+        author_ids: list[int] | None = None,
     ) -> Quote:
         text = self.normalize_quote_text(content)
         if not text:
             raise ValueError("Текст не может быть пустым")
         if not author_display or not author_display.strip():
             raise ValueError("Укажи имя на карточке")
+        linked = list(author_ids or [])
+        if author_id and author_id not in linked:
+            linked.insert(0, author_id)
         return await self.db.add_quote(
             guild_id,
             text,
-            author_id,
+            linked[0] if linked else 0,
             added_by,
             None,
             None,
             created_at or datetime.utcnow().isoformat(),
             "{}",
             author_display=author_display,
+            author_ids=linked,
         )
 
     async def random(self, guild_id: int) -> Quote | None:
@@ -214,7 +229,7 @@ class QuoteService:
             return True
         if quote.added_by == member.id:
             return True
-        return bool(quote.author_id and quote.author_id == member.id)
+        return member.id in quote.linked_author_ids()
 
     async def update(
         self,
@@ -228,6 +243,7 @@ class QuoteService:
         update_author_id: bool = False,
         update_author_display: bool = False,
         created_at: str | None = None,
+        author_ids: list[int] | None = None,
     ) -> Quote:
         quote = await self.get(guild_id, quote_id)
         if quote is None:
@@ -241,7 +257,11 @@ class QuoteService:
                 raise ValueError("Текст не может быть пустым")
             quote.content = text
         if update_author_id:
-            quote.author_id = author_id or 0
+            linked = list(author_ids or [])
+            if author_id and author_id not in linked:
+                linked.insert(0, author_id)
+            quote.author_ids = linked
+            quote.author_id = linked[0] if linked else 0
         if update_author_display:
             quote.author_display = author_display
         if created_at is not None:
@@ -369,6 +389,8 @@ class QuoteService:
             channel = guild.get_channel(quote.posted_channel_id)
             if isinstance(channel, discord.TextChannel):
                 await try_delete(channel, quote.posted_message_id)
+                if quote.posted_message_id in deleted:
+                    return
 
         config = await self.db.get_guild(guild.id)
         if config is None or config.quotes_channel_id is None:
@@ -480,8 +502,14 @@ class QuoteService:
             raise ValueError("Цитата не найдена")
         if not self.can_manage(quote, member):
             raise ValueError("Нет прав удалить эту цитату")
-        await self.remove_posted_messages(guild, quote)
+        try:
+            await self.remove_posted_messages(guild, quote)
+        except discord.HTTPException:
+            log.warning("Failed to remove posted quote #%s in guild %s", quote.number, guild.id)
         deleted = await self.db.delete_quote(quote.id, guild_id)
         if not deleted:
             raise ValueError("Цитата не найдена")
-        await self.renumber_and_sync(guild)
+        try:
+            await self.renumber_and_sync(guild)
+        except discord.HTTPException:
+            log.warning("Failed to renumber quotes after deleting #%s", quote.number)

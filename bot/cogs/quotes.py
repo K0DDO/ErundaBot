@@ -14,6 +14,19 @@ from bot.views.quote_views import QuoteComposeModal, QuoteEditModal
 
 log = logging.getLogger(__name__)
 
+AUTHOR_MENTION = "Через @, необязательно. На карточке не показывается, нужен для поиска"
+AUTHOR_MORE = "Ещё один @, необязательно, на карточке не показывается"
+
+
+def _collect_members(*members: discord.Member | None) -> list[discord.Member]:
+    seen: list[discord.Member] = []
+    ids: set[int] = set()
+    for member in members:
+        if member is not None and member.id not in ids:
+            seen.append(member)
+            ids.add(member.id)
+    return seen
+
 
 async def publish_quote(
     bot: ErundaBot,
@@ -67,40 +80,68 @@ class QuotesCog(commands.Cog):
 
     @quote.command(name="add", description="Добавить цитату вручную")
     @app_commands.describe(
-        author="Через @, необязательно. На карточке не показывается, нужен для поиска",
+        author=AUTHOR_MENTION,
+        author2=AUTHOR_MORE,
+        author3=AUTHOR_MORE,
+        author4=AUTHOR_MORE,
+        author5=AUTHOR_MORE,
     )
     @app_commands.guild_only()
     async def quote_add(
         self,
         interaction: discord.Interaction,
         author: discord.Member | None = None,
+        author2: discord.Member | None = None,
+        author3: discord.Member | None = None,
+        author4: discord.Member | None = None,
+        author5: discord.Member | None = None,
     ) -> None:
         if interaction.guild is None:
             return
         await interaction.response.send_modal(
-            QuoteComposeModal(self.bot, author=author, silent=False),
+            QuoteComposeModal(
+                self.bot,
+                authors=_collect_members(author, author2, author3, author4, author5),
+                silent=False,
+            ),
         )
 
     @quote.command(name="import", description="Добавить цитату в базу без публикации в канал")
     @app_commands.describe(
-        author="Через @, необязательно. На карточке не показывается, нужен для поиска",
+        author=AUTHOR_MENTION,
+        author2=AUTHOR_MORE,
+        author3=AUTHOR_MORE,
+        author4=AUTHOR_MORE,
+        author5=AUTHOR_MORE,
     )
     @app_commands.guild_only()
     async def quote_import(
         self,
         interaction: discord.Interaction,
         author: discord.Member | None = None,
+        author2: discord.Member | None = None,
+        author3: discord.Member | None = None,
+        author4: discord.Member | None = None,
+        author5: discord.Member | None = None,
     ) -> None:
         if interaction.guild is None:
             return
         await interaction.response.send_modal(
-            QuoteComposeModal(self.bot, author=author, silent=True),
+            QuoteComposeModal(
+                self.bot,
+                authors=_collect_members(author, author2, author3, author4, author5),
+                silent=True,
+            ),
         )
 
     @quote.command(name="edit", description="Изменить цитату по номеру")
     @app_commands.describe(
         quote_id="Номер цитаты (см. /quote list или footer у цитаты)",
-        author="Через @, необязательно. На карточке не показывается, нужен для поиска",
+        author=AUTHOR_MENTION,
+        author2=AUTHOR_MORE,
+        author3=AUTHOR_MORE,
+        author4=AUTHOR_MORE,
+        author5=AUTHOR_MORE,
     )
     @app_commands.guild_only()
     async def quote_edit(
@@ -108,6 +149,10 @@ class QuotesCog(commands.Cog):
         interaction: discord.Interaction,
         quote_id: int,
         author: discord.Member | None = None,
+        author2: discord.Member | None = None,
+        author3: discord.Member | None = None,
+        author4: discord.Member | None = None,
+        author5: discord.Member | None = None,
     ) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
@@ -124,7 +169,13 @@ class QuotesCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(QuoteEditModal(self.bot, quote, author))
+        await interaction.response.send_modal(
+            QuoteEditModal(
+                self.bot,
+                quote,
+                _collect_members(author, author2, author3, author4, author5),
+            ),
+        )
 
     @quote.command(name="delete", description="Удалить цитату по номеру")
     @app_commands.describe(quote_id="Номер цитаты")
@@ -136,6 +187,7 @@ class QuotesCog(commands.Cog):
     ) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
+        await interaction.response.defer(ephemeral=True)
         try:
             await self.bot.quote_service.delete(
                 interaction.guild,
@@ -144,9 +196,9 @@ class QuotesCog(commands.Cog):
                 interaction.user,
             )
         except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=success_embed(f"Цитата #{quote_id} удалена, номера обновлены"),
             ephemeral=True,
         )

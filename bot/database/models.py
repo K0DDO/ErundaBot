@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -128,11 +129,34 @@ class Quote:
     posted_channel_id: int | None = None
     posted_message_id: int | None = None
     number: int = 0
+    author_ids: list[int] = field(default_factory=list)
+
+    def linked_author_ids(self) -> list[int]:
+        ids: list[int] = []
+        for value in self.author_ids:
+            if value and value not in ids:
+                ids.append(int(value))
+        if self.author_id and self.author_id not in ids:
+            ids.insert(0, int(self.author_id))
+        return ids
 
     @classmethod
     def from_row(cls, row: Any) -> Quote:
         keys = row.keys()
         number = row["number"] if "number" in keys else None
+        raw_ids = row["author_ids"] if "author_ids" in keys else "[]"
+        try:
+            parsed = json.loads(raw_ids or "[]")
+        except (TypeError, json.JSONDecodeError):
+            parsed = []
+        author_ids = []
+        for value in parsed:
+            try:
+                author_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if author_id and author_id not in author_ids:
+                author_ids.append(author_id)
         return cls(
             id=row["id"],
             guild_id=row["guild_id"],
@@ -148,6 +172,7 @@ class Quote:
             posted_channel_id=row["posted_channel_id"] if "posted_channel_id" in keys else None,
             posted_message_id=row["posted_message_id"] if "posted_message_id" in keys else None,
             number=int(number) if number else row["id"],
+            author_ids=author_ids,
         )
 
 

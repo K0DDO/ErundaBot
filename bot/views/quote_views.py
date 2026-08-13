@@ -81,15 +81,15 @@ class QuoteComposeModal(ui.Modal):
         self,
         bot: ErundaBot,
         *,
-        author: discord.Member | None,
+        authors: list[discord.Member],
         silent: bool,
     ) -> None:
         super().__init__(title="Импорт цитаты" if silent else "Новая цитата")
         self.bot = bot
-        self.author = author
+        self.authors = authors
         self.silent = silent
-        if author is not None:
-            self.name.default = author.display_name[:80]
+        if authors:
+            self.name.default = authors[0].display_name[:80]
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
@@ -101,7 +101,8 @@ class QuoteComposeModal(ui.Modal):
                 ephemeral=True,
             )
             return
-        author_id = self.author.id if self.author else 0
+        author_ids = [member.id for member in self.authors]
+        author_id = author_ids[0] if author_ids else 0
 
         created_at: str | None = None
         date_value = str(self.date.value).strip()
@@ -120,6 +121,7 @@ class QuoteComposeModal(ui.Modal):
                 author_id=author_id,
                 author_display=display,
                 created_at=created_at,
+                author_ids=author_ids,
             )
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
@@ -175,12 +177,12 @@ class QuoteEditModal(ui.Modal, title="Изменить цитату"):
         self,
         bot: ErundaBot,
         quote: Quote,
-        author: discord.Member | None,
+        authors: list[discord.Member],
     ) -> None:
         super().__init__()
         self.bot = bot
         self.quote = quote
-        self.author = author
+        self.authors = authors
         self.text.default = quote.content[:2000]
         self.name.default = (quote.author_display or "")[:80]
         if quote.created_at:
@@ -201,8 +203,9 @@ class QuoteEditModal(ui.Modal, title="Изменить цитату"):
                 ephemeral=True,
             )
             return
-        update_author_id = self.author is not None
-        author_id = self.author.id if self.author else None
+        author_ids = [member.id for member in self.authors]
+        update_author_id = bool(author_ids)
+        author_id = author_ids[0] if author_ids else None
 
         created_at: str | None = None
         date_value = str(self.date.value).strip()
@@ -224,6 +227,7 @@ class QuoteEditModal(ui.Modal, title="Изменить цитату"):
                 update_author_id=update_author_id,
                 update_author_display=True,
                 created_at=created_at,
+                author_ids=author_ids,
             )
             await self.bot.quote_service.sync_posted_message(interaction.guild, quote)
         except ValueError as exc:

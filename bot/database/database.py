@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -144,6 +145,7 @@ CREATE TABLE IF NOT EXISTS quotes (
     posted_channel_id INTEGER,
     posted_message_id INTEGER,
     number INTEGER NOT NULL DEFAULT 0,
+    author_ids TEXT NOT NULL DEFAULT '[]',
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
 );
 
@@ -334,8 +336,28 @@ class Database:
                 "ON quotes (guild_id, number)"
             )
             await self._db.execute("PRAGMA user_version = 7")
-
-    async def close(self) -> None:
+        if version < 8:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE quotes ADD COLUMN author_ids TEXT NOT NULL DEFAULT '[]'"
+                )
+            except Exception:
+                pass
+            cursor = await self._db.execute("SELECT id, author_id, author_ids FROM quotes")
+            rows = await cursor.fetchall()
+            for row in rows:
+                raw = row["author_ids"] if "author_ids" in row.keys() else "[]"
+                try:
+                    parsed = json.loads(raw or "[]")
+                except Exception:
+                    parsed = []
+                if parsed or not row["author_id"]:
+                    continue
+                await self._db.execute(
+                    "UPDATE quotes SET author_ids = ? WHERE id = ?",
+                    (json.dumps([int(row["author_id"])]), row["id"]),
+                )
+            await self._db.execute("PRAGMA user_version = 8")
         if self._db is not None:
             await self._db.close()
             self._db = None
@@ -899,19 +921,25 @@ class Database:
         created_at: str | None,
         reactions_snapshot: str,
         author_display: str | None = None,
+        author_ids: list[int] | None = None,
     ) -> Quote:
         await self.ensure_guild(guild_id)
         number = await self.next_quote_number(guild_id)
+        linked = list(author_ids or [])
+        if author_id and author_id not in linked:
+            linked.insert(0, author_id)
+        primary = linked[0] if linked else author_id
         cursor = await self.connection.execute(
             """
             INSERT INTO quotes (
                 guild_id, content, author_id, channel_id, message_id,
-                added_by, created_at, reactions_snapshot, author_display, number
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                added_by, created_at, reactions_snapshot, author_display, number, author_ids
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                guild_id, content, author_id, channel_id, message_id,
+                guild_id, content, primary, channel_id, message_id,
                 added_by, created_at, reactions_snapshot, author_display, number,
+                json.dumps(linked),
             ),
         )
         await self.connection.commit()
@@ -944,10 +972,18 @@ class Database:
         if author_id is not None:
             cursor = await self.connection.execute(
                 """
-                SELECT * FROM quotes WHERE guild_id = ? AND author_id = ?
+                SELECT * FROM quotes
+                WHERE guild_id = ?
+                  AND (
+                    author_id = ?
+                    OR EXISTS (
+                      SELECT 1 FROM json_each(COALESCE(author_ids, '[]'))
+                      WHERE CAST(json_each.value AS INTEGER) = ?
+                    )
+                  )
                 ORDER BY saved_at DESC LIMIT ?
                 """,
-                (guild_id, author_id, limit),
+                (guild_id, author_id, author_id, limit),
             )
         else:
             cursor = await self.connection.execute(
@@ -968,8 +1004,18 @@ class Database:
     async def count_quotes(self, guild_id: int, author_id: int | None = None) -> int:
         if author_id is not None:
             cursor = await self.connection.execute(
-                "SELECT COUNT(*) AS c FROM quotes WHERE guild_id = ? AND author_id = ?",
-                (guild_id, author_id),
+                """
+                SELECT COUNT(*) AS c FROM quotes
+                WHERE guild_id = ?
+                  AND (
+                    author_id = ?
+                    OR EXISTS (
+                      SELECT 1 FROM json_each(COALESCE(author_ids, '[]'))
+                      WHERE CAST(json_each.value AS INTEGER) = ?
+                    )
+                  )
+                """,
+                (guild_id, author_id, author_id),
             )
         else:
             cursor = await self.connection.execute(
@@ -1007,7 +1053,7 @@ class Database:
         await self.connection.execute(
             """
             UPDATE quotes
-            SET content = ?, author_id = ?, author_display = ?, created_at = ?
+            SET content = ?, author_id = ?, author_display = ?, created_at = ?, author_ids = ?
             WHERE id = ? AND guild_id = ?
             """,
             (
@@ -1015,6 +1061,7 @@ class Database:
                 quote.author_id,
                 quote.author_display,
                 quote.created_at,
+                json.dumps(quote.linked_author_ids()),
                 quote.id,
                 quote.guild_id,
             ),
