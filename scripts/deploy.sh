@@ -26,10 +26,10 @@ rollback() {
   exit 1
 }
 
-echo "==> git pull"
+echo "==> sync with origin/main"
 git fetch origin main
 git checkout main
-git pull --ff-only origin main
+git reset --hard origin/main
 echo "Host SHA $(git rev-parse --short HEAD)"
 
 echo "==> Build and restart"
