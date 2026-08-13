@@ -13,7 +13,7 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
-from bot.utils.birthday_emojis import normalize_birthday_emoji
+from bot.utils.birthday_emojis import clean_birthday_emoji, escape_markdown_inline, normalize_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR
 from bot.utils.timezones import parse_hhmm
 
@@ -94,7 +94,7 @@ def age_on(birthday: Birthday, on_date: date) -> int | None:
 def member_display(guild: discord.Guild, user_id: int) -> str:
     member = guild.get_member(user_id)
     if member is not None:
-        return member.display_name
+        return escape_markdown_inline(member.display_name)
     return f"участник #{user_id}"
 
 
@@ -205,7 +205,8 @@ class BirthdayService:
         when = format_birthday_date(bday.day, bday.month)
         name = member_display(guild, bday.user_id)
         timing = self.entry_timing(entry)
-        return f"{bday.emoji} **{name}** — {when} · *{timing}*"
+        emoji = clean_birthday_emoji(bday.emoji)
+        return f"{emoji} **{name}** — {when} · *{timing}*"
 
     def format_preview_lines(
         self,
