@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS guilds (
     proposals_channel_id INTEGER,
     quotes_channel_id INTEGER,
     statistics_enabled INTEGER NOT NULL DEFAULT 1,
-    personal_roles_enabled INTEGER NOT NULL DEFAULT 0,
+    personal_roles_enabled INTEGER NOT NULL DEFAULT 1,
     auto_execute_proposals INTEGER NOT NULL DEFAULT 0,
     rgb_enabled INTEGER NOT NULL DEFAULT 1,
     birthday_announce_time TEXT NOT NULL DEFAULT '09:00',
@@ -239,6 +239,15 @@ class Database:
                 await self._db.execute(sql)
             except Exception:
                 pass  # column already exists
+
+        cursor = await self._db.execute("PRAGMA user_version")
+        row = await cursor.fetchone()
+        version = int(row[0]) if row else 0
+        if version < 1:
+            await self._db.execute(
+                "UPDATE guilds SET statistics_enabled = 1, personal_roles_enabled = 1"
+            )
+            await self._db.execute("PRAGMA user_version = 1")
 
     async def close(self) -> None:
         if self._db is not None:
