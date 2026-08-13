@@ -48,5 +48,8 @@ jobs:
           fi
 
           cd "${APP_DIR}"
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
           bash scripts/deploy.sh
           REMOTE
