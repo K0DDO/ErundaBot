@@ -180,7 +180,7 @@ class BirthdayService:
         if not entries:
             parts.extend(["", "_Пока никто не указал день рождения._"])
         else:
-            parts.extend(["", self.format_board_lines(guild, entries, limit=limit)])
+            parts.extend(["", self.format_preview_lines(guild, entries, limit=limit)])
 
         view = ui.LayoutView(timeout=None)
         container = ui.Container(accent_color=BRAND_COLOR)
