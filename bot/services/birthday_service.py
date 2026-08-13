@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import calendar
-import io
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -106,8 +105,6 @@ class BirthdayService:
         "• `/birthday remove` — удалить дату"
     )
     MAX_BOARD_ENTRIES = 30
-    PREVIEW_IMAGE_FILENAME = "birthday-preview.jpg"
-    PREVIEW_IMAGE_LIMIT = 25
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -174,7 +171,7 @@ class BirthdayService:
         if not entries:
             parts.extend(["", "_Пока никто не указал день рождения._"])
         else:
-            parts.extend(["", self.format_board_lines(guild, entries, limit=limit)])
+            parts.extend(["", self.format_board_lines(entries, limit=limit)])
 
         view = ui.LayoutView(timeout=None)
         container = ui.Container(accent_color=BRAND_COLOR)
@@ -182,43 +179,13 @@ class BirthdayService:
         view.add_item(container)
         return view
 
-    async def build_preview_embed(
-        self,
-        guild: discord.Guild,
-        config: GuildConfig,
-    ) -> tuple[discord.Embed, discord.File | None]:
-        from bot.utils.birthday_preview_image import render_birthday_preview_image
-        from bot.utils.embeds import base_embed
-
-        entries = await self.list_sorted(guild.id, config.timezone)
-
-        description = self.BOARD_HELP
-        if not entries:
-            description = f"{self.BOARD_HELP}\n\n_Пока никто не указал день рождения._"
-
-        embed = base_embed(
-            title="🎂 Дни рождения на сервере",
-            description=description,
-        )
-
-        image_file: discord.File | None = None
-        if entries:
-            image_bytes = await render_birthday_preview_image(
-                guild,
-                entries,
-                limit=self.PREVIEW_IMAGE_LIMIT,
-            )
-            image_file = discord.File(
-                io.BytesIO(image_bytes),
-                filename=self.PREVIEW_IMAGE_FILENAME,
-            )
-            embed.set_image(url=f"attachment://{self.PREVIEW_IMAGE_FILENAME}")
-
-        return embed, image_file
+    def format_entry_line(self, entry: BirthdayEntry) -> str:
+        bday = entry.birthday
+        when = format_birthday_date(bday.day, bday.month)
+        return f"<@{bday.user_id}> — {when} ({self.entry_timing(entry)})"
 
     def format_board_lines(
         self,
-        guild: discord.Guild,
         entries: list[BirthdayEntry],
         *,
         limit: int = 30,
@@ -227,16 +194,7 @@ class BirthdayService:
             return "_Пока никто не указал день рождения._"
         lines: list[str] = []
         for entry in entries[:limit]:
-            bday = entry.birthday
-            when = format_birthday_date(bday.day, bday.month)
-            name = member_display(guild, bday.user_id)
-            if entry.days_until == 0:
-                suffix = "сегодня"
-            elif entry.days_until == 1:
-                suffix = "завтра"
-            else:
-                suffix = f"через {entry.days_until} дн."
-            lines.append(f"• **{name}** — {when} ({suffix})")
+            lines.append(f"• {self.format_entry_line(entry)}")
         if len(entries) > limit:
             lines.append(f"_…и ещё {len(entries) - limit}_")
         return "\n".join(lines)
@@ -256,7 +214,12 @@ class BirthdayService:
         if config.birthday_board_message_id:
             try:
                 message = await channel.fetch_message(config.birthday_board_message_id)
-                await message.edit(content=None, embeds=[], view=view)
+                await message.edit(
+                    content=None,
+                    embeds=[],
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
                 return
             except discord.NotFound:
                 await self.db.set_birthday_board_message_id(guild.id, None)
@@ -265,7 +228,10 @@ class BirthdayService:
                 return
 
         try:
-            message = await channel.send(view=view)
+            message = await channel.send(
+                view=view,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             await self.db.set_birthday_board_message_id(guild.id, message.id)
         except discord.HTTPException:
             log.exception("Failed to post birthday board in guild %s", guild.id)

@@ -92,16 +92,7 @@ class BirthdaysCog(commands.Cog):
 
         lines: list[str] = []
         for entry in entries[:25]:
-            bday = entry.birthday
-            when = format_birthday_date(bday.day, bday.month)
-            name = member_display(interaction.guild, bday.user_id)
-            if entry.days_until == 0:
-                suffix = "сегодня"
-            elif entry.days_until == 1:
-                suffix = "завтра"
-            else:
-                suffix = f"через {entry.days_until} дн."
-            lines.append(f"**{name}** — {when} ({suffix})")
+            lines.append(self.bot.birthday_service.format_entry_line(entry))
 
         more = ""
         if len(entries) > 25:
@@ -112,38 +103,28 @@ class BirthdaysCog(commands.Cog):
                 title="Дни рождения",
                 description="\n".join(lines) + more,
             ),
+            allowed_mentions=discord.AllowedMentions.none(),
             ephemeral=True,
         )
 
     @birthday.command(
         name="preview",
-        description="Предпросмотр доски: текст + картинка (только тебе)",
+        description="Предпросмотр доски дней рождения (только тебе)",
     )
     @app_commands.guild_only()
     async def birthday_preview(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             return
-        await interaction.response.defer(ephemeral=True)
         config = await self.bot.config_service.get(interaction.guild.id)
-        try:
-            embed, image_file = await self.bot.birthday_service.build_preview_embed(
-                interaction.guild,
-                config,
-            )
-            if image_file is None:
-                await interaction.followup.send(embed=embed, ephemeral=True)
-            else:
-                await interaction.followup.send(
-                    embed=embed,
-                    file=image_file,
-                    ephemeral=True,
-                )
-        except Exception:
-            log.exception("Failed to render birthday preview for guild %s", interaction.guild.id)
-            await interaction.followup.send(
-                embed=error_embed("Не удалось сгенерировать предпросмотр"),
-                ephemeral=True,
-            )
+        view = await self.bot.birthday_service.build_board_view(
+            interaction.guild,
+            config,
+        )
+        await interaction.response.send_message(
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+            ephemeral=True,
+        )
 
     @birthday.command(name="next", description="Ближайший день рождения")
     @app_commands.guild_only()
