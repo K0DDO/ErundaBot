@@ -1,4 +1,4 @@
-"""Quote compose and edit modals."""
+"""Quote compose, edit, and card UI."""
 
 from __future__ import annotations
 
@@ -9,10 +9,36 @@ import discord
 from discord import ui
 
 from bot.database.models import Quote
-from bot.utils.embeds import error_embed, success_embed
+from bot.utils.embeds import BRAND_COLOR, error_embed, success_embed
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
+
+
+class QuoteCardView(ui.LayoutView):
+    def __init__(
+        self,
+        text: str,
+        *,
+        accent_color: int = BRAND_COLOR,
+        avatar_url: str | None = None,
+        avatar_description: str | None = None,
+    ) -> None:
+        super().__init__(timeout=None)
+        container = ui.Container(accent_color=accent_color)
+        if avatar_url:
+            container.add_item(
+                ui.Section(
+                    ui.TextDisplay(text),
+                    accessory=ui.Thumbnail(
+                        media=avatar_url,
+                        description=(avatar_description or "автор")[:256],
+                    ),
+                )
+            )
+        else:
+            container.add_item(ui.TextDisplay(text))
+        self.add_item(container)
 
 
 class QuoteComposeModal(ui.Modal):
@@ -108,7 +134,7 @@ class QuoteComposeModal(ui.Modal):
                 return
 
         await interaction.response.send_message(
-            embed=self.bot.quote_service.format_quote_embed(quote, interaction.guild),
+            view=self.bot.quote_service.build_quote_card(quote, interaction.guild),
         )
 
 
@@ -187,5 +213,5 @@ class QuoteEditModal(ui.Modal, title="Изменить цитату"):
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         await interaction.response.send_message(
-            embed=self.bot.quote_service.format_quote_embed(quote, interaction.guild),
+            view=self.bot.quote_service.build_quote_card(quote, interaction.guild),
         )

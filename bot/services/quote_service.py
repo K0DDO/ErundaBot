@@ -16,6 +16,23 @@ from bot.utils.permissions import is_guild_admin
 log = logging.getLogger(__name__)
 
 QUOTE_FOOTER_RE = re.compile(r"^#(\d+)$")
+QUOTE_HEADER_RE = re.compile(r"^\*{0,2}#(\d+)\*{0,2}\s*$", re.MULTILINE)
+QUOTE_NUMBER_RE = re.compile(r"#(\d+)")
+MONTHS_RU = (
+    "",
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+)
 
 
 class QuoteService:
@@ -70,6 +87,49 @@ class QuoteService:
         if quote.author_id:
             return "участник"
         return "аноним"
+
+    @staticmethod
+    def format_quote_date(created_at: str | None) -> str:
+        if not created_at:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.replace(tzinfo=None)
+            month = MONTHS_RU[parsed.month] if 1 <= parsed.month <= 12 else ""
+            if not month:
+                return parsed.strftime("%d.%m.%Y")
+            return f"{parsed.day} {month} {parsed.year}"
+        except ValueError:
+            return created_at[:10]
+
+    def author_avatar_url(self, quote: Quote, guild: discord.Guild | None) -> str | None:
+        if not quote.author_id or guild is None:
+            return None
+        member = guild.get_member(quote.author_id)
+        if member is None:
+            return None
+        return member.display_avatar.with_size(128).url
+
+    def build_quote_card(self, quote: Quote, guild: discord.Guild | None = None):
+        from bot.views.quote_views import QuoteCardView
+
+        author = self.author_label(quote, guild)
+        date_part = self.format_quote_date(quote.created_at)
+        reactions = self.format_reactions(quote.reactions_snapshot)
+        content = discord.utils.escape_markdown(quote.content)
+        meta = f"— {discord.utils.escape_markdown(author)}"
+        if date_part:
+            meta += f" · {date_part}"
+        lines = [f"**#{quote.number}**", "", f"«{content}»", "", meta]
+        if reactions:
+            lines.extend(["", reactions])
+        avatar_url = self.author_avatar_url(quote, guild)
+        return QuoteCardView(
+            "\n".join(lines),
+            avatar_url=avatar_url,
+            avatar_description=author[:256] if avatar_url else None,
+        )
 
     @staticmethod
     def parse_date(value: str) -> str:
@@ -194,16 +254,59 @@ class QuoteService:
         return quote
 
     @staticmethod
-    def quote_id_from_message(message: discord.Message) -> int | None:
+    def _component_texts(component: object) -> list[str]:
+        texts: list[str] = []
+        content = getattr(component, "content", None)
+        if isinstance(content, str) and content.strip():
+            texts.append(content)
+        for attr in ("children", "components", "items"):
+            children = getattr(component, attr, None)
+            if not children:
+                continue
+            try:
+                iterable = list(children)
+            except TypeError:
+                continue
+            for child in iterable:
+                texts.extend(QuoteService._component_texts(child))
+        return texts
+
+    def quote_id_from_message(self, message: discord.Message) -> int | None:
+        if message.embeds:
+            embed = message.embeds[0]
+            footer = embed.footer.text if embed.footer else None
+            if footer:
+                match = QUOTE_FOOTER_RE.match(footer.strip())
+                if match:
+                    return int(match.group(1))
+        for component in message.components:
+            for text in self._component_texts(component):
+                match = QUOTE_HEADER_RE.search(text)
+                if match:
+                    return int(match.group(1))
+                match = QUOTE_NUMBER_RE.search(text)
+                if match:
+                    return int(match.group(1))
+        return None
+
+    def _is_legacy_quote_message(self, message: discord.Message) -> bool:
         if not message.embeds:
-            return None
-        footer = message.embeds[0].footer.text
-        if not footer:
-            return None
-        match = QUOTE_FOOTER_RE.match(footer.strip())
-        if match is None:
-            return None
-        return int(match.group(1))
+            return False
+        embed = message.embeds[0]
+        title = embed.title or ""
+        footer = embed.footer.text if embed.footer else ""
+        if "Цитата" in title:
+            return True
+        return bool(footer and QUOTE_FOOTER_RE.match(footer.strip()))
+
+    def _looks_like_quote_message(self, message: discord.Message) -> bool:
+        if self.quote_id_from_message(message) is not None:
+            return True
+        if message.embeds:
+            title = message.embeds[0].title or ""
+            if "Цитата" in title:
+                return True
+        return False
 
     async def publish_to_channel(
         self,
@@ -211,26 +314,42 @@ class QuoteService:
         quote: Quote,
         channel: discord.TextChannel,
     ) -> Quote:
-        message = await channel.send(embed=self.format_quote_embed(quote, guild))
+        message = await channel.send(view=self.build_quote_card(quote, guild))
         await self.db.set_quote_posted_message(quote.id, channel.id, message.id)
         quote.posted_channel_id = channel.id
         quote.posted_message_id = message.id
         return quote
 
-    async def sync_posted_message(self, guild: discord.Guild, quote: Quote) -> None:
+    async def sync_posted_message(
+        self,
+        guild: discord.Guild,
+        quote: Quote,
+        *,
+        only_legacy: bool = False,
+    ) -> bool:
         if quote.posted_channel_id is None or quote.posted_message_id is None:
-            return
+            return False
         channel = guild.get_channel(quote.posted_channel_id)
         if not isinstance(channel, discord.TextChannel):
-            return
+            return False
         try:
             message = await channel.fetch_message(quote.posted_message_id)
-            await message.edit(embed=self.format_quote_embed(quote, guild))
         except discord.NotFound:
             quote.posted_message_id = None
             quote.posted_channel_id = None
+            return False
         except discord.HTTPException:
-            log.warning("Failed to edit quote message #%s in guild %s", quote.id, guild.id)
+            log.warning("Failed to fetch quote message #%s in guild %s", quote.number, guild.id)
+            return False
+        if only_legacy and not self._is_legacy_quote_message(message):
+            return False
+        view = self.build_quote_card(quote, guild)
+        try:
+            await message.edit(content=None, embeds=[], view=view)
+            return True
+        except discord.HTTPException:
+            log.warning("Failed to edit quote message #%s in guild %s", quote.number, guild.id)
+            return False
 
     async def remove_posted_messages(self, guild: discord.Guild, quote: Quote) -> None:
         deleted: set[int] = set()
@@ -281,6 +400,9 @@ class QuoteService:
         canonical: dict[int, int | None] = {
             q.id: q.posted_message_id for q in quotes
         }
+        by_posted = {
+            q.posted_message_id: q for q in quotes if q.posted_message_id is not None
+        }
         kept: set[int] = set()
         removed = 0
 
@@ -293,10 +415,13 @@ class QuoteService:
         for message in reversed(messages):
             if guild.me is None or message.author.id != guild.me.id:
                 continue
-            footer_num = self.quote_id_from_message(message)
-            if footer_num is None:
-                continue
-            quote = self._quote_from_footer(footer_num, quotes)
+            quote = by_posted.get(message.id)
+            if quote is None:
+                footer_num = self.quote_id_from_message(message)
+                if footer_num is not None:
+                    quote = self._quote_from_footer(footer_num, quotes)
+                elif not self._looks_like_quote_message(message):
+                    continue
             if quote is None:
                 try:
                     await message.delete()
@@ -330,6 +455,14 @@ class QuoteService:
 
         return removed
 
+    async def migrate_legacy_cards(self, guild: discord.Guild) -> int:
+        quotes = await self.db.list_quotes(guild.id, limit=10_000)
+        migrated = 0
+        for quote in quotes:
+            if await self.sync_posted_message(guild, quote, only_legacy=True):
+                migrated += 1
+        return migrated
+
     async def renumber_and_sync(self, guild: discord.Guild) -> int:
         quotes = await self.db.renumber_quotes(guild.id)
         for quote in quotes:
@@ -353,31 +486,3 @@ class QuoteService:
         if not deleted:
             raise ValueError("Цитата не найдена")
         await self.renumber_and_sync(guild)
-
-    def format_quote_embed(
-        self,
-        quote: Quote,
-        guild: discord.Guild | None = None,
-    ) -> discord.Embed:
-        from bot.utils.embeds import base_embed
-
-        reactions = self.format_reactions(quote.reactions_snapshot)
-        date_part = ""
-        if quote.created_at:
-            try:
-                dt = datetime.fromisoformat(quote.created_at)
-                date_part = dt.strftime("%d.%m.%Y")
-            except ValueError:
-                date_part = quote.created_at[:10]
-        author = self.author_label(quote, guild)
-        if "\n" in quote.content:
-            body = f"{quote.content}\n\n— {author}"
-        else:
-            body = f'"{quote.content}"\n\n— {author}'
-        if date_part:
-            body += f"\n{date_part}"
-        if reactions:
-            body += f"\n\n{reactions}"
-        embed = base_embed(title="💬 Цитата", description=body)
-        embed.set_footer(text=f"#{quote.number}")
-        return embed

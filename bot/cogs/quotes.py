@@ -47,15 +47,20 @@ class QuotesCog(commands.Cog):
     async def _cleanup_guild_quotes(self, guild: discord.Guild) -> None:
         if guild.id in self._cleaned_guilds:
             return
+        removed = 0
         config = await self.bot.config_service.get(guild.id)
-        if not config.quotes_channel_id:
-            return
-        channel = guild.get_channel(config.quotes_channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            return
-        removed = await self.bot.quote_service.cleanup_channel(guild, channel)
-        if removed:
-            log.info("Removed %s orphan quote message(s) in guild %s", removed, guild.id)
+        if config.quotes_channel_id:
+            channel = guild.get_channel(config.quotes_channel_id)
+            if isinstance(channel, discord.TextChannel):
+                removed = await self.bot.quote_service.cleanup_channel(guild, channel)
+        migrated = await self.bot.quote_service.migrate_legacy_cards(guild)
+        if removed or migrated:
+            log.info(
+                "Quotes cleanup in guild %s: removed=%s migrated=%s",
+                guild.id,
+                removed,
+                migrated,
+            )
         self._cleaned_guilds.add(guild.id)
 
     quote = app_commands.Group(name="quote", description="Цитаты")
@@ -185,7 +190,7 @@ class QuotesCog(commands.Cog):
             )
             return
         await interaction.response.send_message(
-            embed=self.bot.quote_service.format_quote_embed(quote, interaction.guild),
+            view=self.bot.quote_service.build_quote_card(quote, interaction.guild),
         )
 
     @quote.command(name="list", description="Последние цитаты")
