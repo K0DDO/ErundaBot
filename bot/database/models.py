@@ -127,10 +127,12 @@ class Quote:
     author_display: str | None = None
     posted_channel_id: int | None = None
     posted_message_id: int | None = None
+    number: int = 0
 
     @classmethod
     def from_row(cls, row: Any) -> Quote:
         keys = row.keys()
+        number = row["number"] if "number" in keys else None
         return cls(
             id=row["id"],
             guild_id=row["guild_id"],
@@ -145,6 +147,7 @@ class Quote:
             author_display=row["author_display"] if "author_display" in keys else None,
             posted_channel_id=row["posted_channel_id"] if "posted_channel_id" in keys else None,
             posted_message_id=row["posted_message_id"] if "posted_message_id" in keys else None,
+            number=int(number) if number else row["id"],
         )
 
 

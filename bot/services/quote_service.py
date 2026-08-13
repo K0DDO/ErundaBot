@@ -23,6 +23,24 @@ class QuoteService:
         self.db = db
 
     @staticmethod
+    def normalize_quote_text(text: str) -> str:
+        cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+        cleaned = cleaned.replace("\\n", "\n")
+        lines = [line.rstrip() for line in cleaned.split("\n")]
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def preview_text(content: str, limit: int = 80) -> str:
+        flat = " ".join(content.split())
+        if len(flat) <= limit:
+            return flat
+        return flat[: limit - 1] + "…"
+
+    @staticmethod
     def reactions_snapshot(message: discord.Message) -> str:
         data: dict[str, int] = {}
         for reaction in message.reactions:
@@ -73,13 +91,14 @@ class QuoteService:
     ) -> Quote:
         if message.guild is None:
             raise ValueError("Только сообщения сервера")
-        if not message.content.strip():
+        content = self.normalize_quote_text(message.content)
+        if not content:
             raise ValueError("Пустое сообщение нельзя сохранить")
         created = message.created_at.isoformat() if message.created_at else None
         display = author_display or message.author.display_name
         return await self.db.add_quote(
             message.guild.id,
-            message.content,
+            content,
             message.author.id,
             added_by,
             message.channel.id,
@@ -99,13 +118,14 @@ class QuoteService:
         author_display: str | None = None,
         created_at: str | None = None,
     ) -> Quote:
-        if not content.strip():
+        text = self.normalize_quote_text(content)
+        if not text:
             raise ValueError("Текст не может быть пустым")
         if author_id == 0 and not author_display:
             raise ValueError("Укажи имя автора или выбери участника")
         return await self.db.add_quote(
             guild_id,
-            content.strip(),
+            text,
             author_id,
             added_by,
             None,
@@ -127,10 +147,7 @@ class QuoteService:
         return await self.db.list_quotes(guild_id, author_id, limit)
 
     async def get(self, guild_id: int, quote_id: int) -> Quote | None:
-        quote = await self.db.get_quote(quote_id)
-        if quote is None or quote.guild_id != guild_id:
-            return None
-        return quote
+        return await self.db.get_quote_by_number(guild_id, quote_id)
 
     @staticmethod
     def can_manage(quote: Quote, member: discord.Member) -> bool:
@@ -160,7 +177,7 @@ class QuoteService:
             raise ValueError("Нет прав изменить эту цитату")
 
         if content is not None:
-            text = content.strip()
+            text = self.normalize_quote_text(content)
             if not text:
                 raise ValueError("Текст не может быть пустым")
             quote.content = text
@@ -247,13 +264,19 @@ class QuoteService:
                 if guild.me is not None and message.author.id != guild.me.id:
                     continue
                 quote_id = self.quote_id_from_message(message)
-                if quote_id == quote.id:
+                if quote_id in {quote.number, quote.id}:
                     await try_delete(channel, message.id)
         except discord.HTTPException:
             log.exception("Failed to scan quotes channel in guild %s", guild.id)
 
+    def _quote_from_footer(self, footer_num: int, quotes: list[Quote]) -> Quote | None:
+        by_number = {quote.number: quote for quote in quotes}
+        if footer_num in by_number:
+            return by_number[footer_num]
+        by_id = {quote.id: quote for quote in quotes}
+        return by_id.get(footer_num)
+
     async def cleanup_channel(self, guild: discord.Guild, channel: discord.TextChannel) -> int:
-        existing = await self.db.list_quote_ids(guild.id)
         quotes = await self.db.list_quotes(guild.id, limit=10_000)
         canonical: dict[int, int | None] = {
             q.id: q.posted_message_id for q in quotes
@@ -270,21 +293,22 @@ class QuoteService:
         for message in reversed(messages):
             if guild.me is None or message.author.id != guild.me.id:
                 continue
-            quote_id = self.quote_id_from_message(message)
-            if quote_id is None:
+            footer_num = self.quote_id_from_message(message)
+            if footer_num is None:
                 continue
-            if quote_id not in existing:
+            quote = self._quote_from_footer(footer_num, quotes)
+            if quote is None:
                 try:
                     await message.delete()
                     removed += 1
                 except discord.HTTPException:
                     pass
                 continue
-            canonical_id = canonical.get(quote_id)
+            canonical_id = canonical.get(quote.id)
             if canonical_id == message.id:
-                kept.add(quote_id)
+                kept.add(quote.id)
                 continue
-            if quote_id in kept:
+            if quote.id in kept:
                 try:
                     await message.delete()
                     removed += 1
@@ -292,9 +316,11 @@ class QuoteService:
                     pass
                 continue
             if canonical_id is None:
-                await self.db.set_quote_posted_message(quote_id, channel.id, message.id)
-                canonical[quote_id] = message.id
-                kept.add(quote_id)
+                await self.db.set_quote_posted_message(quote.id, channel.id, message.id)
+                canonical[quote.id] = message.id
+                quote.posted_channel_id = channel.id
+                quote.posted_message_id = message.id
+                kept.add(quote.id)
                 continue
             try:
                 await message.delete()
@@ -303,6 +329,12 @@ class QuoteService:
                 pass
 
         return removed
+
+    async def renumber_and_sync(self, guild: discord.Guild) -> int:
+        quotes = await self.db.renumber_quotes(guild.id)
+        for quote in quotes:
+            await self.sync_posted_message(guild, quote)
+        return len(quotes)
 
     async def delete(
         self,
@@ -317,9 +349,10 @@ class QuoteService:
         if not self.can_manage(quote, member):
             raise ValueError("Нет прав удалить эту цитату")
         await self.remove_posted_messages(guild, quote)
-        deleted = await self.db.delete_quote(quote_id, guild_id)
+        deleted = await self.db.delete_quote(quote.id, guild_id)
         if not deleted:
             raise ValueError("Цитата не найдена")
+        await self.renumber_and_sync(guild)
 
     def format_quote_embed(
         self,
@@ -337,11 +370,14 @@ class QuoteService:
             except ValueError:
                 date_part = quote.created_at[:10]
         author = self.author_label(quote, guild)
-        body = f'"{quote.content}"\n\n— {author}'
+        if "\n" in quote.content:
+            body = f"{quote.content}\n\n— {author}"
+        else:
+            body = f'"{quote.content}"\n\n— {author}'
         if date_part:
             body += f"\n{date_part}"
         if reactions:
             body += f"\n\n{reactions}"
         embed = base_embed(title="💬 Цитата", description=body)
-        embed.set_footer(text=f"#{quote.id}")
+        embed.set_footer(text=f"#{quote.number}")
         return embed

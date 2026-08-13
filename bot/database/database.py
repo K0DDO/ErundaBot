@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +143,7 @@ CREATE TABLE IF NOT EXISTS quotes (
     author_display TEXT,
     posted_channel_id INTEGER,
     posted_message_id INTEGER,
+    number INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
 );
 
@@ -312,6 +314,26 @@ class Database:
                 except Exception:
                     pass
             await self._db.execute("PRAGMA user_version = 6")
+        if version < 7:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE quotes ADD COLUMN number INTEGER NOT NULL DEFAULT 0"
+                )
+            except Exception:
+                pass
+            cursor = await self._db.execute("SELECT id, number FROM quotes")
+            rows = await cursor.fetchall()
+            for row in rows:
+                if not row["number"]:
+                    await self._db.execute(
+                        "UPDATE quotes SET number = ? WHERE id = ?",
+                        (row["id"], row["id"]),
+                    )
+            await self._db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_quotes_guild_number "
+                "ON quotes (guild_id, number)"
+            )
+            await self._db.execute("PRAGMA user_version = 7")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -858,6 +880,14 @@ class Database:
 
     # --- Quotes ---
 
+    async def next_quote_number(self, guild_id: int) -> int:
+        cursor = await self.connection.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM quotes WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 1
+
     async def add_quote(
         self,
         guild_id: int,
@@ -871,16 +901,17 @@ class Database:
         author_display: str | None = None,
     ) -> Quote:
         await self.ensure_guild(guild_id)
+        number = await self.next_quote_number(guild_id)
         cursor = await self.connection.execute(
             """
             INSERT INTO quotes (
                 guild_id, content, author_id, channel_id, message_id,
-                added_by, created_at, reactions_snapshot, author_display
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                added_by, created_at, reactions_snapshot, author_display, number
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id, content, author_id, channel_id, message_id,
-                added_by, created_at, reactions_snapshot, author_display,
+                added_by, created_at, reactions_snapshot, author_display, number,
             ),
         )
         await self.connection.commit()
@@ -892,6 +923,14 @@ class Database:
         cursor = await self.connection.execute(
             "SELECT * FROM quotes WHERE id = ?",
             (quote_id,),
+        )
+        row = await cursor.fetchone()
+        return Quote.from_row(row) if row else None
+
+    async def get_quote_by_number(self, guild_id: int, number: int) -> Quote | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM quotes WHERE guild_id = ? AND number = ?",
+            (guild_id, number),
         )
         row = await cursor.fetchone()
         return Quote.from_row(row) if row else None
@@ -989,6 +1028,45 @@ class Database:
         )
         await self.connection.commit()
         return cursor.rowcount > 0
+
+    async def list_quotes_chronological(self, guild_id: int) -> list[Quote]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM quotes WHERE guild_id = ?",
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        quotes = [Quote.from_row(row) for row in rows]
+
+        def sort_key(quote: Quote) -> tuple[datetime, int]:
+            raw = quote.created_at or quote.saved_at or ""
+            try:
+                parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                if parsed.tzinfo is not None:
+                    parsed = parsed.replace(tzinfo=None)
+                return (parsed, quote.id)
+            except ValueError:
+                return (datetime.max, quote.id)
+
+        quotes.sort(key=sort_key)
+        return quotes
+
+    async def renumber_quotes(self, guild_id: int) -> list[Quote]:
+        quotes = await self.list_quotes_chronological(guild_id)
+        if not quotes:
+            return []
+        for index, quote in enumerate(quotes, start=1):
+            await self.connection.execute(
+                "UPDATE quotes SET number = ? WHERE id = ?",
+                (-index, quote.id),
+            )
+        for index, quote in enumerate(quotes, start=1):
+            await self.connection.execute(
+                "UPDATE quotes SET number = ? WHERE id = ?",
+                (index, quote.id),
+            )
+            quote.number = index
+        await self.connection.commit()
+        return quotes
 
     # --- Custom roles ---
 
