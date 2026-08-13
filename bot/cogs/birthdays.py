@@ -120,8 +120,13 @@ class BirthdaysCog(commands.Cog):
         view = await self.bot.birthday_service.build_board_view(
             interaction.guild,
             config,
+            colored_names=True,
         )
-        await interaction.response.send_message(view=view, ephemeral=True)
+        await interaction.response.send_message(
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+            ephemeral=True,
+        )
 
     @birthday.command(name="next", description="Ближайший день рождения")
     @app_commands.guild_only()

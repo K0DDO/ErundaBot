@@ -188,11 +188,20 @@ class BirthdayService:
         view.add_item(container)
         return view
 
-    def format_entry_line(self, guild: discord.Guild, entry: BirthdayEntry) -> str:
+    def format_entry_line(
+        self,
+        guild: discord.Guild,
+        entry: BirthdayEntry,
+        *,
+        colored_names: bool = False,
+    ) -> str:
         bday = entry.birthday
         when = format_birthday_date(bday.day, bday.month)
+        timing = self.entry_timing(entry)
+        if colored_names:
+            return f"<@{bday.user_id}> — {when} ({timing})"
         name = member_display(guild, bday.user_id)
-        return f"**{name}** — {when} ({self.entry_timing(entry)})"
+        return f"**{name}** — {when} ({timing})"
 
     def format_board_lines(
         self,
@@ -200,12 +209,15 @@ class BirthdayService:
         entries: list[BirthdayEntry],
         *,
         limit: int = 30,
+        colored_names: bool = False,
     ) -> str:
         if not entries:
             return "_Пока никто не указал день рождения._"
         lines: list[str] = []
         for entry in entries[:limit]:
-            lines.append(f"• {self.format_entry_line(guild, entry)}")
+            lines.append(
+                f"• {self.format_entry_line(guild, entry, colored_names=colored_names)}"
+            )
         if len(entries) > limit:
             lines.append(f"_…и ещё {len(entries) - limit}_")
         return "\n".join(lines)
