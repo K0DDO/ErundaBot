@@ -14,6 +14,7 @@ from discord import ui
 
 from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
+from bot.utils.birthday_emojis import normalize_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR
 from bot.utils.timezones import parse_hhmm
 
@@ -98,13 +99,6 @@ def member_display(guild: discord.Guild, user_id: int) -> str:
     return f"участник #{user_id}"
 
 
-def normalize_birthday_emoji(raw: str | None) -> str:
-    if raw is None:
-        return "👤"
-    value = raw.strip()
-    return value if value else "👤"
-
-
 class BirthdayService:
     BOARD_HELP = (
         "**Как добавить свой день рождения:**\n"
@@ -132,7 +126,7 @@ class BirthdayService:
             day,
             month,
             year,
-            normalize_birthday_emoji(emoji) if emoji is not None else None,
+            emoji=normalize_birthday_emoji(emoji, user_id=user_id) if emoji is not None else None,
         )
 
     async def remove_birthday(self, guild_id: int, user_id: int) -> bool:
@@ -217,7 +211,7 @@ class BirthdayService:
         when = format_birthday_date(bday.day, bday.month)
         name = member_display(guild, bday.user_id)
         timing = self.entry_timing(entry)
-        return f"{bday.emoji} {name} — {when} · _{timing}_"
+        return f"{bday.emoji} {name} — {when} · *{timing}*"
 
     def format_preview_lines(
         self,
@@ -231,7 +225,7 @@ class BirthdayService:
             for entry in entries[:limit]
         ]
         if len(entries) > limit:
-            lines.append(f"📌 _…и ещё {len(entries) - limit}_")
+            lines.append(f"📌 …и ещё {len(entries) - limit}")
         return "\n".join(lines)
 
     def format_entry_line(self, guild: discord.Guild, entry: BirthdayEntry) -> str:

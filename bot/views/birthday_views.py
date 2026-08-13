@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 import discord
 from discord import ui
 
-from bot.services.birthday_service import format_birthday_date, normalize_birthday_emoji
+from bot.services.birthday_service import format_birthday_date
+from bot.utils.birthday_emojis import normalize_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR, error_embed, success_embed
 
 if TYPE_CHECKING:
@@ -92,7 +93,7 @@ class BirthdaySetModal(discord.ui.Modal, title="Указать день рожд
             year_raw = str(self.year.value).strip() if self.year.value else ""
             year = int(year_raw) if year_raw else None
             emoji_raw = str(self.emoji.value).strip() if self.emoji.value else ""
-            emoji = normalize_birthday_emoji(emoji_raw or "🎂")
+            emoji = normalize_birthday_emoji(emoji_raw or "🎂", user_id=self.user_id)
             birthday = await self.bot.birthday_service.set_birthday(
                 self.guild_id,
                 self.user_id,

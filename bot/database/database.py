@@ -8,6 +8,8 @@ from typing import Any
 
 import aiosqlite
 
+from bot.utils.birthday_emojis import pick_birthday_emoji
+
 from .models import (
     GUILD_CONFIG_FIELDS,
     Birthday,
@@ -257,6 +259,15 @@ class Database:
             except Exception:
                 pass
             await self._db.execute("PRAGMA user_version = 2")
+        if version < 3:
+            cursor = await self._db.execute("SELECT guild_id, user_id FROM birthdays")
+            rows = await cursor.fetchall()
+            for row in rows:
+                await self._db.execute(
+                    "UPDATE birthdays SET emoji = ? WHERE guild_id = ? AND user_id = ?",
+                    (pick_birthday_emoji(int(row["user_id"])), row["guild_id"], row["user_id"]),
+                )
+            await self._db.execute("PRAGMA user_version = 3")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -352,7 +363,7 @@ class Database:
         await self.ensure_guild(guild_id)
         existing = await self.get_birthday(guild_id, user_id)
         resolved_emoji = emoji if emoji is not None else (
-            existing.emoji if existing is not None else "👤"
+            existing.emoji if existing is not None else pick_birthday_emoji(user_id)
         )
         await self.connection.execute(
             """

@@ -90,20 +90,16 @@ class BirthdaysCog(commands.Cog):
             )
             return
 
-        lines: list[str] = []
-        for entry in entries[:25]:
-            lines.append(
-                self.bot.birthday_service.format_entry_line(interaction.guild, entry)
-            )
-
-        more = ""
-        if len(entries) > 25:
-            more = f"\n…и ещё {len(entries) - 25}"
+        description = self.bot.birthday_service.format_preview_lines(
+            interaction.guild,
+            entries,
+            limit=25,
+        )
 
         await interaction.response.send_message(
             embed=base_embed(
                 title="Дни рождения",
-                description="\n".join(lines) + more,
+                description=description,
             ),
             ephemeral=True,
         )
