@@ -205,7 +205,7 @@ class BirthdayService:
         when = format_birthday_date(bday.day, bday.month)
         name = member_display(guild, bday.user_id)
         timing = self.entry_timing(entry)
-        return f"{bday.emoji} {name} — {when} · *{timing}*"
+        return f"{bday.emoji} **{name}** — {when} · *{timing}*"
 
     def format_preview_lines(
         self,
