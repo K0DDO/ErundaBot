@@ -126,16 +126,16 @@ class BirthdaysCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         config = await self.bot.config_service.get(interaction.guild.id)
         try:
-            view, image_file = await self.bot.birthday_service.build_preview_view(
+            embed, image_file = await self.bot.birthday_service.build_preview_embed(
                 interaction.guild,
                 config,
             )
             if image_file is None:
-                await interaction.followup.send(view=view, ephemeral=True)
+                await interaction.followup.send(embed=embed, ephemeral=True)
             else:
                 await interaction.followup.send(
-                    view=view,
-                    files=[image_file],
+                    embed=embed,
+                    file=image_file,
                     ephemeral=True,
                 )
         except Exception:

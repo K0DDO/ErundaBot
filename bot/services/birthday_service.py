@@ -106,7 +106,7 @@ class BirthdayService:
         "• `/birthday remove` — удалить дату"
     )
     MAX_BOARD_ENTRIES = 30
-    PREVIEW_IMAGE_FILENAME = "birthday-preview.png"
+    PREVIEW_IMAGE_FILENAME = "birthday-preview.jpg"
     PREVIEW_IMAGE_LIMIT = 25
 
     def __init__(self, db: Database) -> None:
@@ -182,43 +182,39 @@ class BirthdayService:
         view.add_item(container)
         return view
 
-    async def build_preview_view(
+    async def build_preview_embed(
         self,
         guild: discord.Guild,
         config: GuildConfig,
-    ) -> tuple[ui.LayoutView, discord.File | None]:
+    ) -> tuple[discord.Embed, discord.File | None]:
         from bot.utils.birthday_preview_image import render_birthday_preview_image
+        from bot.utils.embeds import base_embed
 
         entries = await self.list_sorted(guild.id, config.timezone)
 
-        parts = [
-            "## 🎂 Дни рождения на сервере",
-            "",
-            self.BOARD_HELP,
-        ]
+        description = self.BOARD_HELP
         if not entries:
-            parts.extend(["", "_Пока никто не указал день рождения._"])
+            description = f"{self.BOARD_HELP}\n\n_Пока никто не указал день рождения._"
 
-        view = ui.LayoutView(timeout=None)
-        container = ui.Container(accent_color=BRAND_COLOR)
-        container.add_item(ui.TextDisplay("\n".join(parts)))
+        embed = base_embed(
+            title="🎂 Дни рождения на сервере",
+            description=description,
+        )
 
         image_file: discord.File | None = None
         if entries:
-            png_bytes = await render_birthday_preview_image(
+            image_bytes = await render_birthday_preview_image(
                 guild,
                 entries,
                 limit=self.PREVIEW_IMAGE_LIMIT,
             )
             image_file = discord.File(
-                io.BytesIO(png_bytes),
+                io.BytesIO(image_bytes),
                 filename=self.PREVIEW_IMAGE_FILENAME,
             )
-            container.add_item(ui.Separator())
-            container.add_item(ui.File(f"attachment://{self.PREVIEW_IMAGE_FILENAME}"))
+            embed.set_image(url=f"attachment://{self.PREVIEW_IMAGE_FILENAME}")
 
-        view.add_item(container)
-        return view, image_file
+        return embed, image_file
 
     def format_board_lines(
         self,

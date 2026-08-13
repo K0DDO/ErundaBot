@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SCALE = 3
+SCALE = 2
 
 PREVIEW_WIDTH = 520 * SCALE
 PADDING = 16 * SCALE
@@ -31,7 +31,7 @@ DATE_Y_OFFSET = 28 * SCALE
 MORE_Y_OFFSET = 18 * SCALE
 NAME_FONT_SIZE = 16 * SCALE
 DATE_FONT_SIZE = 14 * SCALE
-AVATAR_FETCH_SIZE = 512
+AVATAR_FETCH_SIZE = 256
 
 BG_COLOR = (49, 51, 56)  # #313338
 DEFAULT_NAME_COLOR = (242, 243, 245)  # #f2f3f5
@@ -175,5 +175,5 @@ async def render_birthday_preview_image(
             )
 
     buffer = io.BytesIO()
-    canvas.save(buffer, format="PNG", optimize=True)
+    canvas.save(buffer, format="JPEG", quality=88, optimize=True)
     return buffer.getvalue()
