@@ -7,7 +7,24 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.bot import ErundaBot
+from bot.database.models import Quote
 from bot.utils.embeds import base_embed, error_embed, success_embed
+
+
+async def publish_quote(
+    bot: ErundaBot,
+    guild: discord.Guild,
+    quote: Quote,
+) -> discord.TextChannel | None:
+    """Post quote embed to configured quotes channel, if set."""
+    config = await bot.config_service.get(guild.id)
+    if not config.quotes_channel_id:
+        return None
+    channel = guild.get_channel(config.quotes_channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        return None
+    await channel.send(embed=bot.quote_service.format_quote_embed(quote, guild))
+    return channel
 
 
 class QuotesCog(commands.Cog):
@@ -52,6 +69,13 @@ class QuotesCog(commands.Cog):
             )
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        channel = await publish_quote(self.bot, interaction.guild, quote)
+        if channel is not None:
+            await interaction.response.send_message(
+                embed=success_embed("Цитата сохранена", f"Опубликовано в {channel.mention}"),
+                ephemeral=True,
+            )
             return
         await interaction.response.send_message(
             embed=self.bot.quote_service.format_quote_embed(quote, interaction.guild),
@@ -232,11 +256,7 @@ async def add_quote_context(
         embed=success_embed("Цитата сохранена"),
         ephemeral=True,
     )
-    config = await bot.config_service.get(message.guild.id)
-    if config.quotes_channel_id:
-        channel = message.guild.get_channel(config.quotes_channel_id)
-        if channel and hasattr(channel, "send"):
-            await channel.send(embed=bot.quote_service.format_quote_embed(quote, message.guild))
+    await publish_quote(bot, message.guild, quote)
 
 
 async def setup(bot: ErundaBot) -> None:
