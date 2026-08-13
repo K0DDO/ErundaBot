@@ -174,44 +174,56 @@ class BirthdayService:
         body = self.BOARD_HELP + "\n" + self.format_board_lines(guild, entries)
         return base_embed(title="🎂 Дни рождения на сервере", description=body)
 
-    async def clear_board(self, guild: discord.Guild) -> bool:
-        """Remove public birthday board message from the configured channel."""
+    async def sync_board(self, guild: discord.Guild) -> None:
         config = await self.db.get_guild(guild.id)
         if config is None or config.birthday_channel_id is None:
-            return False
+            return
         channel = guild.get_channel(config.birthday_channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            return False
+        if channel is None or not isinstance(channel, discord.TextChannel):
+            return
 
-        removed = False
+        await self.cleanup_stale_list_messages(guild, channel)
+
+        embed = await self.build_board_embed(guild, config)
+
         if config.birthday_board_message_id:
             try:
                 message = await channel.fetch_message(config.birthday_board_message_id)
-                await message.delete()
-                removed = True
+                await message.edit(embed=embed)
+                return
             except discord.NotFound:
-                pass
+                await self.db.set_birthday_board_message_id(guild.id, None)
             except discord.HTTPException:
-                log.warning("Failed to delete birthday board in guild %s", guild.id)
-            await self.db.set_birthday_board_message_id(guild.id, None)
+                log.warning("Failed to edit birthday board in guild %s", guild.id)
+                return
 
-        if guild.me is not None:
-            try:
-                async for message in channel.history(limit=50):
-                    if message.author.id != guild.me.id or not message.embeds:
-                        continue
-                    title = message.embeds[0].title or ""
-                    if "Дни рождения на сервере" in title:
+        try:
+            message = await channel.send(embed=embed)
+            await self.db.set_birthday_board_message_id(guild.id, message.id)
+        except discord.HTTPException:
+            log.exception("Failed to post birthday board in guild %s", guild.id)
+
+    async def cleanup_stale_list_messages(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+    ) -> None:
+        """Remove old public /birthday list replies (now ephemeral-only)."""
+        if guild.me is None:
+            return
+        stale_titles = {"Дни рождения", "Ближайший день рождения"}
+        try:
+            async for message in channel.history(limit=100):
+                if message.author.id != guild.me.id or not message.embeds:
+                    continue
+                title = message.embeds[0].title or ""
+                if title in stale_titles:
+                    try:
                         await message.delete()
-                        removed = True
-            except discord.HTTPException:
-                log.warning("Failed to scan birthday channel in guild %s", guild.id)
-
-        return removed
-
-    async def sync_board(self, guild: discord.Guild) -> None:
-        """Deprecated: public boards removed — only clear leftover messages."""
-        await self.clear_board(guild)
+                    except discord.HTTPException:
+                        pass
+        except discord.HTTPException:
+            log.warning("Failed to cleanup stale birthday list messages in guild %s", guild.id)
 
     async def due_announcements(self, config: GuildConfig, now: datetime) -> list[Birthday]:
         if config.birthday_channel_id is None:

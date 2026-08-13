@@ -11,7 +11,7 @@ from discord.ext import commands
 
 from bot.services.birthday_service import format_birthday_date, member_display
 from bot.utils.embeds import base_embed, error_embed, success_embed
-from bot.views.birthday_views import BirthdaySetModal
+from bot.views.birthday_views import BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -22,18 +22,20 @@ log = logging.getLogger(__name__)
 class BirthdaysCog(commands.Cog):
     def __init__(self, bot: ErundaBot) -> None:
         self.bot = bot
-        self._board_cleared = False
+        self._board_synced = False
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        if self._board_cleared:
+        if self._board_synced:
             return
-        self._board_cleared = True
+        self._board_synced = True
         for guild in self.bot.guilds:
-            try:
-                await self.bot.birthday_service.clear_board(guild)
-            except Exception:
-                log.exception("Failed to clear birthday board for guild %s", guild.id)
+            config = await self.bot.config_service.get(guild.id)
+            if config.birthday_channel_id:
+                try:
+                    await self.bot.birthday_service.sync_board(guild)
+                except Exception:
+                    log.exception("Failed to sync birthday board for guild %s", guild.id)
 
     birthday = app_commands.Group(name="birthday", description="Дни рождения")
 
@@ -65,6 +67,7 @@ class BirthdaysCog(commands.Cog):
             embed=success_embed("День рождения удалён"),
             ephemeral=True,
         )
+        await refresh_birthday_board(self.bot, interaction.guild)
 
     @birthday.command(name="list", description="Список дней рождения на сервере")
     @app_commands.guild_only()
