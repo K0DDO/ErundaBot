@@ -13,7 +13,7 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
-from bot.utils.embeds import base_embed
+from bot.utils.embeds import BRAND_COLOR, base_embed
 from bot.utils.timezones import parse_hhmm
 
 if TYPE_CHECKING:
@@ -101,9 +101,9 @@ class BirthdayService:
     BOARD_HELP = (
         "**Как добавить свой день рождения:**\n"
         "• `/birthday set` — указать дату\n"
-        "• `/birthday remove` — удалить дату\n\n"
-        "**Ближайшие дни рождения:**"
+        "• `/birthday remove` — удалить дату"
     )
+    MAX_PERSON_EMBEDS = 9  # Discord allows 10 embeds per message (1 header + 9 cards)
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -144,6 +144,57 @@ class BirthdayService:
         entries = await self.list_sorted(guild_id, tz_name)
         return entries[0] if entries else None
 
+    @staticmethod
+    def entry_timing(entry: BirthdayEntry) -> str:
+        if entry.days_until == 0:
+            return "сегодня"
+        if entry.days_until == 1:
+            return "завтра"
+        return f"через {entry.days_until} дн."
+
+    def build_person_embed(self, guild: discord.Guild, entry: BirthdayEntry) -> discord.Embed:
+        bday = entry.birthday
+        when = format_birthday_date(bday.day, bday.month)
+        name = member_display(guild, bday.user_id)
+        embed = discord.Embed(
+            description=f"{when} ({self.entry_timing(entry)})",
+            color=BRAND_COLOR,
+        )
+        member = guild.get_member(bday.user_id)
+        if member is not None:
+            embed.set_author(name=name, icon_url=member.display_avatar.url)
+        else:
+            embed.set_author(name=name)
+        return embed
+
+    async def build_board_embeds(
+        self,
+        guild: discord.Guild,
+        config: GuildConfig,
+        *,
+        person_limit: int | None = None,
+    ) -> list[discord.Embed]:
+        limit = person_limit if person_limit is not None else self.MAX_PERSON_EMBEDS
+        entries = await self.list_sorted(guild.id, config.timezone)
+        header = base_embed(
+            title="🎂 Дни рождения на сервере",
+            description=self.BOARD_HELP,
+        )
+        if not entries:
+            header.description = f"{self.BOARD_HELP}\n\n_Пока никто не указал день рождения._"
+            return [header]
+
+        if len(entries) > limit:
+            header.description = (
+                f"{self.BOARD_HELP}\n\n"
+                f"_Показано {limit} из {len(entries)} ближайших._"
+            )
+
+        embeds = [header]
+        for entry in entries[:limit]:
+            embeds.append(self.build_person_embed(guild, entry))
+        return embeds
+
     def format_board_lines(
         self,
         guild: discord.Guild,
@@ -169,11 +220,6 @@ class BirthdayService:
             lines.append(f"_…и ещё {len(entries) - limit}_")
         return "\n".join(lines)
 
-    async def build_board_embed(self, guild: discord.Guild, config: GuildConfig) -> discord.Embed:
-        entries = await self.list_sorted(guild.id, config.timezone)
-        body = self.BOARD_HELP + "\n" + self.format_board_lines(guild, entries)
-        return base_embed(title="🎂 Дни рождения на сервере", description=body)
-
     async def sync_board(self, guild: discord.Guild) -> None:
         config = await self.db.get_guild(guild.id)
         if config is None or config.birthday_channel_id is None:
@@ -184,12 +230,12 @@ class BirthdayService:
 
         await self.cleanup_stale_list_messages(guild, channel)
 
-        embed = await self.build_board_embed(guild, config)
+        embeds = await self.build_board_embeds(guild, config)
 
         if config.birthday_board_message_id:
             try:
                 message = await channel.fetch_message(config.birthday_board_message_id)
-                await message.edit(embed=embed)
+                await message.edit(content=None, embeds=embeds)
                 return
             except discord.NotFound:
                 await self.db.set_birthday_board_message_id(guild.id, None)
@@ -198,7 +244,7 @@ class BirthdayService:
                 return
 
         try:
-            message = await channel.send(embed=embed)
+            message = await channel.send(embeds=embeds)
             await self.db.set_birthday_board_message_id(guild.id, message.id)
         except discord.HTTPException:
             log.exception("Failed to post birthday board in guild %s", guild.id)

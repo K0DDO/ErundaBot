@@ -115,6 +115,21 @@ class BirthdaysCog(commands.Cog):
             ephemeral=True,
         )
 
+    @birthday.command(
+        name="preview",
+        description="Предпросмотр доски с аватарками (только тебе)",
+    )
+    @app_commands.guild_only()
+    async def birthday_preview(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        embeds = await self.bot.birthday_service.build_board_embeds(
+            interaction.guild,
+            config,
+        )
+        await interaction.response.send_message(embeds=embeds, ephemeral=True)
+
     @birthday.command(name="next", description="Ближайший день рождения")
     @app_commands.guild_only()
     async def birthday_next(self, interaction: discord.Interaction) -> None:
