@@ -65,10 +65,10 @@ class QuoteComposeModal(ui.Modal):
         placeholder="Можно писать в несколько строк",
     )
     name = ui.TextInput(
-        label="Имя автора",
-        required=False,
+        label="Имя на карточке",
+        required=True,
         max_length=80,
-        placeholder="Если не выбран участник",
+        placeholder="Обязательно, так будет подписана цитата",
     )
     date = ui.TextInput(
         label="Дата (ДД.ММ.ГГГГ)",
@@ -94,16 +94,14 @@ class QuoteComposeModal(ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             return
-        display = str(self.name.value).strip() or None
-        author_id = self.author.id if self.author else 0
-        if self.author is not None and display is None:
-            display = self.author.display_name
-        if author_id == 0 and not display:
+        display = str(self.name.value).strip()
+        if not display:
             await interaction.response.send_message(
-                embed=error_embed("Укажи имя автора или выбери участника"),
+                embed=error_embed("Укажи имя на карточке"),
                 ephemeral=True,
             )
             return
+        author_id = self.author.id if self.author else 0
 
         created_at: str | None = None
         date_value = str(self.date.value).strip()
@@ -161,9 +159,10 @@ class QuoteEditModal(ui.Modal, title="Изменить цитату"):
         required=True,
     )
     name = ui.TextInput(
-        label="Имя автора",
-        required=False,
+        label="Имя на карточке",
+        required=True,
         max_length=80,
+        placeholder="Обязательно, так будет подписана цитата",
     )
     date = ui.TextInput(
         label="Дата (ДД.ММ.ГГГГ)",
@@ -195,12 +194,15 @@ class QuoteEditModal(ui.Modal, title="Изменить цитату"):
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
 
-        display = str(self.name.value).strip() or None
+        display = str(self.name.value).strip()
+        if not display:
+            await interaction.response.send_message(
+                embed=error_embed("Укажи имя на карточке"),
+                ephemeral=True,
+            )
+            return
         update_author_id = self.author is not None
-        update_author_display = display is not None or self.author is not None
         author_id = self.author.id if self.author else None
-        if self.author is not None and display is None:
-            display = self.author.display_name
 
         created_at: str | None = None
         date_value = str(self.date.value).strip()
@@ -220,7 +222,7 @@ class QuoteEditModal(ui.Modal, title="Изменить цитату"):
                 author_id=author_id,
                 author_display=display,
                 update_author_id=update_author_id,
-                update_author_display=update_author_display,
+                update_author_display=True,
                 created_at=created_at,
             )
             await self.bot.quote_service.sync_posted_message(interaction.guild, quote)

@@ -180,8 +180,8 @@ class QuoteService:
         text = self.normalize_quote_text(content)
         if not text:
             raise ValueError("Текст не может быть пустым")
-        if author_id == 0 and not author_display:
-            raise ValueError("Укажи имя автора или выбери участника")
+        if not author_display or not author_display.strip():
+            raise ValueError("Укажи имя на карточке")
         return await self.db.add_quote(
             guild_id,
             text,
@@ -246,8 +246,8 @@ class QuoteService:
             quote.author_display = author_display
         if created_at is not None:
             quote.created_at = created_at
-        if quote.author_id == 0 and not quote.author_display:
-            raise ValueError("Укажи имя автора или выбери участника")
+        if not quote.author_display:
+            raise ValueError("Укажи имя на карточке")
 
         await self.db.save_quote(quote)
         return quote

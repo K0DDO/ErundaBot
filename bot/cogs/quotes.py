@@ -66,7 +66,9 @@ class QuotesCog(commands.Cog):
     quote = app_commands.Group(name="quote", description="Цитаты")
 
     @quote.command(name="add", description="Добавить цитату вручную")
-    @app_commands.describe(author="Участник (необязательно, для поиска по /quote user)")
+    @app_commands.describe(
+        author="Через @, необязательно. На карточке не показывается, нужен для поиска",
+    )
     @app_commands.guild_only()
     async def quote_add(
         self,
@@ -80,7 +82,9 @@ class QuotesCog(commands.Cog):
         )
 
     @quote.command(name="import", description="Добавить цитату в базу без публикации в канал")
-    @app_commands.describe(author="Участник (необязательно, для поиска по /quote user)")
+    @app_commands.describe(
+        author="Через @, необязательно. На карточке не показывается, нужен для поиска",
+    )
     @app_commands.guild_only()
     async def quote_import(
         self,
@@ -96,7 +100,7 @@ class QuotesCog(commands.Cog):
     @quote.command(name="edit", description="Изменить цитату по номеру")
     @app_commands.describe(
         quote_id="Номер цитаты (см. /quote list или footer у цитаты)",
-        author="Новый автор для поиска (необязательно)",
+        author="Через @, необязательно. На карточке не показывается, нужен для поиска",
     )
     @app_commands.guild_only()
     async def quote_edit(
