@@ -47,14 +47,10 @@ class RolesCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        bot_member = interaction.guild.me
-        if bot_member is None:
-            return
         try:
             await self.bot.role_service.delete_personal_role(
                 interaction.guild,
                 interaction.user,
-                bot_member,
             )
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)

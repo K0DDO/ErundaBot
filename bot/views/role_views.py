@@ -25,16 +25,12 @@ class MyRoleModal(discord.ui.Modal, title="Моя роль"):
         if interaction.guild is None:
             return
         guild = interaction.guild
-        bot_member = guild.me
-        if bot_member is None:
-            return
         try:
             color = self.bot.role_service.parse_color(str(self.color.value or ""))
             name = str(self.name.value).strip() if self.name.value else None
             role, _record = await self.bot.role_service.update_personal_role(
                 guild,
                 self.member,
-                bot_member,
                 name=name,
                 color=color,
             )

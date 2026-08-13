@@ -9,7 +9,7 @@ import discord
 from bot.database.database import Database
 from bot.database.models import CustomRole
 from bot.utils.colors import parse_hex_color
-from bot.utils.permissions import bot_can_manage_role, is_guild_admin
+from bot.utils.permissions import assert_bot_can_manage_role, fetch_bot_member, is_guild_admin
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +65,7 @@ class RoleService:
         name: str | None = None,
         color: int | None = None,
     ) -> CustomRole:
-        if not bot_can_manage_role(bot_member, role):
-            raise ValueError("Бот не может изменить эту роль")
+        assert_bot_can_manage_role(bot_member, role)
         kwargs: dict = {}
         if name is not None:
             kwargs["name"] = name[:100]
@@ -84,8 +83,7 @@ class RoleService:
         bot_member: discord.Member,
         role: discord.Role,
     ) -> None:
-        if not bot_can_manage_role(bot_member, role):
-            raise ValueError("Бот не может удалить эту роль")
+        assert_bot_can_manage_role(bot_member, role)
         await role.delete(reason="Ерунда: удаление роли")
         await self.db.delete_custom_role_record(guild.id, role.id)
 
@@ -104,6 +102,7 @@ class RoleService:
             if role is None:
                 await self.db.delete_custom_role_record(guild.id, existing.role_id)
             else:
+                await self.position_personal_role(bot_member, role)
                 return role, existing
         if not bot_member.guild_permissions.manage_roles:
             raise ValueError("У бота нет права Manage Roles")
@@ -129,11 +128,12 @@ class RoleService:
         self,
         guild: discord.Guild,
         member: discord.Member,
-        bot_member: discord.Member,
+        bot_member: discord.Member | None = None,
         *,
         name: str | None = None,
         color: int | None = None,
     ) -> tuple[discord.Role, CustomRole]:
+        bot_member = bot_member or await fetch_bot_member(guild)
         record = await self.db.get_personal_role(guild.id, member.id)
         if record is None:
             role, record = await self.get_or_create_personal_role(guild, member, bot_member)
@@ -143,8 +143,11 @@ class RoleService:
                 raise ValueError("Роль не найдена, создайте заново через /myrole")
         if record.owner_id != member.id:
             raise ValueError("Это не ваша роль")
-        if not bot_can_manage_role(bot_member, role):
-            raise ValueError("Бот не может изменить эту роль")
+        await self.position_personal_role(bot_member, role)
+        role = guild.get_role(role.id)
+        if role is None:
+            raise ValueError("Роль не найдена, создайте заново через /myrole")
+        assert_bot_can_manage_role(bot_member, role)
         edit_kwargs: dict = {}
         if name is not None:
             edit_kwargs["name"] = name[:100]
@@ -159,8 +162,9 @@ class RoleService:
         self,
         guild: discord.Guild,
         member: discord.Member,
-        bot_member: discord.Member,
+        bot_member: discord.Member | None = None,
     ) -> None:
+        bot_member = bot_member or await fetch_bot_member(guild)
         record = await self.db.get_personal_role(guild.id, member.id)
         if record is None:
             raise ValueError("У вас нет персональной роли")
@@ -168,8 +172,7 @@ class RoleService:
             raise ValueError("Можно удалить только свою роль")
         role = guild.get_role(record.role_id)
         if role is not None:
-            if not bot_can_manage_role(bot_member, role):
-                raise ValueError("Бот не может удалить эту роль")
+            assert_bot_can_manage_role(bot_member, role)
             await role.delete(reason="Ерунда: удаление персональной роли")
         await self.db.delete_custom_role_record(guild.id, record.role_id)
 
