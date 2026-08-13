@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import io
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -10,10 +11,11 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import discord
+from discord import ui
 
 from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
-from bot.utils.embeds import BRAND_COLOR, base_embed
+from bot.utils.embeds import BRAND_COLOR
 from bot.utils.timezones import parse_hhmm
 
 if TYPE_CHECKING:
@@ -103,7 +105,9 @@ class BirthdayService:
         "• `/birthday set` — указать дату\n"
         "• `/birthday remove` — удалить дату"
     )
-    MAX_PERSON_EMBEDS = 9  # Discord allows 10 embeds per message (1 header + 9 cards)
+    MAX_BOARD_ENTRIES = 30
+    PREVIEW_IMAGE_FILENAME = "birthday-preview.png"
+    PREVIEW_IMAGE_LIMIT = 25
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -152,48 +156,74 @@ class BirthdayService:
             return "завтра"
         return f"через {entry.days_until} дн."
 
-    def build_person_embed(self, guild: discord.Guild, entry: BirthdayEntry) -> discord.Embed:
-        bday = entry.birthday
-        when = format_birthday_date(bday.day, bday.month)
-        name = member_display(guild, bday.user_id)
-        embed = discord.Embed(
-            description=f"{when} ({self.entry_timing(entry)})",
-            color=BRAND_COLOR,
-        )
-        member = guild.get_member(bday.user_id)
-        if member is not None:
-            embed.set_author(name=name, icon_url=member.display_avatar.url)
-        else:
-            embed.set_author(name=name)
-        return embed
-
-    async def build_board_embeds(
+    async def build_board_view(
         self,
         guild: discord.Guild,
         config: GuildConfig,
         *,
         person_limit: int | None = None,
-    ) -> list[discord.Embed]:
-        limit = person_limit if person_limit is not None else self.MAX_PERSON_EMBEDS
+    ) -> ui.LayoutView:
+        limit = person_limit if person_limit is not None else self.MAX_BOARD_ENTRIES
         entries = await self.list_sorted(guild.id, config.timezone)
-        header = base_embed(
-            title="🎂 Дни рождения на сервере",
-            description=self.BOARD_HELP,
-        )
+
+        parts = [
+            "## 🎂 Дни рождения на сервере",
+            "",
+            self.BOARD_HELP,
+        ]
         if not entries:
-            header.description = f"{self.BOARD_HELP}\n\n_Пока никто не указал день рождения._"
-            return [header]
+            parts.extend(["", "_Пока никто не указал день рождения._"])
+        else:
+            parts.extend(["", self.format_board_lines(guild, entries, limit=limit)])
 
-        if len(entries) > limit:
-            header.description = (
-                f"{self.BOARD_HELP}\n\n"
-                f"_Показано {limit} из {len(entries)} ближайших._"
+        view = ui.LayoutView(timeout=None)
+        container = ui.Container(accent_color=BRAND_COLOR)
+        container.add_item(ui.TextDisplay("\n".join(parts)))
+        view.add_item(container)
+        return view
+
+    async def build_preview_view(
+        self,
+        guild: discord.Guild,
+        config: GuildConfig,
+    ) -> tuple[ui.LayoutView, discord.File | None]:
+        from bot.utils.birthday_preview_image import render_birthday_preview_image
+
+        entries = await self.list_sorted(guild.id, config.timezone)
+
+        parts = [
+            "## 🎂 Дни рождения на сервере",
+            "",
+            self.BOARD_HELP,
+        ]
+        if not entries:
+            parts.extend(["", "_Пока никто не указал день рождения._"])
+
+        view = ui.LayoutView(timeout=None)
+        container = ui.Container(accent_color=BRAND_COLOR)
+        container.add_item(ui.TextDisplay("\n".join(parts)))
+
+        image_file: discord.File | None = None
+        if entries:
+            png_bytes = await render_birthday_preview_image(
+                guild,
+                entries,
+                limit=self.PREVIEW_IMAGE_LIMIT,
             )
+            image_file = discord.File(
+                io.BytesIO(png_bytes),
+                filename=self.PREVIEW_IMAGE_FILENAME,
+            )
+            gallery = ui.MediaGallery()
+            gallery.add_item(
+                media=f"attachment://{self.PREVIEW_IMAGE_FILENAME}",
+                description="Ближайшие дни рождения",
+            )
+            container.add_item(ui.Separator())
+            container.add_item(gallery)
 
-        embeds = [header]
-        for entry in entries[:limit]:
-            embeds.append(self.build_person_embed(guild, entry))
-        return embeds
+        view.add_item(container)
+        return view, image_file
 
     def format_board_lines(
         self,
@@ -230,12 +260,12 @@ class BirthdayService:
 
         await self.cleanup_stale_list_messages(guild, channel)
 
-        embeds = await self.build_board_embeds(guild, config)
+        view = await self.build_board_view(guild, config)
 
         if config.birthday_board_message_id:
             try:
                 message = await channel.fetch_message(config.birthday_board_message_id)
-                await message.edit(content=None, embeds=embeds)
+                await message.edit(content=None, embeds=[], view=view)
                 return
             except discord.NotFound:
                 await self.db.set_birthday_board_message_id(guild.id, None)
@@ -244,7 +274,7 @@ class BirthdayService:
                 return
 
         try:
-            message = await channel.send(embeds=embeds)
+            message = await channel.send(view=view)
             await self.db.set_birthday_board_message_id(guild.id, message.id)
         except discord.HTTPException:
             log.exception("Failed to post birthday board in guild %s", guild.id)

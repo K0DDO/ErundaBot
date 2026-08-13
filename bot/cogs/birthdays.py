@@ -117,18 +117,33 @@ class BirthdaysCog(commands.Cog):
 
     @birthday.command(
         name="preview",
-        description="Предпросмотр доски с аватарками (только тебе)",
+        description="Предпросмотр доски: текст + картинка (только тебе)",
     )
     @app_commands.guild_only()
     async def birthday_preview(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             return
+        await interaction.response.defer(ephemeral=True)
         config = await self.bot.config_service.get(interaction.guild.id)
-        embeds = await self.bot.birthday_service.build_board_embeds(
-            interaction.guild,
-            config,
-        )
-        await interaction.response.send_message(embeds=embeds, ephemeral=True)
+        try:
+            view, image_file = await self.bot.birthday_service.build_preview_view(
+                interaction.guild,
+                config,
+            )
+            if image_file is None:
+                await interaction.followup.send(view=view, ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    view=view,
+                    files=[image_file],
+                    ephemeral=True,
+                )
+        except Exception:
+            log.exception("Failed to render birthday preview for guild %s", interaction.guild.id)
+            await interaction.followup.send(
+                embed=error_embed("Не удалось сгенерировать предпросмотр"),
+                ephemeral=True,
+            )
 
     @birthday.command(name="next", description="Ближайший день рождения")
     @app_commands.guild_only()
