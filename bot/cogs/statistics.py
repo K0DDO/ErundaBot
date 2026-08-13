@@ -212,7 +212,7 @@ class StatisticsCog(commands.Cog):
         embed.add_field(name="На сервере", value=on_server, inline=False)
         embed.add_field(name="Рейтинги", value=ranks_text, inline=False)
 
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="top", description="Топы активности сервера")
     @app_commands.guild_only()

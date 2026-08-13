@@ -9,9 +9,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.services.birthday_service import format_birthday_date, member_display
-from bot.utils.embeds import base_embed, error_embed, success_embed
-from bot.views.birthday_views import BirthdayPreviewView, BirthdaySetModal, refresh_birthday_board
+from bot.utils.embeds import error_embed, success_embed
+from bot.views.birthday_views import BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -68,100 +67,6 @@ class BirthdaysCog(commands.Cog):
             ephemeral=True,
         )
         await refresh_birthday_board(self.bot, interaction.guild)
-
-    @birthday.command(name="list", description="Список дней рождения на сервере")
-    @app_commands.guild_only()
-    async def birthday_list(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-
-        config = await self.bot.config_service.get(interaction.guild.id)
-        entries = await self.bot.birthday_service.list_sorted(
-            interaction.guild.id,
-            config.timezone,
-        )
-        if not entries:
-            await interaction.response.send_message(
-                embed=base_embed(
-                    title="Дни рождения",
-                    description="Пока никто не указал день рождения.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        description = self.bot.birthday_service.format_preview_lines(
-            interaction.guild,
-            entries,
-            limit=25,
-        )
-
-        await interaction.response.send_message(
-            embed=base_embed(
-                title="Дни рождения",
-                description=description,
-            ),
-            ephemeral=True,
-        )
-
-    @birthday.command(
-        name="preview",
-        description="Предпросмотр доски дней рождения (только тебе)",
-    )
-    @app_commands.guild_only()
-    async def birthday_preview(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        text = await self.bot.birthday_service.build_preview_text(
-            interaction.guild,
-            config,
-        )
-        view = BirthdayPreviewView(
-            self.bot,
-            interaction.guild.id,
-            text,
-        )
-        await interaction.response.send_message(view=view, ephemeral=True)
-
-    @birthday.command(name="next", description="Ближайший день рождения")
-    @app_commands.guild_only()
-    async def birthday_next(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-
-        config = await self.bot.config_service.get(interaction.guild.id)
-        entry = await self.bot.birthday_service.next_birthday(
-            interaction.guild.id,
-            config.timezone,
-        )
-        if entry is None:
-            await interaction.response.send_message(
-                embed=base_embed(
-                    title="Ближайший день рождения",
-                    description="Список пуст.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        bday = entry.birthday
-        when = format_birthday_date(bday.day, bday.month)
-        name = member_display(interaction.guild, bday.user_id)
-        if entry.days_until == 0:
-            timing = "сегодня"
-        elif entry.days_until == 1:
-            timing = "завтра"
-        else:
-            timing = f"через {entry.days_until} дн."
-
-        await interaction.response.send_message(
-            embed=base_embed(
-                title="Ближайший день рождения",
-                description=f"**{name}** — {when} ({timing})",
-            ),
-            ephemeral=True,
-        )
 
 
 async def setup(bot: ErundaBot) -> None:

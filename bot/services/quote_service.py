@@ -120,23 +120,47 @@ class QuoteService:
                 ids.append(member.id)
         return ids
 
+    def _quote_card_kwargs(self, quote: Quote, guild: discord.Guild | None = None) -> dict:
+        author = self.author_label(quote, guild)
+        date_part = self.format_quote_date(quote.created_at)
+        content = discord.utils.escape_markdown(quote.content)
+        avatar_url = self.author_avatar_url(quote, guild)
+        return {
+            "number_text": f"-# *#{quote.number}*",
+            "quote_text": "\n".join(f"## {line}" for line in f"«{content}»".split("\n")),
+            "author_text": f"**{discord.utils.escape_markdown(author)}**",
+            "date_text": f"-# *{date_part}*" if date_part else None,
+            "reactions_text": self.format_reactions(quote.reactions_snapshot),
+            "avatar_url": avatar_url,
+            "avatar_description": author[:256] if avatar_url else None,
+        }
+
     def build_quote_card(self, quote: Quote, guild: discord.Guild | None = None):
         from bot.views.quote_views import QuoteCardView
 
-        author = self.author_label(quote, guild)
-        date_part = self.format_quote_date(quote.created_at)
-        reactions = self.format_reactions(quote.reactions_snapshot)
-        content = discord.utils.escape_markdown(quote.content)
-        quote_text = "\n".join(f"## {line}" for line in f"«{content}»".split("\n"))
-        avatar_url = self.author_avatar_url(quote, guild)
+        return QuoteCardView(**self._quote_card_kwargs(quote, guild))
+
+    def build_quote_delete_view(
+        self,
+        quote: Quote,
+        guild: discord.Guild,
+        requester_id: int,
+        bot,
+    ):
+        from bot.views.quote_views import (
+            QuoteCardView,
+            QuoteDeleteCancelButton,
+            QuoteDeleteConfirmButton,
+        )
+
+        row = discord.ui.ActionRow()
+        row.add_item(QuoteDeleteConfirmButton(bot, guild.id, quote.number, requester_id))
+        row.add_item(QuoteDeleteCancelButton(requester_id))
         return QuoteCardView(
-            number_text=f"-# *#{quote.number}*",
-            quote_text=quote_text,
-            author_text=f"**{discord.utils.escape_markdown(author)}**",
-            date_text=f"-# *{date_part}*" if date_part else None,
-            reactions_text=reactions,
-            avatar_url=avatar_url,
-            avatar_description=author[:256] if avatar_url else None,
+            **self._quote_card_kwargs(quote, guild),
+            footer_text="**Удалить эту цитату?**",
+            extra_row=row,
+            timeout=120,
         )
 
     @staticmethod

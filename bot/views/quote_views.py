@@ -15,6 +15,14 @@ if TYPE_CHECKING:
     from bot.bot import ErundaBot
 
 
+def status_card(text: str, *, accent_color: int = BRAND_COLOR) -> ui.LayoutView:
+    view = ui.LayoutView(timeout=None)
+    container = ui.Container(accent_color=accent_color)
+    container.add_item(ui.TextDisplay(text))
+    view.add_item(container)
+    return view
+
+
 class QuoteCardView(ui.LayoutView):
     def __init__(
         self,
@@ -27,8 +35,11 @@ class QuoteCardView(ui.LayoutView):
         accent_color: int = BRAND_COLOR,
         avatar_url: str | None = None,
         avatar_description: str | None = None,
+        footer_text: str | None = None,
+        extra_row: ui.ActionRow | None = None,
+        timeout: float | None = None,
     ) -> None:
-        super().__init__(timeout=None)
+        super().__init__(timeout=timeout)
         container = ui.Container(accent_color=accent_color)
         container.add_item(ui.TextDisplay(number_text))
         container.add_item(ui.TextDisplay(quote_text))
@@ -53,7 +64,59 @@ class QuoteCardView(ui.LayoutView):
 
         if reactions_text:
             container.add_item(ui.TextDisplay(reactions_text))
+        if footer_text:
+            container.add_item(ui.TextDisplay(footer_text))
+        if extra_row is not None:
+            container.add_item(extra_row)
         self.add_item(container)
+
+
+class QuoteDeleteConfirmButton(ui.Button):
+    def __init__(self, bot: ErundaBot, guild_id: int, quote_number: int, requester_id: int) -> None:
+        super().__init__(label="Удалить", style=discord.ButtonStyle.danger)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.quote_number = quote_number
+        self.requester_id = requester_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                embed=error_embed("Это подтверждение не для тебя"),
+                ephemeral=True,
+            )
+            return
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        await interaction.response.defer()
+        try:
+            await self.bot.quote_service.delete(
+                interaction.guild,
+                self.guild_id,
+                self.quote_number,
+                interaction.user,
+            )
+        except ValueError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.edit_original_response(
+            view=status_card(f"Цитата #{self.quote_number} удалена, номера обновлены"),
+        )
+
+
+class QuoteDeleteCancelButton(ui.Button):
+    def __init__(self, requester_id: int) -> None:
+        super().__init__(label="Отмена", style=discord.ButtonStyle.secondary)
+        self.requester_id = requester_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                embed=error_embed("Это подтверждение не для тебя"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.edit_message(view=status_card("Удаление отменено"))
 
 
 class QuoteComposeModal(ui.Modal):
@@ -82,12 +145,10 @@ class QuoteComposeModal(ui.Modal):
         bot: ErundaBot,
         *,
         authors: list[discord.Member],
-        silent: bool,
     ) -> None:
-        super().__init__(title="Импорт цитаты" if silent else "Новая цитата")
+        super().__init__(title="Новая цитата")
         self.bot = bot
         self.authors = authors
-        self.silent = silent
         if authors:
             self.name.default = authors[0].display_name[:80]
 
@@ -125,16 +186,6 @@ class QuoteComposeModal(ui.Modal):
             )
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-
-        if self.silent:
-            await interaction.response.send_message(
-                embed=success_embed(
-                    "Цитата сохранена",
-                    f"#{quote.number} добавлена в базу без отправки в канал.",
-                ),
-                ephemeral=True,
-            )
             return
 
         config = await self.bot.config_service.get(interaction.guild.id)

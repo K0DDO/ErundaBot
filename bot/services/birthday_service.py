@@ -13,7 +13,7 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
-from bot.utils.birthday_emojis import clean_birthday_emoji, escape_markdown_inline, normalize_birthday_emoji
+from bot.utils.birthday_emojis import escape_markdown_inline, normalize_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR
 from bot.utils.timezones import parse_hhmm
 
@@ -103,7 +103,7 @@ class BirthdayService:
         "**Как добавить свой день рождения:**\n"
         "• `/birthday set` — указать / изменить дату\n"
         "• `/birthday remove` — удалить дату\n"
-        "• `эмодзи:` серверный или обычный — сначала скопируй"
+        "• эмодзи: обычный или серверный (`:name:` / вставь с сервера)"
     )
     MAX_BOARD_ENTRIES = 30
 
@@ -118,6 +118,7 @@ class BirthdayService:
         month: int,
         year: int | None,
         emoji: str | None = None,
+        guild: discord.Guild | None = None,
     ) -> Birthday:
         validate_birthday(day, month, year)
         return await self.db.upsert_birthday(
@@ -126,7 +127,11 @@ class BirthdayService:
             day,
             month,
             year,
-            emoji=normalize_birthday_emoji(emoji, user_id=user_id) if emoji is not None else None,
+            emoji=(
+                normalize_birthday_emoji(emoji, user_id=user_id, guild=guild)
+                if emoji is not None
+                else None
+            ),
         )
 
     async def remove_birthday(self, guild_id: int, user_id: int) -> bool:
@@ -183,31 +188,12 @@ class BirthdayService:
             parts.extend(["", self.format_preview_lines(guild, entries, limit=limit)])
         return "\n".join(parts)
 
-    async def build_preview_text(
-        self,
-        guild: discord.Guild,
-        config: GuildConfig,
-    ) -> str:
-        limit = self.MAX_BOARD_ENTRIES
-        entries = await self.list_sorted(guild.id, config.timezone)
-
-        parts = [
-            "## 🎂 Дни рождения",
-            "`/birthday set` · `/birthday remove`",
-        ]
-        if not entries:
-            parts.append("_Пока никто не указал день рождения._")
-        else:
-            parts.extend(["", self.format_preview_lines(guild, entries, limit=limit)])
-        return "\n".join(parts)
-
     def format_preview_entry(self, guild: discord.Guild, entry: BirthdayEntry) -> str:
         bday = entry.birthday
         when = format_birthday_date(bday.day, bday.month)
         name = member_display(guild, bday.user_id)
         timing = self.entry_timing(entry)
-        emoji = clean_birthday_emoji(bday.emoji)
-        return f"{emoji} **{name}** — {when} · *{timing}*"
+        return f"{bday.emoji} **{name}** — {when} · *{timing}*"
 
     def format_preview_lines(
         self,

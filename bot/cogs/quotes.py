@@ -102,41 +102,12 @@ class QuotesCog(commands.Cog):
             QuoteComposeModal(
                 self.bot,
                 authors=_collect_members(author, author2, author3, author4, author5),
-                silent=False,
-            ),
-        )
-
-    @quote.command(name="import", description="Добавить цитату в базу без публикации в канал")
-    @app_commands.describe(
-        author=AUTHOR_MENTION,
-        author2=AUTHOR_MORE,
-        author3=AUTHOR_MORE,
-        author4=AUTHOR_MORE,
-        author5=AUTHOR_MORE,
-    )
-    @app_commands.guild_only()
-    async def quote_import(
-        self,
-        interaction: discord.Interaction,
-        author: discord.Member | None = None,
-        author2: discord.Member | None = None,
-        author3: discord.Member | None = None,
-        author4: discord.Member | None = None,
-        author5: discord.Member | None = None,
-    ) -> None:
-        if interaction.guild is None:
-            return
-        await interaction.response.send_modal(
-            QuoteComposeModal(
-                self.bot,
-                authors=_collect_members(author, author2, author3, author4, author5),
-                silent=True,
             ),
         )
 
     @quote.command(name="edit", description="Изменить цитату по номеру")
     @app_commands.describe(
-        quote_id="Номер цитаты (см. /quote list или footer у цитаты)",
+        quote_id="Номер цитаты (footer у цитаты)",
         author=AUTHOR_MENTION,
         author2=AUTHOR_MORE,
         author3=AUTHOR_MORE,
@@ -187,19 +158,26 @@ class QuotesCog(commands.Cog):
     ) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            await self.bot.quote_service.delete(
-                interaction.guild,
-                interaction.guild.id,
-                quote_id,
-                interaction.user,
+        quote = await self.bot.quote_service.get(interaction.guild.id, quote_id)
+        if quote is None:
+            await interaction.response.send_message(
+                embed=error_embed("Цитата не найдена"),
+                ephemeral=True,
             )
-        except ValueError as exc:
-            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.followup.send(
-            embed=success_embed(f"Цитата #{quote_id} удалена, номера обновлены"),
+        if not self.bot.quote_service.can_manage(quote, interaction.user):
+            await interaction.response.send_message(
+                embed=error_embed("Нет прав удалить эту цитату"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            view=self.bot.quote_service.build_quote_delete_view(
+                quote,
+                interaction.guild,
+                interaction.user.id,
+                self.bot,
+            ),
             ephemeral=True,
         )
 
@@ -248,28 +226,6 @@ class QuotesCog(commands.Cog):
         await interaction.response.send_message(
             view=self.bot.quote_service.build_quote_card(quote, interaction.guild),
         )
-
-    @quote.command(name="list", description="Последние цитаты")
-    @app_commands.guild_only()
-    async def quote_list(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        quotes = await self.bot.quote_service.list_quotes(interaction.guild.id, limit=5)
-        if not quotes:
-            await interaction.response.send_message(
-                embed=base_embed(title="Цитаты", description="Пока пусто."),
-            )
-            return
-        embed = base_embed(title="Последние цитаты")
-        for q in quotes:
-            preview = self.bot.quote_service.preview_text(q.content, 80)
-            author = self.bot.quote_service.author_label(q, interaction.guild)
-            embed.add_field(
-                name=f"#{q.number}",
-                value=f'"{preview}" — {author}',
-                inline=False,
-            )
-        await interaction.response.send_message(embed=embed)
 
     @quote.command(name="user", description="Цитаты участника")
     @app_commands.describe(user="Участник")
@@ -336,39 +292,6 @@ async def add_quote_context(
     await publish_quote(bot, message.guild, quote)
 
 
-@app_commands.context_menu(name="Import quote")
-@app_commands.guild_only()
-async def import_quote_context(
-    interaction: discord.Interaction,
-    message: discord.Message,
-) -> None:
-    bot = interaction.client
-    if not isinstance(bot, ErundaBot):
-        return
-    if message.guild is None or message.author.bot:
-        await interaction.response.send_message(
-            embed=error_embed("Нельзя импортировать это сообщение"),
-            ephemeral=True,
-        )
-        return
-    try:
-        quote = await bot.quote_service.add_from_message(message, interaction.user.id)
-    except ValueError as exc:
-        await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-        return
-    config = await bot.config_service.get(message.guild.id)
-    if config.quotes_channel_id and message.channel.id == config.quotes_channel_id:
-        await bot.db.set_quote_posted_message(quote.id, message.channel.id, message.id)
-    await interaction.response.send_message(
-        embed=success_embed(
-            "Цитата импортирована",
-            f"#{quote.number} сохранена без публикации в канал.",
-        ),
-        ephemeral=True,
-    )
-
-
 async def setup(bot: ErundaBot) -> None:
     await bot.add_cog(QuotesCog(bot))
     bot.tree.add_command(add_quote_context)
-    bot.tree.add_command(import_quote_context)
