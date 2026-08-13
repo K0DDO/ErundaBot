@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import discord
 
 from bot.database.database import Database
@@ -9,10 +11,32 @@ from bot.database.models import CustomRole
 from bot.utils.colors import parse_hex_color
 from bot.utils.permissions import bot_can_manage_role, is_guild_admin
 
+log = logging.getLogger(__name__)
+
 
 class RoleService:
     def __init__(self, db: Database) -> None:
         self.db = db
+
+    @staticmethod
+    async def position_personal_role(bot_member: discord.Member, role: discord.Role) -> None:
+        """Move personal role high enough so its colour is visible in the member list."""
+        if not bot_member.guild_permissions.manage_roles:
+            return
+        if role.is_default() or role.managed:
+            return
+        if role >= bot_member.top_role:
+            return
+        target = bot_member.top_role.position - 1
+        if target < 1 or role.position >= target:
+            return
+        try:
+            await role.edit(
+                position=target,
+                reason="Ерунда: персональная роль выше цветных ролей",
+            )
+        except discord.HTTPException:
+            log.warning("Could not reposition personal role %s", role.id)
 
     async def create_managed_role(
         self,
@@ -92,6 +116,7 @@ class RoleService:
         except discord.HTTPException as exc:
             await role.delete()
             raise ValueError("Не удалось выдать роль") from exc
+        await self.position_personal_role(bot_member, role)
         record = await self.db.save_custom_role(
             guild.id,
             role.id,
@@ -127,6 +152,7 @@ class RoleService:
             edit_kwargs["colour"] = discord.Colour(color)
         if edit_kwargs:
             await role.edit(**edit_kwargs)
+        await self.position_personal_role(bot_member, role)
         return role, record
 
     async def delete_personal_role(
