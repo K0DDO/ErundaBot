@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS birthdays (
     day INTEGER NOT NULL CHECK (day BETWEEN 1 AND 31),
     month INTEGER NOT NULL CHECK (month BETWEEN 1 AND 12),
     year INTEGER,
+    emoji TEXT NOT NULL DEFAULT '👤',
     PRIMARY KEY (guild_id, user_id),
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
 );
@@ -248,6 +249,14 @@ class Database:
                 "UPDATE guilds SET statistics_enabled = 1, personal_roles_enabled = 1"
             )
             await self._db.execute("PRAGMA user_version = 1")
+        if version < 2:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE birthdays ADD COLUMN emoji TEXT NOT NULL DEFAULT '👤'"
+                )
+            except Exception:
+                pass
+            await self._db.execute("PRAGMA user_version = 2")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -338,18 +347,24 @@ class Database:
         day: int,
         month: int,
         year: int | None,
+        emoji: str | None = None,
     ) -> Birthday:
         await self.ensure_guild(guild_id)
+        existing = await self.get_birthday(guild_id, user_id)
+        resolved_emoji = emoji if emoji is not None else (
+            existing.emoji if existing is not None else "👤"
+        )
         await self.connection.execute(
             """
-            INSERT INTO birthdays (guild_id, user_id, day, month, year)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO birthdays (guild_id, user_id, day, month, year, emoji)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
                 day = excluded.day,
                 month = excluded.month,
-                year = excluded.year
+                year = excluded.year,
+                emoji = excluded.emoji
             """,
-            (guild_id, user_id, day, month, year),
+            (guild_id, user_id, day, month, year, resolved_emoji),
         )
         await self.connection.commit()
         birthday = await self.get_birthday(guild_id, user_id)

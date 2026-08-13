@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import discord
+from discord import ui
 
-from bot.services.birthday_service import format_birthday_date
-from bot.utils.embeds import error_embed, success_embed
+from bot.services.birthday_service import format_birthday_date, normalize_birthday_emoji
+from bot.utils.embeds import BRAND_COLOR, error_embed, success_embed
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -20,6 +21,36 @@ async def refresh_birthday_board(bot: ErundaBot, guild: discord.Guild | None) ->
         await bot.birthday_service.sync_board(guild)
     except Exception:
         pass
+
+
+class BirthdayAddButton(ui.Button):
+    def __init__(self, bot: ErundaBot, guild_id: int, user_id: int) -> None:
+        super().__init__(label="Добавить ДР", emoji="🎂", style=discord.ButtonStyle.secondary)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            BirthdaySetModal(self.bot, self.guild_id, self.user_id)
+        )
+
+
+class BirthdayPreviewView(ui.LayoutView):
+    def __init__(
+        self,
+        bot: ErundaBot,
+        guild_id: int,
+        user_id: int,
+        text: str,
+    ) -> None:
+        super().__init__(timeout=None)
+        container = ui.Container(accent_color=BRAND_COLOR)
+        container.add_item(ui.TextDisplay(text))
+        row = ui.ActionRow()
+        row.add_item(BirthdayAddButton(bot, guild_id, user_id))
+        container.add_item(row)
+        self.add_item(container)
 
 
 class BirthdaySetModal(discord.ui.Modal, title="Указать день рождения"):
@@ -41,6 +72,12 @@ class BirthdaySetModal(discord.ui.Modal, title="Указать день рожд
         required=False,
         max_length=4,
     )
+    emoji = discord.ui.TextInput(
+        label="Эмодзи перед именем",
+        placeholder="🎂",
+        required=False,
+        max_length=8,
+    )
 
     def __init__(self, bot: ErundaBot, guild_id: int, user_id: int) -> None:
         super().__init__()
@@ -54,12 +91,15 @@ class BirthdaySetModal(discord.ui.Modal, title="Указать день рожд
             month = int(str(self.month.value).strip())
             year_raw = str(self.year.value).strip() if self.year.value else ""
             year = int(year_raw) if year_raw else None
+            emoji_raw = str(self.emoji.value).strip() if self.emoji.value else ""
+            emoji = normalize_birthday_emoji(emoji_raw or "🎂")
             birthday = await self.bot.birthday_service.set_birthday(
                 self.guild_id,
                 self.user_id,
                 day,
                 month,
                 year,
+                emoji=emoji,
             )
         except ValueError as exc:
             await interaction.response.send_message(
@@ -71,7 +111,7 @@ class BirthdaySetModal(discord.ui.Modal, title="Указать день рожд
         await interaction.response.send_message(
             embed=success_embed(
                 "День рождения сохранён",
-                format_birthday_date(birthday.day, birthday.month, birthday.year),
+                f"{birthday.emoji} {format_birthday_date(birthday.day, birthday.month, birthday.year)}",
             ),
             ephemeral=True,
         )

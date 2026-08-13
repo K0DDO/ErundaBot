@@ -11,7 +11,7 @@ from discord.ext import commands
 
 from bot.services.birthday_service import format_birthday_date, member_display
 from bot.utils.embeds import base_embed, error_embed, success_embed
-from bot.views.birthday_views import BirthdaySetModal, refresh_birthday_board
+from bot.views.birthday_views import BirthdayPreviewView, BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -117,9 +117,15 @@ class BirthdaysCog(commands.Cog):
         if interaction.guild is None:
             return
         config = await self.bot.config_service.get(interaction.guild.id)
-        view = await self.bot.birthday_service.build_preview_view(
+        text = await self.bot.birthday_service.build_preview_text(
             interaction.guild,
             config,
+        )
+        view = BirthdayPreviewView(
+            self.bot,
+            interaction.guild.id,
+            interaction.user.id,
+            text,
         )
         await interaction.response.send_message(view=view, ephemeral=True)
 

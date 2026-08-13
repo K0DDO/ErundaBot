@@ -64,15 +64,18 @@ class Birthday:
     day: int
     month: int
     year: int | None = None
+    emoji: str = "👤"
 
     @classmethod
     def from_row(cls, row: Any) -> Birthday:
+        keys = row.keys()
         return cls(
             guild_id=row["guild_id"],
             user_id=row["user_id"],
             day=row["day"],
             month=row["month"],
             year=row["year"],
+            emoji=row["emoji"] if "emoji" in keys and row["emoji"] else "👤",
         )
 
 
