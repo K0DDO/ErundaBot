@@ -1,140 +1,106 @@
-# PROJECT_CONTEXT — Ерунда
+# PROJECT_CONTEXT — системный промпт Ерунды
 
-## Название проекта
+Discord-бот **Ерунда** для сервера «Ерундульки». Репозиторий: `K0DDO/ErundaBot`, ветка `main`.
 
-**Ерунда** — Discord-бот для сервера «Ерундульки».
+**Когда читать этот файл:** только после сжатия контекстного окна (conversation summary) или если пропала память о проекте. Не перечитывать каждый ход. Если файл расходится с кодом — верь коду и обнови файл.
 
-## Status
+## Заморозки (пока пользователь не попросит иначе)
 
-- [x] Базовая структура бота
-- [x] Подключение Discord
-- [x] SQLite
-- [x] Дни рождения
-- [x] Статистика / профиль / топы
-- [x] Ивенты
-- [x] Цитаты
-- [x] Управление ролями
-- [x] Пользовательские роли (`/myrole`)
-- [x] RGB-роли
-- [x] Демократия
-- [x] Автовыполнение решений (опционально, `/config`)
-- [x] `/config`
-- [x] README и `.env.example`
+Не трогать без явного запроса:
 
-## Структура проекта
+- дни рождения (`bot/cogs/birthdays.py`, `birthday_service`, `birthday_star_service`, `birthday_views`, RGB-роль именинника)
+- роли (`bot/cogs/roles.py`, `role_service`, `role_views`, `/myrole`)
+- цитаты (`bot/cogs/quotes.py`, `quote_service`, `quote_views`, emoji helpers)
 
-```text
-ErundaBot/
-├── bot/
-│   ├── bot.py
-│   ├── cogs/
-│   │   ├── config.py
-│   │   ├── birthdays.py
-│   │   ├── statistics.py
-│   │   ├── events.py
-│   │   ├── quotes.py
-│   │   ├── roles.py
-│   │   └── democracy.py
-│   ├── database/
-│   │   ├── database.py
-│   │   └── models.py
-│   ├── services/
-│   │   ├── config_service.py
-│   │   ├── birthday_service.py
-│   │   ├── statistics_service.py
-│   │   ├── event_service.py
-│   │   ├── quote_service.py
-│   │   ├── role_service.py
-│   │   └── democracy_service.py
-│   ├── views/
-│   │   ├── config_views.py
-│   │   ├── birthday_views.py
-│   │   ├── top_views.py
-│   │   ├── event_views.py
-│   │   ├── role_views.py
-│   │   └── proposal_views.py
-│   ├── tasks/background.py
-│   └── utils/
-├── data/
-├── main.py
-├── requirements.txt
-├── .env.example
-├── README.md
-└── PROJECT_CONTEXT.md
-```
+## Git и агент
 
-## Discord-команды
+- После рабочих правок: commit + **push** (пользователь так просил).
+- Сообщения коммитов: **строчные буквы, без точки в конце**.
+- Не коммитить `.env`, `.env.production`, токены.
+- Windows PowerShell: команды через `;`, не `&&`. HEREDOC/`cat` для commit ненадёжен — `git commit -m "message"`.
+- Не деструктивные git-команды и не force push в `main`, пока явно не попросили.
+
+## Стек
+
+- Python 3.12+, `discord.py>=2.6`, aiosqlite, Docker + GitHub Actions deploy (`DEPLOY.md`)
+- Intents: members, message content, `emojis_and_stickers`
+- Env: `DISCORD_TOKEN`, `DATABASE_PATH`, `DEFAULT_TIMEZONE`, `GROQ_API_KEY`, `GROQ_MODEL`
+- Slash-группы в Discord визуально не группируются в пикере; группы уже есть (`quote`, `birthday`, `myrole`, `event`, `proposal`)
+
+## Команды (актуально)
 
 ```text
 /config
-/birthday set|remove|list|next
-/profile [user]
+/birthday set|remove
+/profile [user]          # ephemeral
 /top
-/event create|list|info|join|leave|cancel
-/quote add|random|list|user|edit|delete
-Apps → Add quote (context menu)
+/event create|list|cancel
+/quote add|edit|delete|cleanup|random|user
+Apps → Add quote
 /myrole edit|delete
 /proposal create|list|info|cancel
 ```
 
-## Background tasks
+Удалены и не возвращать без запроса: `/birthday list|next|preview` и debug `test-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`.
 
-- `birthday_loop` — поздравления и напоминания
-- `event_loop` — напоминания, старт, auto-complete (+2ч)
-- `proposal_loop` — закрытие голосований, результат, auto-actions
-
-## Deployment
-
-- Docker + `docker-compose.yml`, env: `.env.production` (server-only)
-- GitHub Actions: push `main` → SSH deploy на `deploy@107.172.44.182`
-- См. `DEPLOY.md`
-
-## База данных
-
-Таблицы: `guilds` (+ `birthday_board_message_id`), `birthdays`, `birthday_notifications`, … `quotes` (+ `author_display`), …
-
-## Реализованные функции
-
-### Дни рождения
-Команды + доска в канале ДР (инструкция + список без @), авто-edit при set/remove и при выборе канала в `/config`.
-
-### Цитаты
-Slash + context menu; автор показывается текстом (`author_display`), без упоминания; `/quote add` — параметры `name` и/или `author`.
-
-### Роли
-Только персональные: `/myrole edit`, `/myrole delete` (нужен флаг в `/config`).
-
-### Цитаты
-Редактирование/удаление по `#id`; дата через `/quote edit date:`.
+## Модули
 
 ### Ивенты
-Modal create, list/info/join/leave/cancel, кнопки на embed, лимит участников, restore views после restart, напоминания по `event_reminder_minutes`.
 
-### Демократия
-Предложения с 👍/👎, смена голоса, кворум и % из config, auto-actions (`create_role`, `delete_role`, `create_channel`, `bot_config`) если `auto_execute_proposals` включён.
+Slash только create / list / cancel. Join / leave / info — **кнопки** на embed: «Участвовать», «Не участвовать», «Подробнее». Views восстанавливаются после рестарта. Лимит участников, напоминания `event_reminder_minutes`, auto-complete +2ч.
 
-## Current Task
+### Цитаты (заморожено)
 
-Все системы по ТЗ реализованы. Дальнейшая работа — багфиксы по feedback с сервера.
+Карточки Components V2 (`QuoteCardView`): мелкий курсив `#N`, крупная цитата в «ёлочках», автор + русская дата, thumbnail справа у блока автора. На карточке обязателен display name; `@` авторы (до 5) только для `/quote user`, в `author_ids` JSON. Нумерация — колонка `number` по гильдии; cleanup/delete перенумеровывают и синкают сообщения. `/quote cleanup` без admin-check. Эмодзи сервера: `format_text_with_guild_emojis` / `expand_guild_shortcodes` в `bot/utils/birthday_emojis.py` — **не** `escape_markdown` на shortcodes (ломает `:dead_inside:`). На старте rewrite + migrate legacy cards.
 
-## Known Issues
+### Дни рождения (заморожено)
 
-- Global `tree.sync()` может задерживать slash-команды
+Команды: `set`, `remove`. Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (только русский текст), пинг только в день ДР. Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
+
+### Роли (заморожено)
+
+Только персональные `/myrole edit|delete` (флаг в `/config`). Отдельные RGB-роли пользователей не пилить заново без запроса; RGB именинника — часть ДР.
+
+### Остальное
+
+- `/profile` ephemeral. Статистика: messages + voice_minutes + reactions.
+- Демократия: 👍/👎, кворум/% из config, auto-actions если `auto_execute_proposals`.
+- `/config`: каналы, timezone, флаги, времена уведомлений, правила голосований.
+
+## Структура
+
+```text
+bot/cogs/        config, birthdays, statistics, events, quotes, roles, democracy
+bot/database/    database.py (миграции в _migrate), models.py
+bot/services/    * + ai_service.py (Groq), birthday_star_service.py
+bot/views/       * + quote_views.py
+bot/tasks/background.py
+bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
+```
+
+## БД (миграции до v8)
+
+Таблицы: `guilds`, `users`, `birthdays`, `message_statistics`, `voice_sessions`, `reaction_statistics`, `events`, `event_participants`, `quotes`, `custom_roles`, `proposals`, `proposal_votes`, `birthday_star_grants`, `birthday_notifications`, `event_notifications`.
+
+Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`.
+
+`Database.close()` должен оставаться отдельным методом — не вшивать его в `_migrate` (уже ломалось).
+
+## Background
+
+- `birthday_loop` — поздравления и напоминания
+- `event_loop` — напоминания, старт, auto-complete
+- `proposal_loop` — закрытие голосований, auto-actions
+
+## Known issues
+
+- Global `tree.sync()` может задерживать появление slash-команд
 - `/top` view timeout 180с
-- Auto-actions предложений без UI — только через democracy service payload (расширение при необходимости)
 
-## Technical Decisions
+## Recent changes (2026-08)
 
-- Overall activity = messages + voice_minutes + reactions
-- Auto-execute: default off
-- Vote defaults: 24h / quorum 3 / ratio 0.5
-
-## Recent Changes
-
-- 2026-08-11 — quote edit/delete/date, RGB removed, docker deploy
-- 2026-08-11 — ивенты, цитаты, роли/RGB, демократия
-- 2026-08-10 — статистика, дни рождения, ядро
-
-## Правило восстановления контекста
-
-Прочитай этот файл первым; при расхождении верь коду и обнови файл.
+- Убраны `/event join|info|leave` — функционал кнопок на карточке
+- Цитаты: карточки V2, номера, author_ids, эмодзи сервера, confirm delete, без list/import
+- ДР: AI Groq, RGB именинник, без list/next/preview/debug
+- `/profile` ephemeral
+- `discord.py>=2.6`, `intents.emojis_and_stickers`

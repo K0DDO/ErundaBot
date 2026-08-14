@@ -1,0 +1,16 @@
+---
+description: After context compression, restore project memory from PROJECT_CONTEXT.md
+alwaysApply: true
+---
+
+# Когда читать системный промпт
+
+Не читай `PROJECT_CONTEXT.md` на каждом ходе.
+
+Прочитай его **первым действием** (Read tool), если выполнено любое:
+
+- чат только что сжали / есть conversation summary / «your conversation was summarized»
+- ты не помнишь актуальные команды, заморозки модулей или git-правила
+- пользователь ссылается на «что уже есть / что мы делали», а в текущем окне этого нет
+
+После правок, которые меняют команды, UI, схему БД или договорённости — обнови `PROJECT_CONTEXT.md` в том же коммите.
