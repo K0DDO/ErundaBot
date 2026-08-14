@@ -35,7 +35,7 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 /profile [user]          # ephemeral
 /top
 /event create|list|cancel
-/fest add|remove|role|new|export|winner|ping|list|preview|test-ping
+/fest add|remove|role|new|edit|delete|export|winner|ping|preview|test-ping
 /tgk add|remove|list
 /quote add|edit|delete|cleanup|random|user
 Apps → Add quote
@@ -43,7 +43,7 @@ Apps → Add quote
 /proposal create|list|info|cancel
 ```
 
-Удалены и не возвращать без запроса: `/birthday list|next|preview` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`. Вернули по запросу: `/birthday test-announce` (ephemeral ИИ-поздравление).
+Удалены и не возвращать без запроса: `/birthday list|next|preview` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`; `/fest list`. Вернули по запросу: `/birthday test-announce` (ephemeral ИИ-поздравление).
 
 ## Модули
 
@@ -53,7 +53,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Кинофестиваль
 
-Канал в `/config`. Пока канала нет — `/fest new`, `/fest list` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`: список фильмов + победитель внизу. Название сразу с больших букв. Постер с Википедии/iTunes, если нет — без картинки. Один фильм с человека, повторный add заменяет. Все: `add`/`remove`/`list` и кнопка «Предложить фильм». Роль «Кино» (не админ): `new`, `winner`, `export`, `ping`. `/fest winner` пишет победителя в карточку, ответ команды ephemeral. Дебаг: `/fest role`, `/fest preview`, `/fest test-ping`. `/fest export` — display names для колеса. `/fest ping роль` — время до сеанса; роль запоминается (`fest_reminder_minutes`, 0 = выкл).
+Канал в `/config`. Пока канала нет — `/fest new` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`: список фильмов без времени сеанса, победитель внизу. Название с новой строки, крупнее, с 🎬. Постер с Википедии/iTunes, если нет — без картинки. Один фильм с человека, повторный add заменяет. Все: `add`/`remove` и кнопка «Предложить фильм». Роль «Кино»: `new`, `edit`, `delete`, `winner`, `export`, `ping`. `/fest ping` — если сеанс уже начался, пишет «мы уже смотрим фильм». `/fest winner` ephemeral. Дебаг: `/fest role`, `/fest preview`, `/fest test-ping`. При старте бот обновляет уже существующие карточки.
 
 ### ТГК
 

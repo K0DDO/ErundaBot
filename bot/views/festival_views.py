@@ -20,11 +20,10 @@ async def festival_card(
     guild: discord.Guild,
     festival: Festival,
 ) -> FestivalCardView:
-    config = await bot.config_service.get(guild.id)
     films = await bot.festival_service.films(festival.id)
-    embed = bot.festival_service.build_embed(festival, films, config.timezone, guild)
+    body = bot.festival_service.card_body(festival, films, guild)
     posters = bot.festival_service.poster_urls(festival, films)
-    return FestivalCardView(bot, festival, embed.description or "", posters)
+    return FestivalCardView(bot, festival, body, posters)
 
 
 async def publish_festival_message(
@@ -65,6 +64,22 @@ async def refresh_festival_message(bot: ErundaBot, festival: Festival) -> None:
     try:
         msg = await channel.fetch_message(festival.message_id)
         await msg.edit(content=None, embeds=[], view=view)
+    except discord.HTTPException:
+        pass
+
+
+async def delete_festival_message(bot: ErundaBot, festival: Festival) -> None:
+    guild = bot.get_guild(festival.guild_id)
+    if guild is None or not festival.message_id:
+        return
+    config = await bot.config_service.get(festival.guild_id)
+    channel_id = festival.channel_id or config.fest_channel_id
+    channel = guild.get_channel(channel_id or 0) if channel_id else None
+    if channel is None or not hasattr(channel, "fetch_message"):
+        return
+    try:
+        msg = await channel.fetch_message(festival.message_id)
+        await msg.delete()
     except discord.HTTPException:
         pass
 
@@ -142,6 +157,80 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
         await interaction.response.send_message(
             embed=success_embed("Кинофестиваль создан", f"[Открыть]({message.jump_url})"),
             ephemeral=True,
+        )
+
+
+class FestivalEditModal(discord.ui.Modal, title="Изменить кинофестиваль"):
+    date = discord.ui.TextInput(label="Дата сеанса (DD.MM.YYYY)", placeholder="15.08.2026", max_length=10)
+    time = discord.ui.TextInput(label="Время (HH:MM)", placeholder="21:00", max_length=5)
+
+    def __init__(self, bot: ErundaBot, guild_id: int, tz_name: str, date_value: str, time_value: str) -> None:
+        super().__init__()
+        self.bot = bot
+        self.guild_id = guild_id
+        self.tz_name = tz_name
+        self.date.default = date_value
+        self.time.default = time_value
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            festival = await self.bot.festival_service.update_starts(
+                self.guild_id,
+                str(self.date.value),
+                str(self.time.value),
+                self.tz_name,
+            )
+        except ValueError as extra:
+            await interaction.response.send_message(embed=error_embed(str(extra)), ephemeral=True)
+            return
+        await refresh_festival_message(self.bot, festival)
+        await interaction.response.send_message(
+            embed=success_embed("Кинофестиваль обновлён"),
+            ephemeral=True,
+        )
+
+
+class FestivalDeleteConfirmView(discord.ui.View):
+    def __init__(self, bot: ErundaBot, festival_id: int, requester_id: int) -> None:
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.festival_id = festival_id
+        self.requester_id = requester_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                embed=error_embed("Это подтверждение не для тебя"),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Удалить", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        festival = await self.bot.db.get_festival(self.festival_id)
+        if festival is None:
+            await interaction.response.edit_message(
+                content=None,
+                embed=error_embed("Кинофестиваль не найден"),
+                view=None,
+            )
+            return
+        await interaction.response.defer()
+        await delete_festival_message(self.bot, festival)
+        await self.bot.db.delete_festival(festival.id)
+        await interaction.edit_original_response(
+            content=None,
+            embed=success_embed("Кинофестиваль удалён"),
+            view=None,
+        )
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
+    async def abort(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            content=None,
+            embed=success_embed("Кинофестиваль не удалён"),
+            view=None,
         )
 
 

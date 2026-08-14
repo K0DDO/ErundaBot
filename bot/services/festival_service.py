@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import discord
 
@@ -177,6 +178,26 @@ class FestivalService:
         festival = await self.db.create_festival(guild_id, starts_at.isoformat())
         return festival, previous
 
+    async def update_starts(
+        self,
+        guild_id: int,
+        date_str: str,
+        time_str: str,
+        tz_name: str,
+    ) -> Festival:
+        festival = await self.require_open(guild_id)
+        starts_at = parse_event_datetime(date_str, time_str, tz_name)
+        return await self.db.update_festival(
+            festival.id,
+            starts_at=starts_at.isoformat(),
+            reminder_sent=0,
+        )
+
+    async def delete(self, guild_id: int) -> Festival:
+        festival = await self.require_open(guild_id)
+        await self.db.delete_festival(festival.id)
+        return festival
+
     async def set_message(self, festival_id: int, channel_id: int, message_id: int) -> Festival:
         return await self.db.update_festival(
             festival_id,
@@ -220,6 +241,13 @@ class FestivalService:
         dt = datetime.fromisoformat(festival.starts_at)
         return format_datetime_local(dt, tz_name)
 
+    def starts_input(self, festival: Festival, tz_name: str) -> tuple[str, str]:
+        dt = datetime.fromisoformat(festival.starts_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(ZoneInfo(tz_name))
+        return local.strftime("%d.%m.%Y"), local.strftime("%H:%M")
+
     def remaining_label(self, festival: Festival, now: datetime | None = None) -> str:
         starts = datetime.fromisoformat(festival.starts_at)
         if starts.tzinfo is None:
@@ -227,42 +255,34 @@ class FestivalService:
         current = now or datetime.now(timezone.utc)
         return format_countdown((starts - current).total_seconds())
 
-    def build_embed(
+    def _film_block(self, user_id: int, title: str, guild: discord.Guild | None) -> str:
+        name = f"<@{user_id}>"
+        if guild is not None:
+            member = guild.get_member(user_id)
+            if member is not None:
+                name = member.mention
+        return f"{name}\n### 🎬 {normalize_film_title(title)}"
+
+    def card_body(
         self,
         festival: Festival,
         films: list[FestivalFilm],
-        tz_name: str,
         guild: discord.Guild | None = None,
-    ) -> discord.Embed:
-        date_label, time_label = self.format_starts(festival, tz_name)
-        lines: list[str] = []
+    ) -> str:
         shown = films[:40]
-        for film in shown:
-            name = f"<@{film.user_id}>"
-            if guild is not None:
-                member = guild.get_member(film.user_id)
-                if member is not None:
-                    name = member.mention
-            lines.append(f"{name} — {normalize_film_title(film.title)}")
+        blocks = [self._film_block(film.user_id, film.title, guild) for film in shown]
         extra = len(films) - len(shown)
         if extra > 0:
-            lines.append(f"… и ещё {extra}")
-        films_text = "\n".join(lines) if lines else "пока никто не предложил"
+            blocks.append(f"… и ещё {extra}")
+        films_text = "\n\n".join(blocks) if blocks else "пока никто не предложил"
         if festival.winner_user_id and festival.winner_film:
-            winner = f"**Победитель: <@{festival.winner_user_id}> — {normalize_film_title(festival.winner_film)}**"
+            winner = (
+                "**Победитель**\n"
+                + self._film_block(festival.winner_user_id, festival.winner_film, guild)
+            )
         else:
             winner = "Победитель: ещё не выбран"
-        embed = discord.Embed(
-            title=f"🎬 Кинофестиваль #{festival.number}",
-            description=(
-                f"Сеанс: **{date_label} {time_label}**\n\n"
-                f"**Фильмы**\n{films_text}\n\n"
-                f"{winner}"
-            ),
-            color=0x7C9CFF if festival.status == "open" else 0x57F287,
-        )
-        embed.set_footer(text="Ерунда")
-        return embed
+        return f"**Фильмы**\n{films_text}\n\n{winner}"
 
     def poster_urls(self, festival: Festival, films: list[FestivalFilm]) -> list[tuple[str, str]]:
         ordered: list[FestivalFilm] = []
@@ -288,12 +308,13 @@ class FestivalService:
         return "\n".join(names) if names else "пока нет заявок"
 
     def ping_text(self, festival: Festival, tz_name: str, role: discord.Role) -> str:
-        date_label, time_label = self.format_starts(festival, tz_name)
+        starts = datetime.fromisoformat(festival.starts_at)
+        if starts.tzinfo is None:
+            starts = starts.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= starts:
+            return f"{role.mention} мы уже смотрим фильм."
         left = self.remaining_label(festival)
-        return (
-            f"{role.mention} до фильма **{left}** "
-            f"(сеанс {date_label} в {time_label})."
-        )
+        return f"{role.mention} до фильма **{left}**."
 
     async def due_reminders(self, config: GuildConfig, now: datetime) -> list[Festival]:
         if config.fest_channel_id is None or config.fest_reminder_minutes <= 0:

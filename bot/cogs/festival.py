@@ -13,9 +13,10 @@ from bot.services.festival_service import normalize_film_title
 from bot.utils.embeds import error_embed, success_embed
 from bot.views.festival_views import (
     FestivalAddModal,
+    FestivalDeleteConfirmView,
+    FestivalEditModal,
     FestivalNewModal,
     festival_card,
-    publish_festival_message,
     register_festival_views,
     refresh_festival_message,
 )
@@ -37,9 +38,14 @@ class FestivalCog(commands.Cog):
             return
         self._views_restored = True
         try:
-            festivals = await self.bot.db.list_open_festivals()
-            register_festival_views(self.bot, festivals)
-            log.info("Restored %s festival views", len(festivals))
+            festivals = await self.bot.db.list_posted_festivals()
+            register_festival_views(
+                self.bot,
+                [item for item in festivals if item.status == "open"],
+            )
+            for festival in festivals:
+                await refresh_festival_message(self.bot, festival)
+            log.info("Restored %s festival cards", len(festivals))
         except Exception:
             log.exception("Failed to restore festival views")
 
@@ -101,37 +107,6 @@ class FestivalCog(commands.Cog):
         text = "Роль «Кино» выдана" if added else "Роль «Кино» снята"
         await interaction.response.send_message(embed=success_embed(text), ephemeral=True)
 
-    @fest.command(name="list", description="Список фильмов текущего фестиваля")
-    @app_commands.guild_only()
-    async def fest_list(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        try:
-            festival = await self.bot.festival_service.require_open(interaction.guild.id)
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if config.fest_channel_id:
-            await interaction.response.defer(ephemeral=True)
-            channel = interaction.guild.get_channel(config.fest_channel_id)
-            if channel is None or not hasattr(channel, "send"):
-                await interaction.followup.send(
-                    embed=error_embed("Канал кинофестиваля недоступен"),
-                    ephemeral=True,
-                )
-                return
-            message = await publish_festival_message(
-                self.bot, interaction.guild, festival, channel, save=True
-            )
-            await interaction.followup.send(
-                embed=success_embed("Кинофестиваль", f"[Открыть]({message.jump_url})"),
-                ephemeral=True,
-            )
-            return
-        view = await festival_card(self.bot, interaction.guild, festival)
-        await interaction.response.send_message(view=view)
-
     @fest.command(name="preview", description="Дебаг: карточка фестиваля только тебе")
     @app_commands.guild_only()
     async def fest_preview(self, interaction: discord.Interaction) -> None:
@@ -186,6 +161,52 @@ class FestivalCog(commands.Cog):
             return
         await interaction.response.send_modal(
             FestivalNewModal(self.bot, interaction.guild.id, config.timezone)
+        )
+
+    @fest.command(name="edit", description="Изменить дату и время сеанса")
+    @app_commands.guild_only()
+    async def fest_edit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        try:
+            await self.bot.festival_service.require_staff(interaction.user, config)
+            festival = await self.bot.festival_service.require_open(interaction.guild.id)
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        date_value, time_value = self.bot.festival_service.starts_input(
+            festival, config.timezone
+        )
+        await interaction.response.send_modal(
+            FestivalEditModal(
+                self.bot,
+                interaction.guild.id,
+                config.timezone,
+                date_value,
+                time_value,
+            )
+        )
+
+    @fest.command(name="delete", description="Удалить текущий кинофестиваль")
+    @app_commands.guild_only()
+    async def fest_delete(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        try:
+            await self.bot.festival_service.require_staff(interaction.user, config)
+            festival = await self.bot.festival_service.require_open(interaction.guild.id)
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            embed=success_embed(
+                f"Удалить кинофестиваль #{festival.number}?",
+                "Карточка и заявки пропадут.",
+            ),
+            view=FestivalDeleteConfirmView(self.bot, festival.id, interaction.user.id),
+            ephemeral=True,
         )
 
     @fest.command(name="export", description="Список имён для колеса")

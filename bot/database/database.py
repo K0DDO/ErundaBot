@@ -1648,6 +1648,17 @@ class Database:
         rows = await cursor.fetchall()
         return [Festival.from_row(r) for r in rows]
 
+    async def list_posted_festivals(self) -> list[Festival]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festivals WHERE message_id IS NOT NULL ORDER BY id",
+        )
+        rows = await cursor.fetchall()
+        return [Festival.from_row(r) for r in rows]
+
+    async def delete_festival(self, festival_id: int) -> None:
+        await self.connection.execute("DELETE FROM festivals WHERE id = ?", (festival_id,))
+        await self.connection.commit()
+
     async def update_festival(self, festival_id: int, **fields: Any) -> Festival:
         allowed = {
             "starts_at",
