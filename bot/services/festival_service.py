@@ -31,6 +31,9 @@ OG_IMAGE_RE_ALT = re.compile(
 )
 
 
+_TITLE_JUNK_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+
+
 def normalize_film_title(title: str) -> str:
     cleaned = " ".join(title.split())
     words: list[str] = []
@@ -41,7 +44,9 @@ def normalize_film_title(title: str) -> str:
 
 
 def film_title_key(title: str) -> str:
-    return normalize_film_title(title).casefold()
+    text = normalize_film_title(title).casefold().replace("ё", "е")
+    text = _TITLE_JUNK_RE.sub(" ", text)
+    return " ".join(text.split())
 
 
 def _http_json(url: str, timeout: int = 8) -> dict | None:

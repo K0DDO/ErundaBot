@@ -544,6 +544,28 @@ class Database:
                     (row["guild_id"], key, title),
                 )
             await self._db.execute("PRAGMA user_version = 12")
+        if version < 13:
+            from bot.services.festival_service import film_title_key
+
+            cursor = await self._db.execute(
+                "SELECT guild_id, title FROM festival_blocked_films"
+            )
+            kept: dict[tuple[int, str], str] = {}
+            for row in await cursor.fetchall():
+                key = film_title_key(row["title"])
+                if not key:
+                    continue
+                kept.setdefault((int(row["guild_id"]), key), str(row["title"]))
+            await self._db.execute("DELETE FROM festival_blocked_films")
+            for (guild_id, key), title in kept.items():
+                await self._db.execute(
+                    """
+                    INSERT INTO festival_blocked_films (guild_id, title_key, title)
+                    VALUES (?, ?, ?)
+                    """,
+                    (guild_id, key, title),
+                )
+            await self._db.execute("PRAGMA user_version = 13")
 
     async def close(self) -> None:
         if self._db is not None:
