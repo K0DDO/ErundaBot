@@ -15,6 +15,7 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Festival, FestivalFilm, GuildConfig
+from bot.utils.birthday_emojis import guild_emoji_pool
 from bot.utils.permissions import fetch_bot_member
 from bot.utils.timezones import format_countdown, format_datetime_local, parse_event_datetime
 
@@ -159,9 +160,7 @@ def fetch_film_poster(title: str) -> str | None:
 def pick_guild_emoji(guild: discord.Guild | None, seed: int) -> str:
     if guild is None:
         return "🎬"
-    extra = getattr(guild, "_erunda_emojis", None)
-    pool = list(extra) if extra else list(getattr(guild, "emojis", ()) or ())
-    usable = [emoji for emoji in pool if getattr(emoji, "available", True)]
+    usable = [emoji for emoji in guild_emoji_pool(guild) if getattr(emoji, "available", True)]
     if not usable:
         return "🎬"
     return str(usable[seed % len(usable)])

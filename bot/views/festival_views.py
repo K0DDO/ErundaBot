@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import discord
@@ -14,6 +15,8 @@ from bot.utils.embeds import BRAND_COLOR, ERROR_COLOR, SUCCESS_COLOR, error_embe
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
     from bot.database.models import Festival
+
+log = logging.getLogger(__name__)
 
 
 def _notice(text: str, color: int) -> ui.LayoutView:
@@ -152,6 +155,7 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             return
+        await interaction.response.defer(ephemeral=True)
         config = await self.bot.config_service.get(self.guild_id)
         channel = None
         if config.fest_channel_id:
@@ -161,7 +165,7 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
         if channel is None and interaction.channel is not None and hasattr(interaction.channel, "send"):
             channel = interaction.channel
         if channel is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=error_embed("Некуда отправить карточку кинофестиваля"),
                 ephemeral=True,
             )
@@ -173,15 +177,22 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
                 str(self.time.value),
                 self.tz_name,
             )
+            if previous is not None:
+                await refresh_festival_message(self.bot, previous)
+            message = await publish_festival_message(
+                self.bot, interaction.guild, festival, channel, save=True
+            )
         except ValueError as extra:
-            await interaction.response.send_message(embed=error_embed(str(extra)), ephemeral=True)
+            await interaction.followup.send(embed=error_embed(str(extra)), ephemeral=True)
             return
-        if previous is not None:
-            await refresh_festival_message(self.bot, previous)
-        message = await publish_festival_message(
-            self.bot, interaction.guild, festival, channel, save=True
-        )
-        await interaction.response.send_message(
+        except Exception:
+            log.exception("Failed to create festival")
+            await interaction.followup.send(
+                embed=error_embed("Не получилось создать кинофестиваль"),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
             embed=success_embed("Кинофестиваль создан", f"[Открыть]({message.jump_url})"),
             ephemeral=True,
         )

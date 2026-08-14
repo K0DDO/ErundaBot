@@ -60,8 +60,11 @@ def pick_birthday_emoji(user_id: int) -> str:
     return BIRTHDAY_EMOJI_POOL[user_id % len(BIRTHDAY_EMOJI_POOL)]
 
 
+_GUILD_EMOJI_CACHE: dict[int, list] = {}
+
+
 def _emoji_candidates(guild: discord.Guild) -> list[discord.Emoji]:
-    extra = getattr(guild, "_erunda_emojis", None)
+    extra = _GUILD_EMOJI_CACHE.get(guild.id)
     if extra:
         return list(extra)
     return list(getattr(guild, "emojis", ()) or ())
@@ -89,13 +92,17 @@ def _find_guild_emoji(
     return None
 
 
+def guild_emoji_pool(guild: discord.Guild) -> list[discord.Emoji]:
+    return _emoji_candidates(guild)
+
+
 async def ensure_guild_emojis(guild: discord.Guild) -> None:
     try:
         fetched = await guild.fetch_emojis()
     except Exception:
-        fetched = ()
+        return
     if fetched:
-        setattr(guild, "_erunda_emojis", list(fetched))
+        _GUILD_EMOJI_CACHE[guild.id] = list(fetched)
 
 
 def expand_guild_shortcodes(guild: discord.Guild | None, text: str) -> str:
