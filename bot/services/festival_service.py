@@ -262,8 +262,18 @@ class FestivalService:
 
     async def delete_and_renumber(self, festival: Festival) -> list[Festival]:
         guild_id = festival.guild_id
+        winner = festival.winner_film
         await self.db.delete_festival(festival.id)
-        return await self.db.renumber_festivals(guild_id)
+        remaining = await self.db.renumber_festivals(guild_id)
+        if winner:
+            key = film_title_key(winner)
+            still_won = any(
+                item.winner_film and film_title_key(item.winner_film) == key
+                for item in remaining
+            )
+            if not still_won:
+                await self.db.remove_blocked_film(guild_id, key)
+        return remaining
 
     async def set_message(self, festival_id: int, channel_id: int, message_id: int) -> Festival:
         return await self.db.update_festival(

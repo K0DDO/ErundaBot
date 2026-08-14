@@ -1851,6 +1851,14 @@ class Database:
         )
         return await cursor.fetchone() is not None
 
+    async def remove_blocked_film(self, guild_id: int, title_key: str) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM festival_blocked_films WHERE guild_id = ? AND title_key = ?",
+            (guild_id, title_key),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
     # --- Telegram channels ---
 
     async def next_tg_channel_number(self, guild_id: int) -> int:
