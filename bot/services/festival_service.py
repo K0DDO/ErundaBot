@@ -112,12 +112,12 @@ _WIKIDATA_RATING_PROPS = (
 )
 _FILM_INSTANCE_IDS = {
     "Q11424",
-    "Q24856",
     "Q202866",
     "Q229390",
     "Q29168811",
     "Q506240",
 }
+_AGE_STOP_WORDS = {"фильм", "film", "the", "a", "an", "и", "movie", "кино"}
 _TMDB_CERT_RE = re.compile(r'class="certification"\s*>\s*([^<\n]+)', re.IGNORECASE)
 
 
@@ -278,11 +278,11 @@ def _age_from_rating_label(label: str) -> str | None:
         return "12+"
     if re.search(r"fsk18|(?:^|[^0-9])18(?:\+|p|$)", text):
         return "18+"
+    if re.fullmatch(r"r|ratedr|r-rated", text):
+        return "18+"
     if re.search(r"fsk16|(?:^|[^0-9])16(?:\+|p|$)|(?:^|[^0-9])15(?:\+|a|$)", text):
         return "16+"
-    if re.fullmatch(r"r|ratedr|r-rated", text):
-        return "16+"
-    if re.search(r"fsk12|(?:^|[^0-9])12(?:\+|p|a|$)", text):
+    if re.search(r"fsk12|(?:^|[^0-9])12(?:\+|p|a|$)|undernwelve", text):
         return "12+"
     if "fsk6" in text or text.startswith("pg") or re.search(r"(?:^|[^0-9])6(?:\+|$)", text):
         return "6+"
@@ -296,50 +296,160 @@ def _age_from_rating_label(label: str) -> str | None:
     return None
 
 
-def _wikipedia_entity_id(title: str) -> str | None:
-    queries = (
-        ("ru", f"{title} фильм"),
-        ("en", f"{title} film"),
-        ("ru", title),
-        ("en", title),
+def _fold_age_text(text: str) -> str:
+    text = text.casefold().replace("ё", "е").replace("э", "е")
+    text = _TITLE_JUNK_RE.sub(" ", text)
+    return " ".join(text.split())
+
+
+def _age_tokens(text: str) -> list[str]:
+    return [token for token in _fold_age_text(text).split() if token and token not in _AGE_STOP_WORDS]
+
+
+def _sequel_mark(text: str) -> int:
+    folded = f" {_fold_age_text(text)} "
+    if "росомаха" in folded or "wolverine" in folded:
+        return 3
+    for number, token in ((4, "4"), (3, "3"), (3, "iii"), (2, "2"), (2, "ii")):
+        if f" {token} " in folded:
+            return number
+    return 1
+
+
+def _title_score(query: str, candidate: str) -> float:
+    if not candidate.strip():
+        return 0.0
+    query_tokens = _age_tokens(query)
+    candidate_tokens = _age_tokens(candidate)
+    query_words = {token for token in query_tokens if not token.isdigit()}
+    candidate_words = {token for token in candidate_tokens if not token.isdigit()}
+    if not query_words or not candidate_words:
+        return 0.0
+    overlap = query_words & candidate_words
+    if not overlap:
+        return 0.0
+    score = len(overlap) / len(query_words)
+    if query_words == candidate_words:
+        score += 0.4
+    query_seq = _sequel_mark(query)
+    candidate_seq = _sequel_mark(candidate)
+    if query_seq == candidate_seq:
+        score += 0.25
+    else:
+        score -= 0.35
+    return score
+
+
+def _search_terms(title: str) -> list[str]:
+    raw = " ".join(title.split())
+    terms = [raw]
+    stripped = re.sub(r"[\s,._-]+(1|i)$", "", raw, flags=re.IGNORECASE).strip()
+    if stripped and stripped.casefold() != raw.casefold():
+        terms.append(stripped)
+    return list(dict.fromkeys(terms))
+
+
+def _wikidata_search_items(term: str, language: str) -> list[tuple[str, str, str]]:
+    url = "https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode(
+        {
+            "action": "wbsearchentities",
+            "search": term,
+            "language": language,
+            "uselang": language,
+            "type": "item",
+            "limit": 10,
+            "format": "json",
+        }
     )
-    for lang, query in queries:
-        search_url = (
+    data = _http_json(url)
+    found: list[tuple[str, str, str]] = []
+    for item in (data or {}).get("search") or []:
+        entity_id = item.get("id")
+        label = item.get("label") or ""
+        description = item.get("description") or ""
+        if isinstance(entity_id, str) and entity_id.startswith("Q"):
+            found.append((entity_id, str(label), str(description)))
+    return found
+
+
+def _wikipedia_search_items(term: str, lang: str) -> list[tuple[str, str]]:
+    search_url = (
+        f"https://{lang}.wikipedia.org/w/api.php?"
+        + urllib.parse.urlencode(
+            {
+                "action": "query",
+                "list": "search",
+                "srsearch": term,
+                "srlimit": 8,
+                "format": "json",
+            }
+        )
+    )
+    data = _http_json(search_url)
+    found: list[tuple[str, str]] = []
+    for hit in ((data or {}).get("query") or {}).get("search") or []:
+        page_id = hit.get("pageid")
+        title = hit.get("title") or ""
+        if not page_id:
+            continue
+        props_url = (
             f"https://{lang}.wikipedia.org/w/api.php?"
             + urllib.parse.urlencode(
                 {
                     "action": "query",
-                    "list": "search",
-                    "srsearch": query,
-                    "srlimit": 5,
+                    "pageids": page_id,
+                    "prop": "pageprops",
                     "format": "json",
                 }
             )
         )
-        data = _http_json(search_url)
-        hits = ((data or {}).get("query") or {}).get("search") or []
-        for hit in hits:
-            page_id = hit.get("pageid")
-            if not page_id:
-                continue
-            props_url = (
-                f"https://{lang}.wikipedia.org/w/api.php?"
-                + urllib.parse.urlencode(
-                    {
-                        "action": "query",
-                        "pageids": page_id,
-                        "prop": "pageprops",
-                        "format": "json",
-                    }
-                )
-            )
-            page_data = _http_json(props_url)
-            pages = ((page_data or {}).get("query") or {}).get("pages") or {}
-            page = pages.get(str(page_id)) or {}
-            entity = ((page.get("pageprops") or {}).get("wikibase_item")) if isinstance(page, dict) else None
-            if isinstance(entity, str) and entity.startswith("Q") and _wikidata_is_film(entity):
-                return entity
-    return None
+        page_data = _http_json(props_url)
+        pages = ((page_data or {}).get("query") or {}).get("pages") or {}
+        page = pages.get(str(page_id)) or {}
+        entity = ((page.get("pageprops") or {}).get("wikibase_item")) if isinstance(page, dict) else None
+        if isinstance(entity, str) and entity.startswith("Q"):
+            found.append((entity, str(title)))
+    return found
+
+
+def _find_film_entity(title: str) -> str | None:
+    scored: dict[str, float] = {}
+    texts: dict[str, list[str]] = {}
+
+    def consider(entity_id: str, *labels: str) -> None:
+        if entity_id in texts:
+            texts[entity_id].extend(label for label in labels if label)
+            return
+        if not _wikidata_is_film(entity_id):
+            return
+        texts[entity_id] = [label for label in labels if label]
+
+    def best_match() -> tuple[str | None, float]:
+        winner_id = None
+        winner_score = 0.0
+        for entity_id, labels in texts.items():
+            score = max((_title_score(title, label) for label in labels), default=0.0)
+            scored[entity_id] = score
+            if score > winner_score:
+                winner_score = score
+                winner_id = entity_id
+        return winner_id, winner_score
+
+    for term in _search_terms(title):
+        for language in ("ru", "en"):
+            for entity_id, label, description in _wikidata_search_items(term, language):
+                consider(entity_id, label, description)
+    entity_id, score = best_match()
+    if entity_id is not None and score >= 0.4:
+        return entity_id
+    for term in _search_terms(title):
+        for lang, query in (("ru", f"{term} фильм"), ("ru", term), ("en", f"{term} film"), ("en", term)):
+            for wiki_id, page_title in _wikipedia_search_items(query, lang):
+                consider(wiki_id, page_title)
+    entity_id, score = best_match()
+    if entity_id is None or score < 0.4:
+        return None
+    return entity_id
 
 
 def _wikidata_claims(entity_id: str) -> dict:
@@ -421,13 +531,19 @@ def _wikidata_age(entity_id: str) -> str | None:
                     continue
                 if best is None or _AGE_RANK[mapped] > _AGE_RANK[best]:
                     best = mapped
+    ages: list[str] = []
     if best:
-        return best
+        ages.append(best)
     for claim in claims.get("P4947") or []:
         value = ((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value")
         if isinstance(value, str) and value.isdigit():
-            return _tmdb_age(value)
-    return None
+            tmdb = _tmdb_age(value)
+            if tmdb:
+                ages.append(tmdb)
+            break
+    if not ages:
+        return None
+    return max(ages, key=lambda item: _AGE_RANK[item])
 
 
 def fetch_film_age(title: str) -> str | None:
@@ -435,14 +551,15 @@ def fetch_film_age(title: str) -> str | None:
     if key in _AGE_CACHE:
         return _AGE_CACHE[key] or None
     rating = None
-    for country in ("ru", "us"):
-        _poster, rating = _itunes_lookup(title, country)
-        if rating:
-            break
+    entity = _find_film_entity(title)
+    if entity:
+        rating = _wikidata_age(entity)
     if rating is None:
-        entity = _wikipedia_entity_id(title)
-        if entity:
-            rating = _wikidata_age(entity)
+        for country in ("ru", "us"):
+            poster, itunes_rating = _itunes_lookup(title, country)
+            if itunes_rating and poster:
+                rating = itunes_rating
+                break
     _AGE_CACHE[key] = rating or ""
     return rating
 
