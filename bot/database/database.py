@@ -1818,7 +1818,10 @@ class Database:
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(festival_id, user_id) DO UPDATE SET
                 title = excluded.title,
-                image_url = COALESCE(excluded.image_url, festival_films.image_url),
+                image_url = CASE
+                    WHEN festival_films.title != excluded.title THEN excluded.image_url
+                    ELSE COALESCE(excluded.image_url, festival_films.image_url)
+                END,
                 {age_assign}
             """,
             (festival_id, user_id, title, image_url, age_rating),

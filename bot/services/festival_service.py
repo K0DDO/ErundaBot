@@ -97,6 +97,7 @@ def film_title_key(title: str) -> str:
 _KNOWN_AGES = {"NSFW", "18+", "16+", "12+", "6+", "0+"}
 _AGE_RANK = {"0+": 0, "6+": 1, "12+": 2, "16+": 3, "18+": 4, "NSFW": 5}
 _AGE_CACHE: dict[str, str] = {}
+_WIKIDATA_CLAIMS_CACHE: dict[str, dict] = {}
 _WIKIDATA_RATING_PROPS = (
     "P1657",
     "P1981",
@@ -109,6 +110,15 @@ _WIKIDATA_RATING_PROPS = (
     "P7573",
     "P2756",
 )
+_FILM_INSTANCE_IDS = {
+    "Q11424",
+    "Q24856",
+    "Q202866",
+    "Q229390",
+    "Q29168811",
+    "Q506240",
+}
+_TMDB_CERT_RE = re.compile(r'class="certification"\s*>\s*([^<\n]+)', re.IGNORECASE)
 
 
 def film_age_rating(film: FestivalFilm) -> str | None:
@@ -327,12 +337,15 @@ def _wikipedia_entity_id(title: str) -> str | None:
             pages = ((page_data or {}).get("query") or {}).get("pages") or {}
             page = pages.get(str(page_id)) or {}
             entity = ((page.get("pageprops") or {}).get("wikibase_item")) if isinstance(page, dict) else None
-            if isinstance(entity, str) and entity.startswith("Q"):
+            if isinstance(entity, str) and entity.startswith("Q") and _wikidata_is_film(entity):
                 return entity
     return None
 
 
-def _wikidata_age(entity_id: str) -> str | None:
+def _wikidata_claims(entity_id: str) -> dict:
+    cached = _WIKIDATA_CLAIMS_CACHE.get(entity_id)
+    if cached is not None:
+        return cached
     claims_url = "https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode(
         {
             "action": "wbgetentities",
@@ -344,6 +357,40 @@ def _wikidata_age(entity_id: str) -> str | None:
     data = _http_json(claims_url)
     entity = ((data or {}).get("entities") or {}).get(entity_id) or {}
     claims = entity.get("claims") or {}
+    if not isinstance(claims, dict):
+        claims = {}
+    _WIKIDATA_CLAIMS_CACHE[entity_id] = claims
+    return claims
+
+
+def _wikidata_is_film(entity_id: str) -> bool:
+    for claim in _wikidata_claims(entity_id).get("P31") or []:
+        value = ((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value")
+        qid = value.get("id") if isinstance(value, dict) else None
+        if qid in _FILM_INSTANCE_IDS:
+            return True
+    return False
+
+
+def _tmdb_age(tmdb_id: str) -> str | None:
+    html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}?language=ru")
+    if not html:
+        html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}")
+    if not html:
+        return None
+    match = _TMDB_CERT_RE.search(html)
+    if match is None:
+        return None
+    raw = " ".join(match.group(1).split())
+    mapped = _age_from_rating_label(raw)
+    if mapped:
+        return mapped
+    token = re.search(r"\b(18\+|16\+|12\+|6\+|0\+)\b", raw)
+    return token.group(1) if token else None
+
+
+def _wikidata_age(entity_id: str) -> str | None:
+    claims = _wikidata_claims(entity_id)
     qids: list[str] = []
     for prop in _WIKIDATA_RATING_PROPS:
         for claim in claims.get(prop) or []:
@@ -351,31 +398,36 @@ def _wikidata_age(entity_id: str) -> str | None:
             qid = value.get("id") if isinstance(value, dict) else None
             if isinstance(qid, str) and qid.startswith("Q"):
                 qids.append(qid)
-    if not qids:
-        return None
-    labels_url = "https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode(
-        {
-            "action": "wbgetentities",
-            "ids": "|".join(dict.fromkeys(qids)),
-            "props": "labels",
-            "languages": "en|ru",
-            "format": "json",
-        }
-    )
-    labels_data = _http_json(labels_url)
     best: str | None = None
-    for item in ((labels_data or {}).get("entities") or {}).values():
-        labels = item.get("labels") or {}
-        for lang in ("en", "ru"):
-            raw = ((labels.get(lang) or {}).get("value"))
-            if not isinstance(raw, str):
-                continue
-            mapped = _age_from_rating_label(raw)
-            if mapped is None:
-                continue
-            if best is None or _AGE_RANK[mapped] > _AGE_RANK[best]:
-                best = mapped
-    return best
+    if qids:
+        labels_url = "https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode(
+            {
+                "action": "wbgetentities",
+                "ids": "|".join(dict.fromkeys(qids)),
+                "props": "labels",
+                "languages": "en|ru",
+                "format": "json",
+            }
+        )
+        labels_data = _http_json(labels_url)
+        for item in ((labels_data or {}).get("entities") or {}).values():
+            labels = item.get("labels") or {}
+            for lang in ("en", "ru"):
+                raw = ((labels.get(lang) or {}).get("value"))
+                if not isinstance(raw, str):
+                    continue
+                mapped = _age_from_rating_label(raw)
+                if mapped is None:
+                    continue
+                if best is None or _AGE_RANK[mapped] > _AGE_RANK[best]:
+                    best = mapped
+    if best:
+        return best
+    for claim in claims.get("P4947") or []:
+        value = ((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value")
+        if isinstance(value, str) and value.isdigit():
+            return _tmdb_age(value)
+    return None
 
 
 def fetch_film_age(title: str) -> str | None:
@@ -530,6 +582,7 @@ class FestivalService:
             )
         existing = await self.db.get_festival_film(festival.id, user_id)
         if rating is None:
+            _AGE_CACHE.pop(film_title_key(cleaned), None)
             rating = await asyncio.to_thread(fetch_film_age, cleaned)
         film = await self.db.upsert_festival_film(
             festival.id,
@@ -583,14 +636,20 @@ class FestivalService:
                 result.append(film)
                 continue
             title_changed = cleaned != film.title
-            if film.age_rating in _KNOWN_AGES and not title_changed:
+            known = film.age_rating in _KNOWN_AGES
+            if known and not title_changed:
                 result.append(film)
                 continue
-            rating = parsed or (film.age_rating or None)
-            if rating is None and fetch:
+            rating = parsed
+            if rating is None and fetch and not known:
                 rating = await asyncio.to_thread(fetch_film_age, cleaned)
+            if rating is None and known and not title_changed:
+                rating = film.age_rating
             if rating is None:
                 rating = ""
+            if rating == (film.age_rating or "") and cleaned == film.title:
+                result.append(film)
+                continue
             film = await self.db.upsert_festival_film(
                 festival_id,
                 film.user_id,
