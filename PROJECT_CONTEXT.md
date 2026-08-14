@@ -35,7 +35,7 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 /profile [user]          # ephemeral
 /top
 /event create|list|cancel
-/fest add|remove|role|new|edit|delete|export|winner|ping|preview|test-ping
+/fest add|remove|role|new|edit|delete|export|winner|ping|preview|test-ping|block
 /tgk add|remove|list
 /quote add|edit|delete|cleanup|random|user
 Apps → Add quote
@@ -53,7 +53,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Кинофестиваль
 
-Канал в `/config`. Пока канала нет — `/fest new` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`, как доска ДР: сеанс, заявки `**ник** — Название` без пинга и без постеров. После `/fest winner` пингуется только роль из `/config` → Роли, снизу большой постер (MediaGallery), название крупно со случайным эмодзи сервера. Один фильм с человека. Все: `add`/`remove`. Роль «Кино»: `new`, `edit`, `delete`, `winner`, `export`, `ping`. `/fest delete` без номера — текущий открытый, с номером — любой старый (`#1`, `#2`…); подтверждение показывает карточку, оставшиеся перенумеровываются. `/fest ping` — если сеанс уже начался, «мы уже смотрим фильм». При старте бот обновляет карточки.
+Канал в `/config`. Пока канала нет — `/fest new` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`, как доска ДР: сеанс, заявки `**ник** — Название` без пинга и без постеров. После `/fest winner` пингуется только роль из `/config` → Роли, снизу большой постер (MediaGallery), название крупно со случайным эмодзи сервера. Победивший фильм больше нельзя предлагать ни в каком фестивале. `/fest block название` — ручной блок (роль «Кино»), снимает заявку с текущего если она есть. Один фильм с человека. Все: `add`/`remove`. Роль «Кино»: `new`, `edit`, `delete`, `winner`, `export`, `ping`, `block`. `/fest delete` без номера — текущий открытый, с номером — любой старый (`#1`, `#2`…); подтверждение показывает карточку, оставшиеся перенумеровываются. `/fest ping` — если сеанс уже начался, «мы уже смотрим фильм». При старте бот обновляет карточки.
 
 ### ТГК
 
@@ -88,9 +88,9 @@ bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v11)
+## БД (миграции до v12)
 
-Таблицы: … `festivals`, `festival_films` (`image_url` постер), `tg_channels`.
+Таблицы: … `festivals`, `festival_films` (`image_url` постер), `festival_blocked_films` (прошлые победители и ручной блок), `tg_channels`.
 
 Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
 

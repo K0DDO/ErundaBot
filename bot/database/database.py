@@ -257,6 +257,15 @@ CREATE TABLE IF NOT EXISTS festival_films (
     FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS festival_blocked_films (
+    guild_id INTEGER NOT NULL,
+    title_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, title_key),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS tg_channels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id INTEGER NOT NULL,
@@ -505,6 +514,36 @@ class Database:
             except Exception:
                 pass
             await self._db.execute("PRAGMA user_version = 11")
+        if version < 12:
+            await self._db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS festival_blocked_films (
+                    guild_id INTEGER NOT NULL,
+                    title_key TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (guild_id, title_key),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                );
+                """
+            )
+            cursor = await self._db.execute(
+                "SELECT guild_id, winner_film FROM festivals "
+                "WHERE winner_film IS NOT NULL AND trim(winner_film) != ''"
+            )
+            for row in await cursor.fetchall():
+                title = " ".join(str(row["winner_film"]).split())
+                key = title.casefold()
+                if not key:
+                    continue
+                await self._db.execute(
+                    """
+                    INSERT OR IGNORE INTO festival_blocked_films (guild_id, title_key, title)
+                    VALUES (?, ?, ?)
+                    """,
+                    (row["guild_id"], key, title),
+                )
+            await self._db.execute("PRAGMA user_version = 12")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1770,6 +1809,25 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [FestivalFilm.from_row(r) for r in rows]
+
+    async def add_blocked_film(self, guild_id: int, title_key: str, title: str) -> bool:
+        await self.ensure_guild(guild_id)
+        cursor = await self.connection.execute(
+            """
+            INSERT OR IGNORE INTO festival_blocked_films (guild_id, title_key, title)
+            VALUES (?, ?, ?)
+            """,
+            (guild_id, title_key, title),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def is_film_blocked(self, guild_id: int, title_key: str) -> bool:
+        cursor = await self.connection.execute(
+            "SELECT 1 FROM festival_blocked_films WHERE guild_id = ? AND title_key = ?",
+            (guild_id, title_key),
+        )
+        return await cursor.fetchone() is not None
 
     # --- Telegram channels ---
 

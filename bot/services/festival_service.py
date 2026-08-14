@@ -40,6 +40,10 @@ def normalize_film_title(title: str) -> str:
     return " ".join(words)
 
 
+def film_title_key(title: str) -> str:
+    return normalize_film_title(title).casefold()
+
+
 def _http_json(url: str, timeout: int = 8) -> dict | None:
     request = urllib.request.Request(
         url,
@@ -268,6 +272,8 @@ class FestivalService:
         cleaned = normalize_film_title(title)
         if not cleaned:
             raise ValueError("Название фильма пустое")
+        if await self.db.is_film_blocked(guild_id, film_title_key(cleaned)):
+            raise ValueError("Этот фильм уже нельзя предлагать")
         existing = await self.db.get_festival_film(festival.id, user_id)
         film = await self.db.upsert_festival_film(festival.id, user_id, cleaned, None)
         return festival, film, existing is not None
@@ -312,7 +318,27 @@ class FestivalService:
             winner_film=normalize_film_title(film.title),
             status="closed",
         )
+        await self.db.add_blocked_film(
+            guild_id,
+            film_title_key(film.title),
+            normalize_film_title(film.title),
+        )
         return festival, film
+
+    async def block_film(self, guild_id: int, title: str) -> tuple[str, Festival | None]:
+        cleaned = normalize_film_title(title)
+        key = film_title_key(cleaned)
+        if not key:
+            raise ValueError("Название фильма пустое")
+        added = await self.db.add_blocked_film(guild_id, key, cleaned)
+        if not added:
+            raise ValueError(f"**{cleaned}** уже нельзя предлагать")
+        festival = await self.get_open(guild_id)
+        if festival is not None:
+            for film in await self.films(festival.id):
+                if film_title_key(film.title) == key:
+                    await self.db.remove_festival_film(festival.id, film.user_id)
+        return cleaned, festival
 
     async def films(self, festival_id: int) -> list[FestivalFilm]:
         return await self.db.list_festival_films(festival_id)

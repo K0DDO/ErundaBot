@@ -90,6 +90,29 @@ class FestivalCog(commands.Cog):
         await refresh_festival_message(self.bot, festival)
         await interaction.response.send_message(embed=success_embed("Фильм убран"), ephemeral=True)
 
+    @fest.command(name="block", description="Запретить предлагать фильм")
+    @app_commands.describe(title="Название, которое больше нельзя предлагать")
+    @app_commands.guild_only()
+    async def fest_block(self, interaction: discord.Interaction, title: str) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        try:
+            await self.bot.festival_service.require_staff(interaction.user, config)
+            cleaned, festival = await self.bot.festival_service.block_film(
+                interaction.guild.id,
+                title,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        if festival is not None:
+            await refresh_festival_message(self.bot, festival)
+        await interaction.response.send_message(
+            embed=success_embed("Фильм в блоке", f"**{cleaned}** больше нельзя предлагать"),
+            ephemeral=True,
+        )
+
     @fest.command(name="role", description="Взять / снять роль Кино (дебаг)")
     @app_commands.guild_only()
     async def fest_role(self, interaction: discord.Interaction) -> None:
