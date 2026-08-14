@@ -24,7 +24,7 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 
 - Python 3.12+, `discord.py>=2.6`, aiosqlite, Docker + GitHub Actions deploy (`DEPLOY.md`)
 - Intents: members, message content, `emojis_and_stickers`
-- Env: `DISCORD_TOKEN`, `DATABASE_PATH`, `DEFAULT_TIMEZONE`, `GROQ_API_KEY`, `GROQ_MODEL` (дефолт `openai/gpt-oss-20b`; `llama-3.1-8b-instant` снимают 16.08.2026)
+- Env: `DISCORD_TOKEN`, `DATABASE_PATH`, `DEFAULT_TIMEZONE`, `GROQ_API_KEY`, `GROQ_MODEL` (дефолт `openai/gpt-oss-20b`; `llama-3.1-8b-instant` снимают 16.08.2026). Groq: `User-Agent: ErundaBot/1.0` (без него Cloudflare 1010/403), для gpt-oss — `max_completion_tokens` + `reasoning_effort=low`.
 - Slash-группы в Discord визуально не группируются в пикере; группы уже есть (`quote`, `birthday`, `myrole`, `event`, `proposal`, `fest`, `tgk`)
 
 ## Команды (актуально)

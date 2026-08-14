@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 DEPRECATED_GROQ_MODELS = {"llama-3.1-8b-instant"}
+USER_AGENT = "ErundaBot/1.0"
 LATIN_WORD_RE = re.compile(r"\b[A-Za-z]{2,}\b")
 SIGN_OFF_RE = re.compile(
     r"(?im)^\s*(sincerely|с уважением|с любовью|your friends|друзья сервера).*$"
@@ -44,6 +45,10 @@ class AIService:
     def enabled(self) -> bool:
         return bool(self.api_key)
 
+    @property
+    def _is_reasoning_model(self) -> bool:
+        return "gpt-oss" in self.model
+
     async def generate_birthday_congrats(
         self,
         *,
@@ -66,21 +71,24 @@ class AIService:
             f"{age_line}\n"
             "Напиши одно поздравление только по-русски, без английских слов и без подписи."
         )
-        payload = json.dumps(
-            {
-                "model": self.model,
-                "temperature": 0.9,
-                "max_tokens": 220,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-            }
-        ).encode("utf-8")
+        body: dict = {
+            "model": self.model,
+            "temperature": 0.7 if self._is_reasoning_model else 0.9,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if self._is_reasoning_model:
+            body["max_completion_tokens"] = 512
+            body["reasoning_effort"] = "low"
+        else:
+            body["max_tokens"] = 220
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         try:
             text = await asyncio.to_thread(self._request_groq, payload)
-            return self._sanitize_congrats(text)
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+            return self._sanitize_congrats(text, allowed=display_name)
+        except Exception:
             log.exception("Groq birthday generation failed")
             return None
 
@@ -90,21 +98,40 @@ class AIService:
             data=payload,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": USER_AGENT,
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        return (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-            .strip()
-        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:400]
+            log.error("Groq HTTP %s: %s", exc.code, body)
+            raise
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        return self._message_text(message)
 
     @staticmethod
-    def _sanitize_congrats(text: str | None) -> str | None:
+    def _message_text(message: dict) -> str:
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    parts.append(str(item.get("text") or ""))
+            joined = "".join(parts).strip()
+            if joined:
+                return joined
+        return ""
+
+    @staticmethod
+    def _sanitize_congrats(text: str | None, *, allowed: str = "") -> str | None:
         if not text:
             return None
         lines = [line.rstrip() for line in text.strip().splitlines()]
@@ -113,7 +140,8 @@ class AIService:
         cleaned = "\n".join(line for line in lines if line is not None).strip()
         if not cleaned:
             return None
-        if LATIN_WORD_RE.search(cleaned):
+        check = cleaned.replace(allowed, "") if allowed else cleaned
+        if LATIN_WORD_RE.search(check):
             log.warning("Dropped birthday congrats because it contained Latin words")
             return None
         return cleaned
