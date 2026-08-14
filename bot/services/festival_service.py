@@ -94,9 +94,26 @@ def film_title_key(title: str) -> str:
     return " ".join(text.split())
 
 
+_KNOWN_AGES = {"NSFW", "18+", "16+", "12+", "6+", "0+"}
+_AGE_RANK = {"0+": 0, "6+": 1, "12+": 2, "16+": 3, "18+": 4, "NSFW": 5}
+_AGE_CACHE: dict[str, str] = {}
+_WIKIDATA_RATING_PROPS = (
+    "P1657",
+    "P1981",
+    "P2629",
+    "P2758",
+    "P3402",
+    "P3834",
+    "P2363",
+    "P4437",
+    "P7573",
+    "P2756",
+)
+
+
 def film_age_rating(film: FestivalFilm) -> str | None:
     rating = (film.age_rating or "").strip()
-    if rating:
+    if rating in _KNOWN_AGES:
         return rating
     _cleaned, parsed = split_title_and_age(film.title)
     return parsed
@@ -106,8 +123,8 @@ def format_age_tag(rating: str | None) -> str:
     if not rating:
         return ""
     if rating in {"NSFW", "18+"}:
-        return f" · 🔞 `{rating}`"
-    return f" · `{rating}`"
+        return f" · 🔞 {rating}"
+    return f" · {rating}"
 
 
 def _http_json(url: str, timeout: int = 8) -> dict | None:
@@ -237,12 +254,145 @@ def _itunes_poster(title: str) -> str | None:
     return poster
 
 
+def _age_from_rating_label(label: str) -> str | None:
+    text = (
+        label.casefold()
+        .replace(" ", "")
+        .replace("_", "")
+        .replace("–", "-")
+        .replace("—", "-")
+    )
+    if any(token in text for token in ("nc-17", "nc17", "tv-ma", "tvma")):
+        return "18+"
+    if "pg-13" in text or "pg13" in text or "tv-14" in text or "tv14" in text:
+        return "12+"
+    if re.search(r"fsk18|(?:^|[^0-9])18(?:\+|p|$)", text):
+        return "18+"
+    if re.search(r"fsk16|(?:^|[^0-9])16(?:\+|p|$)|(?:^|[^0-9])15(?:\+|a|$)", text):
+        return "16+"
+    if re.fullmatch(r"r|ratedr|r-rated", text):
+        return "16+"
+    if re.search(r"fsk12|(?:^|[^0-9])12(?:\+|p|a|$)", text):
+        return "12+"
+    if "fsk6" in text or text.startswith("pg") or re.search(r"(?:^|[^0-9])6(?:\+|$)", text):
+        return "6+"
+    if (
+        re.fullmatch(r"g|u|0\+|0", text)
+        or text in {"ucertificate", "ucert"}
+        or "noagerestriction" in text
+        or "безвозраст" in text
+    ):
+        return "0+"
+    return None
+
+
+def _wikipedia_entity_id(title: str) -> str | None:
+    queries = (
+        ("ru", f"{title} фильм"),
+        ("en", f"{title} film"),
+        ("ru", title),
+        ("en", title),
+    )
+    for lang, query in queries:
+        search_url = (
+            f"https://{lang}.wikipedia.org/w/api.php?"
+            + urllib.parse.urlencode(
+                {
+                    "action": "query",
+                    "list": "search",
+                    "srsearch": query,
+                    "srlimit": 5,
+                    "format": "json",
+                }
+            )
+        )
+        data = _http_json(search_url)
+        hits = ((data or {}).get("query") or {}).get("search") or []
+        for hit in hits:
+            page_id = hit.get("pageid")
+            if not page_id:
+                continue
+            props_url = (
+                f"https://{lang}.wikipedia.org/w/api.php?"
+                + urllib.parse.urlencode(
+                    {
+                        "action": "query",
+                        "pageids": page_id,
+                        "prop": "pageprops",
+                        "format": "json",
+                    }
+                )
+            )
+            page_data = _http_json(props_url)
+            pages = ((page_data or {}).get("query") or {}).get("pages") or {}
+            page = pages.get(str(page_id)) or {}
+            entity = ((page.get("pageprops") or {}).get("wikibase_item")) if isinstance(page, dict) else None
+            if isinstance(entity, str) and entity.startswith("Q"):
+                return entity
+    return None
+
+
+def _wikidata_age(entity_id: str) -> str | None:
+    claims_url = "https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode(
+        {
+            "action": "wbgetentities",
+            "ids": entity_id,
+            "props": "claims",
+            "format": "json",
+        }
+    )
+    data = _http_json(claims_url)
+    entity = ((data or {}).get("entities") or {}).get(entity_id) or {}
+    claims = entity.get("claims") or {}
+    qids: list[str] = []
+    for prop in _WIKIDATA_RATING_PROPS:
+        for claim in claims.get(prop) or []:
+            value = ((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value")
+            qid = value.get("id") if isinstance(value, dict) else None
+            if isinstance(qid, str) and qid.startswith("Q"):
+                qids.append(qid)
+    if not qids:
+        return None
+    labels_url = "https://www.wikidata.org/w/api.php?" + urllib.parse.urlencode(
+        {
+            "action": "wbgetentities",
+            "ids": "|".join(dict.fromkeys(qids)),
+            "props": "labels",
+            "languages": "en|ru",
+            "format": "json",
+        }
+    )
+    labels_data = _http_json(labels_url)
+    best: str | None = None
+    for item in ((labels_data or {}).get("entities") or {}).values():
+        labels = item.get("labels") or {}
+        for lang in ("en", "ru"):
+            raw = ((labels.get(lang) or {}).get("value"))
+            if not isinstance(raw, str):
+                continue
+            mapped = _age_from_rating_label(raw)
+            if mapped is None:
+                continue
+            if best is None or _AGE_RANK[mapped] > _AGE_RANK[best]:
+                best = mapped
+    return best
+
+
 def fetch_film_age(title: str) -> str | None:
+    key = film_title_key(title)
+    if key in _AGE_CACHE:
+        return _AGE_CACHE[key] or None
+    rating = None
     for country in ("ru", "us"):
         _poster, rating = _itunes_lookup(title, country)
         if rating:
-            return rating
-    return None
+            break
+    if rating is None:
+        entity = _wikipedia_entity_id(title)
+        if entity:
+            rating = _wikidata_age(entity)
+    _AGE_CACHE[key] = rating or ""
+    return rating
 
 
 def fetch_film_poster(title: str) -> str | None:
@@ -433,7 +583,7 @@ class FestivalService:
                 result.append(film)
                 continue
             title_changed = cleaned != film.title
-            if film.age_rating is not None and not title_changed:
+            if film.age_rating in _KNOWN_AGES and not title_changed:
                 result.append(film)
                 continue
             rating = parsed or (film.age_rating or None)

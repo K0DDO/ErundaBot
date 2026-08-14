@@ -338,7 +338,11 @@ class FestivalCardView(ui.LayoutView):
                 )
             )
         container.add_item(ui.TextDisplay(f"## 🎬 Кинофестиваль #{festival.number}"))
-        for section in sections:
+        for index, section in enumerate(sections):
+            if index:
+                container.add_item(
+                    ui.Separator(visible=False, spacing=discord.SeparatorSpacing.large)
+                )
             container.add_item(ui.TextDisplay(section))
         if festival.winner_user_id:
             winner = next((film for film in films if film.user_id == festival.winner_user_id), None)
