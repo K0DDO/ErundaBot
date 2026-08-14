@@ -68,6 +68,7 @@ class EventsCog(commands.Cog):
         if not events:
             await interaction.response.send_message(
                 embed=base_embed(title="Ивенты", description="Пока нет запланированных ивентов."),
+                ephemeral=True,
             )
             return
         config = await self.bot.config_service.get(interaction.guild.id)
@@ -83,6 +84,7 @@ class EventsCog(commands.Cog):
             lines.append(line)
         await interaction.response.send_message(
             embed=base_embed(title="Ивенты", description="\n".join(lines)),
+            ephemeral=True,
         )
 
     @event.command(name="cancel", description="Отменить ивент (создатель)")
