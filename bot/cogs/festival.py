@@ -188,15 +188,26 @@ class FestivalCog(commands.Cog):
             )
         )
 
-    @fest.command(name="delete", description="Удалить текущий кинофестиваль")
+    @fest.command(name="delete", description="Удалить кинофестиваль")
+    @app_commands.describe(number="Номер карточки, без номера — текущий открытый")
     @app_commands.guild_only()
-    async def fest_delete(self, interaction: discord.Interaction) -> None:
+    async def fest_delete(
+        self,
+        interaction: discord.Interaction,
+        number: int | None = None,
+    ) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
         config = await self.bot.config_service.get(interaction.guild.id)
         try:
             await self.bot.festival_service.require_staff(interaction.user, config)
-            festival = await self.bot.festival_service.require_open(interaction.guild.id)
+            if number is None:
+                festival = await self.bot.festival_service.require_open(interaction.guild.id)
+            else:
+                festival = await self.bot.festival_service.require_by_number(
+                    interaction.guild.id,
+                    number,
+                )
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
@@ -208,6 +219,30 @@ class FestivalCog(commands.Cog):
             view=FestivalDeleteConfirmView(self.bot, festival.id, interaction.user.id),
             ephemeral=True,
         )
+
+    @fest_delete.autocomplete("number")
+    async def fest_delete_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[int]]:
+        if interaction.guild is None:
+            return []
+        festivals = await self.bot.db.list_guild_festivals(interaction.guild.id)
+        choices: list[app_commands.Choice[int]] = []
+        needle = current.strip()
+        for festival in festivals:
+            if needle and needle not in str(festival.number):
+                continue
+            label = f"#{festival.number}"
+            if festival.status == "open":
+                label += " · текущий"
+            elif festival.winner_film:
+                label += f" · {festival.winner_film}"
+            choices.append(app_commands.Choice(name=label[:100], value=festival.number))
+            if len(choices) >= 25:
+                break
+        return choices
 
     @fest.command(name="export", description="Список имён для колеса")
     @app_commands.guild_only()

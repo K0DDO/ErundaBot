@@ -180,6 +180,12 @@ class FestivalService:
             raise ValueError("Нет открытого кинофестиваля. Нужен /fest new")
         return festival
 
+    async def require_by_number(self, guild_id: int, number: int) -> Festival:
+        festival = await self.db.get_festival_by_number(guild_id, number)
+        if festival is None:
+            raise ValueError(f"Кинофестиваль #{number} не найден")
+        return festival
+
     def has_staff(self, member: discord.Member, config: GuildConfig) -> bool:
         if config.fest_staff_role_id is None:
             return False

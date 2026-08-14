@@ -1641,6 +1641,22 @@ class Database:
         row = await cursor.fetchone()
         return Festival.from_row(row) if row else None
 
+    async def get_festival_by_number(self, guild_id: int, number: int) -> Festival | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festivals WHERE guild_id = ? AND number = ?",
+            (guild_id, number),
+        )
+        row = await cursor.fetchone()
+        return Festival.from_row(row) if row else None
+
+    async def list_guild_festivals(self, guild_id: int) -> list[Festival]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festivals WHERE guild_id = ? ORDER BY number DESC",
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        return [Festival.from_row(r) for r in rows]
+
     async def list_open_festivals(self) -> list[Festival]:
         cursor = await self.connection.execute(
             "SELECT * FROM festivals WHERE status = 'open' ORDER BY starts_at",
