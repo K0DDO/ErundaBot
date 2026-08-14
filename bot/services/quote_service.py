@@ -11,6 +11,7 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Quote
+from bot.utils.birthday_emojis import ensure_guild_emojis, expand_guild_shortcodes
 from bot.utils.permissions import is_guild_admin
 
 log = logging.getLogger(__name__)
@@ -123,7 +124,10 @@ class QuoteService:
     def _quote_card_kwargs(self, quote: Quote, guild: discord.Guild | None = None) -> dict:
         author = self.author_label(quote, guild)
         date_part = self.format_quote_date(quote.created_at)
-        content = discord.utils.escape_markdown(quote.content)
+        content = expand_guild_shortcodes(
+            guild,
+            discord.utils.escape_markdown(quote.content),
+        )
         avatar_url = self.author_avatar_url(quote, guild)
         return {
             "number_text": f"-# *#{quote.number}*",
@@ -501,6 +505,7 @@ class QuoteService:
         return removed
 
     async def migrate_legacy_cards(self, guild: discord.Guild) -> int:
+        await ensure_guild_emojis(guild)
         quotes = await self.db.list_quotes(guild.id, limit=10_000)
         migrated = 0
         for quote in quotes:

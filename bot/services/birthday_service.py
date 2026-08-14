@@ -13,7 +13,12 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
-from bot.utils.birthday_emojis import escape_markdown_inline, normalize_birthday_emoji
+from bot.utils.birthday_emojis import (
+    ensure_guild_emojis,
+    escape_markdown_inline,
+    normalize_birthday_emoji,
+    render_birthday_emoji,
+)
 from bot.utils.embeds import BRAND_COLOR
 from bot.utils.timezones import parse_hhmm
 
@@ -121,6 +126,8 @@ class BirthdayService:
         guild: discord.Guild | None = None,
     ) -> Birthday:
         validate_birthday(day, month, year)
+        if guild is not None:
+            await ensure_guild_emojis(guild)
         return await self.db.upsert_birthday(
             guild_id,
             user_id,
@@ -193,7 +200,8 @@ class BirthdayService:
         when = format_birthday_date(bday.day, bday.month)
         name = member_display(guild, bday.user_id)
         timing = self.entry_timing(entry)
-        return f"{bday.emoji} **{name}** — {when} · *{timing}*"
+        emoji = render_birthday_emoji(guild, bday.emoji, user_id=bday.user_id)
+        return f"{emoji} **{name}** — {when} · *{timing}*"
 
     def format_preview_lines(
         self,
@@ -210,6 +218,17 @@ class BirthdayService:
             lines.append(f"📌 …и ещё {len(entries) - limit}")
         return "\n".join(lines)
 
+    async def rewrite_stored_emojis(self, guild: discord.Guild) -> int:
+        await ensure_guild_emojis(guild)
+        updated = 0
+        for birthday in await self.db.list_birthdays(guild.id):
+            rendered = render_birthday_emoji(guild, birthday.emoji, user_id=birthday.user_id)
+            if rendered != birthday.emoji:
+                await self.db.update_birthday_emoji(guild.id, birthday.user_id, rendered)
+                birthday.emoji = rendered
+                updated += 1
+        return updated
+
     async def sync_board(self, guild: discord.Guild, bot: ErundaBot) -> None:
         from bot.views.birthday_views import BirthdayListView
 
@@ -221,6 +240,7 @@ class BirthdayService:
             return
 
         await self.cleanup_stale_list_messages(guild, channel)
+        await self.rewrite_stored_emojis(guild)
 
         text = await self.build_board_text(guild, config)
         view = BirthdayListView(bot, guild.id, text)

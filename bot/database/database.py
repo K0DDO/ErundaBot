@@ -490,6 +490,13 @@ class Database:
         await self.connection.commit()
         return cursor.rowcount > 0
 
+    async def update_birthday_emoji(self, guild_id: int, user_id: int, emoji: str) -> None:
+        await self.connection.execute(
+            "UPDATE birthdays SET emoji = ? WHERE guild_id = ? AND user_id = ?",
+            (emoji, guild_id, user_id),
+        )
+        await self.connection.commit()
+
     async def list_birthdays(self, guild_id: int) -> list[Birthday]:
         cursor = await self.connection.execute(
             "SELECT * FROM birthdays WHERE guild_id = ?",

@@ -48,6 +48,7 @@ class ErundaBot(commands.Bot):
         intents.message_content = True
         intents.guild_reactions = True
         intents.voice_states = True
+        intents.emojis_and_stickers = True
 
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
 
