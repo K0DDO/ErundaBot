@@ -94,12 +94,20 @@ def film_title_key(title: str) -> str:
     return " ".join(text.split())
 
 
+def film_age_rating(film: FestivalFilm) -> str | None:
+    rating = (film.age_rating or "").strip()
+    if rating:
+        return rating
+    _cleaned, parsed = split_title_and_age(film.title)
+    return parsed
+
+
 def format_age_tag(rating: str | None) -> str:
     if not rating:
         return ""
     if rating in {"NSFW", "18+"}:
-        return f" · 🔞 **{rating}**"
-    return f" · **{rating}**"
+        return f" · 🔞 `{rating}`"
+    return f" · `{rating}`"
 
 
 def _http_json(url: str, timeout: int = 8) -> dict | None:
@@ -528,6 +536,56 @@ class FestivalService:
                 return escape_markdown_inline(member.display_name)
         return f"участник #{user_id}"
 
+    def film_list_text(
+        self,
+        films: list[FestivalFilm],
+        guild: discord.Guild | None = None,
+    ) -> str:
+        shown = films[:40]
+        if not shown:
+            return "_Пока никто не предложил._"
+        lines = [
+            (
+                f"**{self._display_name(film.user_id, guild)}** — "
+                f"{normalize_film_title(film.title)}{format_age_tag(film_age_rating(film))}"
+            )
+            for film in shown
+        ]
+        extra = len(films) - len(shown)
+        if extra > 0:
+            lines.append(f"📌 …и ещё {extra}")
+        return "\n".join(lines)
+
+    def card_sections(
+        self,
+        festival: Festival,
+        films: list[FestivalFilm],
+        tz_name: str,
+        guild: discord.Guild | None = None,
+        *,
+        winner_emoji: str = "🎬",
+        ping_role: discord.Role | None = None,
+    ) -> list[str]:
+        has_winner = bool(festival.winner_user_id and festival.winner_film)
+        sections: list[str] = []
+        if has_winner and ping_role is not None:
+            sections.append(ping_role.mention)
+        sections.append(self.session_text(festival))
+        sections.append(self.film_list_text(films, guild))
+        if has_winner:
+            winner_film = next(
+                (film for film in films if film.user_id == festival.winner_user_id),
+                None,
+            )
+            winner_rating = film_age_rating(winner_film) if winner_film is not None else None
+            sections.append(
+                f"### {winner_emoji} {normalize_film_title(festival.winner_film or '')}"
+                f"{format_age_tag(winner_rating)}"
+            )
+        else:
+            sections.append("Победитель: ещё не выбран")
+        return sections
+
     def card_body(
         self,
         festival: Festival,
@@ -538,39 +596,16 @@ class FestivalService:
         winner_emoji: str = "🎬",
         ping_role: discord.Role | None = None,
     ) -> str:
-        has_winner = bool(festival.winner_user_id and festival.winner_film)
-        parts: list[str] = []
-        if has_winner and ping_role is not None:
-            parts.append(ping_role.mention)
-        parts.append(self.session_text(festival))
-        shown = films[:40]
-        if shown:
-            lines = [
-                (
-                    f"**{self._display_name(film.user_id, guild)}** — "
-                    f"{normalize_film_title(film.title)}{format_age_tag(film.age_rating)}"
-                )
-                for film in shown
-            ]
-            extra = len(films) - len(shown)
-            if extra > 0:
-                lines.append(f"📌 …и ещё {extra}")
-            parts.append("\n".join(lines))
-        else:
-            parts.append("_Пока никто не предложил._")
-        if has_winner:
-            winner_film = next(
-                (film for film in films if film.user_id == festival.winner_user_id),
-                None,
+        return "\n\n".join(
+            self.card_sections(
+                festival,
+                films,
+                tz_name,
+                guild,
+                winner_emoji=winner_emoji,
+                ping_role=ping_role,
             )
-            winner_rating = winner_film.age_rating if winner_film is not None else None
-            parts.append(
-                f"### {winner_emoji} {normalize_film_title(festival.winner_film or '')}"
-                f"{format_age_tag(winner_rating)}"
-            )
-        else:
-            parts.append("Победитель: ещё не выбран")
-        return "\n\n".join(parts)
+        )
 
     def poster_urls(self, festival: Festival, films: list[FestivalFilm]) -> list[tuple[str, str]]:
         chosen: list[FestivalFilm]

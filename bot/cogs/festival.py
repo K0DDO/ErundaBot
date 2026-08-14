@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.services.festival_service import format_age_tag, normalize_film_title
+from bot.services.festival_service import film_age_rating, format_age_tag, normalize_film_title
 from bot.utils.embeds import error_embed, success_embed
 from bot.views.festival_views import (
     FestivalAddModal,
@@ -304,7 +304,7 @@ class FestivalCog(commands.Cog):
         await interaction.response.send_message(
             embed=success_embed(
                 "Победитель записан",
-                f"{user.mention} — **{normalize_film_title(film.title)}**{format_age_tag(film.age_rating)}",
+                f"{user.mention} — **{normalize_film_title(film.title)}**{format_age_tag(film_age_rating(film))}",
             ),
             ephemeral=True,
         )

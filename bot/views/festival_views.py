@@ -8,7 +8,12 @@ from typing import TYPE_CHECKING
 import discord
 from discord import ui
 
-from bot.services.festival_service import format_age_tag, normalize_film_title, pick_guild_emoji
+from bot.services.festival_service import (
+    film_age_rating,
+    format_age_tag,
+    normalize_film_title,
+    pick_guild_emoji,
+)
 from bot.utils.birthday_emojis import ensure_guild_emojis
 from bot.utils.embeds import BRAND_COLOR, ERROR_COLOR, SUCCESS_COLOR, error_embed, success_embed
 
@@ -48,7 +53,7 @@ async def festival_card(
     ping_role = None
     if has_winner and config.fest_ping_role_id:
         ping_role = guild.get_role(config.fest_ping_role_id)
-    body = bot.festival_service.card_body(
+    sections = bot.festival_service.card_sections(
         festival,
         films,
         config.timezone,
@@ -59,7 +64,7 @@ async def festival_card(
     return FestivalCardView(
         bot,
         festival,
-        body,
+        sections,
         films,
         confirm_delete_for=confirm_delete_for,
     )
@@ -162,7 +167,10 @@ class FestivalAddModal(discord.ui.Modal, title="Предложить фильм"
         text = "Фильм заменён" if replaced else "Фильм предложен"
         title = normalize_film_title(film.title)
         await interaction.followup.send(
-            embed=success_embed(text, f"**{title}**{format_age_tag(film.age_rating)}"),
+            embed=success_embed(
+                text,
+                f"**{title}**{format_age_tag(film_age_rating(film))}",
+            ),
             ephemeral=True,
         )
 
@@ -315,7 +323,7 @@ class FestivalCardView(ui.LayoutView):
         self,
         bot: ErundaBot,
         festival: Festival,
-        body: str,
+        sections: list[str],
         films: list,
         *,
         confirm_delete_for: int | None = None,
@@ -329,7 +337,9 @@ class FestivalCardView(ui.LayoutView):
                     "**Удалить этот кинофестиваль?**\nКарточка и заявки пропадут."
                 )
             )
-        container.add_item(ui.TextDisplay(f"## 🎬 Кинофестиваль #{festival.number}\n\n{body}"))
+        container.add_item(ui.TextDisplay(f"## 🎬 Кинофестиваль #{festival.number}"))
+        for section in sections:
+            container.add_item(ui.TextDisplay(section))
         if festival.winner_user_id:
             winner = next((film for film in films if film.user_id == festival.winner_user_id), None)
             if winner is not None and winner.image_url:
