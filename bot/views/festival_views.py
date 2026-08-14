@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 import discord
 from discord import ui
 
-from bot.services.festival_service import normalize_film_title
+from bot.services.festival_service import normalize_film_title, pick_guild_emoji
+from bot.utils.birthday_emojis import ensure_guild_emojis
 from bot.utils.embeds import error_embed, success_embed
 
 if TYPE_CHECKING:
@@ -20,10 +21,20 @@ async def festival_card(
     guild: discord.Guild,
     festival: Festival,
 ) -> FestivalCardView:
-    films = await bot.festival_service.films(festival.id)
-    body = bot.festival_service.card_body(festival, films, guild)
-    posters = bot.festival_service.poster_urls(festival, films)
-    return FestivalCardView(bot, festival, body, posters)
+    config = await bot.config_service.get(guild.id)
+    await ensure_guild_emojis(guild)
+    films = await bot.festival_service.ensure_posters(festival.id)
+    winner_emoji = pick_guild_emoji(guild, festival.id)
+    has_winner = bool(festival.winner_user_id and festival.winner_film)
+    body = bot.festival_service.card_body(
+        festival,
+        films,
+        config.timezone,
+        guild,
+        winner_emoji=winner_emoji,
+        include_films=has_winner or not films,
+    )
+    return FestivalCardView(bot, festival, body, films)
 
 
 async def publish_festival_message(
@@ -251,27 +262,62 @@ class FestivalAddButton(ui.Button):
 
 
 class FestivalCardView(ui.LayoutView):
+    MAX_FILM_SECTIONS = 6
+
     def __init__(
         self,
         bot: ErundaBot,
         festival: Festival,
         body: str,
-        posters: list[tuple[str, str]],
+        films: list,
     ) -> None:
         super().__init__(timeout=None)
         color = 0x57F287 if festival.status != "open" else 0x7C9CFF
         container = ui.Container(accent_color=color)
         container.add_item(ui.TextDisplay(f"## 🎬 Кинофестиваль #{festival.number}\n\n{body}"))
-        if posters:
-            gallery = ui.MediaGallery()
-            for url, title in posters:
-                gallery.add_item(media=url, description=title[:256])
-            container.add_item(gallery)
+        if festival.winner_user_id:
+            winner = next((film for film in films if film.user_id == festival.winner_user_id), None)
+            if winner is not None and winner.image_url:
+                container.add_item(
+                    ui.Section(
+                        ui.TextDisplay(normalize_film_title(winner.title)),
+                        accessory=ui.Thumbnail(
+                            media=winner.image_url,
+                            description=normalize_film_title(winner.title)[:256],
+                        ),
+                    )
+                )
+        else:
+            shown = films[: self.MAX_FILM_SECTIONS]
+            extra = len(films) - len(shown)
+            if films:
+                label = "**Фильмы**"
+                if extra > 0:
+                    label += f"\n… и ещё {extra}"
+                container.add_item(ui.TextDisplay(label))
+            for film in shown:
+                line = f"{self._mention(film)} — {normalize_film_title(film.title)}"
+                if film.image_url:
+                    container.add_item(
+                        ui.Section(
+                            ui.TextDisplay(line),
+                            accessory=ui.Thumbnail(
+                                media=film.image_url,
+                                description=normalize_film_title(film.title)[:256],
+                            ),
+                        )
+                    )
+                else:
+                    container.add_item(ui.TextDisplay(line))
         if festival.status == "open":
             row = ui.ActionRow()
             row.add_item(FestivalAddButton(bot, festival.id))
             container.add_item(row)
         self.add_item(container)
+
+    @staticmethod
+    def _mention(film) -> str:
+        return f"<@{film.user_id}>"
 
 
 class FestivalView(discord.ui.View):

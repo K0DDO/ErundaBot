@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,6 +20,14 @@ from bot.utils.timezones import format_countdown, format_datetime_local, parse_e
 
 FEST_ROLE_NAME = "Кино"
 POSTER_USER_AGENT = "ErundaBot/1.0 (https://github.com/K0DDO/ErundaBot)"
+OG_IMAGE_RE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+OG_IMAGE_RE_ALT = re.compile(
+    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']',
+    re.IGNORECASE,
+)
 
 
 def normalize_film_title(title: str) -> str:
@@ -41,6 +50,39 @@ def _http_json(url: str, timeout: int = 8) -> dict | None:
             return json.loads(response.read().decode("utf-8", errors="replace"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
+
+
+def _http_html(url: str, timeout: int = 8) -> str | None:
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": POSTER_USER_AGENT, "Accept": "text/html"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8", errors="ignore")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+
+def _og_image_from_html(html: str) -> str | None:
+    match = OG_IMAGE_RE.search(html) or OG_IMAGE_RE_ALT.search(html)
+    if match is None:
+        return None
+    image = match.group(1).strip()
+    if image.startswith("//"):
+        image = "https:" + image
+    if image.startswith("https://"):
+        return image
+    return None
+
+
+def _kinopoisk_poster(title: str) -> str | None:
+    url = "https://www.kinopoisk.ru/index.php?" + urllib.parse.urlencode({"kp_query": title})
+    html = _http_html(url)
+    if not html:
+        return None
+    return _og_image_from_html(html)
 
 
 def _wikipedia_poster(title: str) -> str | None:
@@ -111,7 +153,18 @@ def _itunes_poster(title: str) -> str | None:
 
 
 def fetch_film_poster(title: str) -> str | None:
-    return _wikipedia_poster(title) or _itunes_poster(title)
+    return _kinopoisk_poster(title) or _wikipedia_poster(title) or _itunes_poster(title)
+
+
+def pick_guild_emoji(guild: discord.Guild | None, seed: int) -> str:
+    if guild is None:
+        return "🎬"
+    extra = getattr(guild, "_erunda_emojis", None)
+    pool = list(extra) if extra else list(getattr(guild, "emojis", ()) or ())
+    usable = [emoji for emoji in pool if getattr(emoji, "available", True)]
+    if not usable:
+        return "🎬"
+    return str(usable[seed % len(usable)])
 
 
 class FestivalService:
@@ -215,6 +268,21 @@ class FestivalService:
         film = await self.db.upsert_festival_film(festival.id, user_id, cleaned, image_url)
         return festival, film, existing is not None
 
+    async def ensure_posters(self, festival_id: int) -> list[FestivalFilm]:
+        films = await self.films(festival_id)
+        result: list[FestivalFilm] = []
+        for film in films:
+            if film.image_url:
+                result.append(film)
+                continue
+            image_url = await asyncio.to_thread(fetch_film_poster, film.title)
+            if image_url:
+                film = await self.db.upsert_festival_film(
+                    festival_id, film.user_id, film.title, image_url
+                )
+            result.append(film)
+        return result
+
     async def remove_film(self, guild_id: int, user_id: int) -> Festival:
         festival = await self.require_open(guild_id)
         if not await self.db.remove_festival_film(festival.id, user_id):
@@ -267,42 +335,50 @@ class FestivalService:
         self,
         festival: Festival,
         films: list[FestivalFilm],
+        tz_name: str,
         guild: discord.Guild | None = None,
+        *,
+        winner_emoji: str = "🎬",
+        include_films: bool = True,
     ) -> str:
-        shown = films[:40]
-        lines = [
-            f"{self._mention(film.user_id, guild)} — {normalize_film_title(film.title)}"
-            for film in shown
-        ]
-        extra = len(films) - len(shown)
-        if extra > 0:
-            lines.append(f"… и ещё {extra}")
-        films_text = "\n".join(lines) if lines else "пока никто не предложил"
+        date_label, time_label = self.format_starts(festival, tz_name)
+        parts = [f"Сеанс: **{date_label} {time_label}**"]
+        if include_films:
+            shown = films[:40]
+            lines = [
+                f"{self._mention(film.user_id, guild)} — {normalize_film_title(film.title)}"
+                for film in shown
+            ]
+            extra = len(films) - len(shown)
+            if extra > 0:
+                lines.append(f"… и ещё {extra}")
+            films_text = "\n".join(lines) if lines else "пока никто не предложил"
+            parts.append(f"**Фильмы**\n{films_text}")
         if festival.winner_user_id and festival.winner_film:
-            winner = (
+            parts.append(
                 "**Победитель**\n"
                 f"{self._mention(festival.winner_user_id, guild)}\n"
-                f"### 🎬 {normalize_film_title(festival.winner_film)}"
+                f"### {winner_emoji} {normalize_film_title(festival.winner_film)}"
             )
         else:
-            winner = "Победитель: ещё не выбран"
-        return f"**Фильмы**\n{films_text}\n\n{winner}"
+            parts.append("Победитель: ещё не выбран")
+        return "\n\n".join(parts)
 
     def poster_urls(self, festival: Festival, films: list[FestivalFilm]) -> list[tuple[str, str]]:
-        ordered: list[FestivalFilm] = []
+        chosen: list[FestivalFilm]
         if festival.winner_user_id:
-            for film in films:
-                if film.user_id == festival.winner_user_id and film.image_url:
-                    ordered.append(film)
-                    break
-        for film in films:
-            if film.image_url and film not in ordered:
-                ordered.append(film)
-        result: list[tuple[str, str]] = []
-        for film in ordered[:10]:
-            if film.image_url:
-                result.append((film.image_url, normalize_film_title(film.title)))
-        return result
+            chosen = [
+                film
+                for film in films
+                if film.user_id == festival.winner_user_id and film.image_url
+            ][:1]
+        else:
+            chosen = [film for film in films if film.image_url][:10]
+        return [
+            (film.image_url, normalize_film_title(film.title))
+            for film in chosen
+            if film.image_url
+        ]
 
     def export_names(self, films: list[FestivalFilm], guild: discord.Guild) -> str:
         names: list[str] = []
