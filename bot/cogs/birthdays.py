@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.database.models import Birthday
+from bot.services.birthday_service import occurrence_on_year
 from bot.utils.embeds import error_embed, success_embed
 from bot.views.birthday_views import BirthdaySetModal, refresh_birthday_board
 
@@ -67,6 +71,52 @@ class BirthdaysCog(commands.Cog):
             ephemeral=True,
         )
         await refresh_birthday_board(self.bot, interaction.guild)
+
+    @birthday.command(name="test-announce", description="Дебаг: ИИ-поздравление только тебе")
+    @app_commands.describe(member="Кому сгенерировать, по умолчанию ты")
+    @app_commands.guild_only()
+    async def birthday_test_announce(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+    ) -> None:
+        if interaction.guild is None:
+            return
+        target = member or interaction.user
+        if not isinstance(target, discord.Member):
+            return
+        await interaction.response.defer(ephemeral=True)
+        config = await self.bot.config_service.get(interaction.guild.id)
+        local_today = datetime.now(ZoneInfo(config.timezone)).date()
+        birthday = await self.bot.birthday_service.get_birthday(
+            interaction.guild.id,
+            target.id,
+        )
+        if birthday is None:
+            birthday = Birthday(
+                guild_id=interaction.guild.id,
+                user_id=target.id,
+                day=local_today.day,
+                month=local_today.month,
+            )
+            announce_on = local_today
+        else:
+            announce_on = occurrence_on_year(birthday.day, birthday.month, local_today.year)
+        embed, used_ai = await self.bot.birthday_service.announce_embed(
+            interaction.guild,
+            birthday,
+            announce_on,
+            self.bot.ai_service,
+            mention=True,
+        )
+        if used_ai:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        await interaction.followup.send(
+            content="ИИ не сработал — запасной текст",
+            embed=embed,
+            ephemeral=True,
+        )
 
 
 async def setup(bot: ErundaBot) -> None:

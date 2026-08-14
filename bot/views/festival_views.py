@@ -13,6 +13,43 @@ if TYPE_CHECKING:
     from bot.database.models import Festival
 
 
+async def festival_card(
+    bot: ErundaBot,
+    guild: discord.Guild,
+    festival: Festival,
+) -> tuple[discord.Embed, FestivalView | None]:
+    config = await bot.config_service.get(guild.id)
+    films = await bot.festival_service.films(festival.id)
+    embed = bot.festival_service.build_embed(festival, films, config.timezone, guild)
+    view = FestivalView(bot, festival.id) if festival.status == "open" else None
+    return embed, view
+
+
+async def publish_festival_message(
+    bot: ErundaBot,
+    guild: discord.Guild,
+    festival: Festival,
+    channel,
+    *,
+    save: bool = True,
+) -> discord.Message:
+    embed, view = await festival_card(bot, guild, festival)
+    message = None
+    if save and festival.message_id and festival.channel_id == getattr(channel, "id", None):
+        try:
+            message = await channel.fetch_message(festival.message_id)
+            await message.edit(embed=embed, view=view)
+        except discord.HTTPException:
+            message = None
+    if message is None:
+        message = await channel.send(embed=embed, view=view)
+        if save:
+            await bot.festival_service.set_message(festival.id, channel.id, message.id)
+            if view is not None:
+                bot.add_view(FestivalView(bot, festival.id), message_id=message.id)
+    return message
+
+
 async def refresh_festival_message(bot: ErundaBot, festival: Festival) -> None:
     guild = bot.get_guild(festival.guild_id)
     if guild is None or not festival.message_id:
@@ -22,9 +59,7 @@ async def refresh_festival_message(bot: ErundaBot, festival: Festival) -> None:
     channel = guild.get_channel(channel_id or 0) if channel_id else None
     if channel is None or not hasattr(channel, "fetch_message"):
         return
-    films = await bot.festival_service.films(festival.id)
-    embed = bot.festival_service.build_embed(festival, films, config.timezone, guild)
-    view = FestivalView(bot, festival.id) if festival.status == "open" else None
+    embed, view = await festival_card(bot, guild, festival)
     try:
         msg = await channel.fetch_message(festival.message_id)
         await msg.edit(embed=embed, view=view)
@@ -70,16 +105,16 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
         if interaction.guild is None:
             return
         config = await self.bot.config_service.get(self.guild_id)
-        if not config.fest_channel_id:
+        channel = None
+        if config.fest_channel_id:
+            found = interaction.guild.get_channel(config.fest_channel_id)
+            if found is not None and hasattr(found, "send"):
+                channel = found
+        if channel is None and interaction.channel is not None and hasattr(interaction.channel, "send"):
+            channel = interaction.channel
+        if channel is None:
             await interaction.response.send_message(
-                embed=error_embed("Канал кинофестиваля не задан в /config"),
-                ephemeral=True,
-            )
-            return
-        channel = interaction.guild.get_channel(config.fest_channel_id)
-        if channel is None or not hasattr(channel, "send"):
-            await interaction.response.send_message(
-                embed=error_embed("Канал кинофестиваля недоступен"),
+                embed=error_embed("Некуда отправить карточку кинофестиваля"),
                 ephemeral=True,
             )
             return
@@ -95,14 +130,9 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
             return
         if previous is not None:
             await refresh_festival_message(self.bot, previous)
-        films = await self.bot.festival_service.films(festival.id)
-        embed = self.bot.festival_service.build_embed(
-            festival, films, self.tz_name, interaction.guild
+        message = await publish_festival_message(
+            self.bot, interaction.guild, festival, channel, save=True
         )
-        view = FestivalView(self.bot, festival.id)
-        message = await channel.send(embed=embed, view=view)
-        await self.bot.festival_service.set_message(festival.id, channel.id, message.id)
-        self.bot.add_view(view, message_id=message.id)
         await interaction.response.send_message(
             embed=success_embed("Кинофестиваль создан", f"[Открыть]({message.jump_url})"),
             ephemeral=True,

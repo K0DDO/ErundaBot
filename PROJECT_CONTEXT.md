@@ -31,11 +31,11 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 
 ```text
 /config
-/birthday set|remove
+/birthday set|remove|test-announce
 /profile [user]          # ephemeral
 /top
 /event create|list|cancel
-/fest add|remove|role|new|export|winner|ping
+/fest add|remove|role|new|export|winner|ping|list|preview|test-ping
 /tgk add|remove|list
 /quote add|edit|delete|cleanup|random|user
 Apps → Add quote
@@ -43,7 +43,7 @@ Apps → Add quote
 /proposal create|list|info|cancel
 ```
 
-Удалены и не возвращать без запроса: `/birthday list|next|preview` и debug `test-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`.
+Удалены и не возвращать без запроса: `/birthday list|next|preview` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`. Вернули по запросу: `/birthday test-announce` (ephemeral ИИ-поздравление).
 
 ## Модули
 
@@ -53,7 +53,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Кинофестиваль
 
-Канал в `/config`. Одно сообщение = `#N`: список фильмов + победитель внизу. Один фильм с человека, повторный add заменяет. Все: `add`/`remove` и кнопка «Предложить фильм». Роль «Кино» (не админ): `new`, `winner`, `export`, `ping`. `/fest role` — дебаг, любой берёт/снимает роль. `/fest winner @user` сам подставляет его фильм. `/fest export` — display names для колеса. `/fest ping роль` — считает время до сеанса; роль запоминается для автонапоминания (`fest_reminder_minutes`, 0 = выкл).
+Канал в `/config`. Пока канала нет — `/fest new`, `/fest list` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`: список фильмов + победитель внизу. Один фильм с человека, повторный add заменяет. Все: `add`/`remove`/`list` и кнопка «Предложить фильм». Роль «Кино» (не админ): `new`, `winner`, `export`, `ping`. Дебаг: `/fest role` (взять роль), `/fest preview` (карточка ephemeral), `/fest test-ping` (пинг ephemeral). `/fest winner @user` сам подставляет его фильм. `/fest export` — display names для колеса. `/fest ping роль` — считает время до сеанса; роль запоминается для автонапоминания (`fest_reminder_minutes`, 0 = выкл).
 
 ### ТГК
 
@@ -65,7 +65,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Дни рождения (заморожено)
 
-Команды: `set`, `remove`. Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (только русский текст), пинг только в день ДР. Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
+Команды: `set`, `remove`, дебаг `/birthday test-announce` (ephemeral, любой участник; если даты нет — генерит как будто сегодня). Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (только русский текст), пинг только в день ДР. Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
 
 ### Роли (заморожено)
 
