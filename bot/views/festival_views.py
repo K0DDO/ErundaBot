@@ -25,6 +25,13 @@ FEST_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=True)
 log = logging.getLogger(__name__)
 
 
+def bind_festival_view(bot: ErundaBot, festival: Festival, message_id: int) -> None:
+    if festival.status == "open":
+        bot.add_view(FestivalView(bot, festival.id), message_id=message_id)
+    elif festival.winner_user_id:
+        bot.add_view(FestivalRateView(bot, festival.id), message_id=message_id)
+
+
 def _notice(text: str, color: int) -> ui.LayoutView:
     view = ui.LayoutView(timeout=None)
     container = ui.Container(accent_color=color)
@@ -53,6 +60,24 @@ async def festival_card(
     ping_role = None
     if has_winner and config.fest_ping_role_id:
         ping_role = guild.get_role(config.fest_ping_role_id)
+    winner_film = next(
+        (film for film in films if film.user_id == festival.winner_user_id),
+        None,
+    ) if has_winner else None
+    if winner_film is not None:
+        winner_film = await bot.festival_service.ensure_runtime(winner_film)
+        films = [
+            winner_film if film.user_id == winner_film.user_id else film
+            for film in films
+        ]
+    rating_average, rating_count = (None, 0)
+    if has_winner:
+        rating_average, rating_count = await bot.db.festival_rating_stats(festival.id)
+    runtime = winner_film.runtime_minutes if winner_film is not None else None
+    show_ratings = bool(
+        has_winner
+        and bot.festival_service.session_phase(festival, runtime) != "upcoming"
+    )
     sections = bot.festival_service.card_sections(
         festival,
         films,
@@ -60,6 +85,8 @@ async def festival_card(
         guild,
         winner_emoji=winner_emoji,
         ping_role=ping_role,
+        rating_average=rating_average,
+        rating_count=rating_count,
     )
     return FestivalCardView(
         bot,
@@ -67,6 +94,7 @@ async def festival_card(
         sections,
         films,
         confirm_delete_for=confirm_delete_for,
+        show_ratings=show_ratings,
     )
 
 
@@ -90,8 +118,7 @@ async def publish_festival_message(
         message = await channel.send(view=view, allowed_mentions=FEST_MENTIONS)
         if save:
             await bot.festival_service.set_message(festival.id, channel.id, message.id)
-            if festival.status == "open":
-                bot.add_view(FestivalView(bot, festival.id), message_id=message.id)
+            bind_festival_view(bot, festival, message.id)
     return message
 
 
@@ -114,6 +141,7 @@ async def refresh_festival_message(
         await delete_festival_message(bot, festival)
         message = await channel.send(view=view, allowed_mentions=FEST_MENTIONS)
         await bot.festival_service.set_message(festival.id, channel.id, message.id)
+        bind_festival_view(bot, festival, message.id)
         return
     try:
         msg = await channel.fetch_message(festival.message_id)
@@ -343,6 +371,35 @@ class FestivalRemoveButton(ui.Button):
         await interaction.response.send_message(embed=success_embed("Фильм убран"), ephemeral=True)
 
 
+class FestivalRateButton(ui.Button):
+    def __init__(self, bot: ErundaBot, festival_id: int, score: int) -> None:
+        super().__init__(
+            label=str(score),
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"fest:rate:{festival_id}:{score}",
+        )
+        self.bot = bot
+        self.festival_id = festival_id
+        self.score = score
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        try:
+            festival, average, count = await self.bot.festival_service.set_film_score(
+                self.festival_id,
+                interaction.user.id,
+                self.score,
+            )
+        except ValueError as extra:
+            await interaction.response.send_message(embed=error_embed(str(extra)), ephemeral=True)
+            return
+        await refresh_festival_message(self.bot, festival)
+        extra = f"Средняя: **{average:.1f}** · {count}" if average is not None else ""
+        await interaction.response.send_message(
+            embed=success_embed(f"Оценка {self.score} сохранена", extra),
+            ephemeral=True,
+        )
+
+
 class FestivalCardView(ui.LayoutView):
     def __init__(
         self,
@@ -352,6 +409,7 @@ class FestivalCardView(ui.LayoutView):
         films: list,
         *,
         confirm_delete_for: int | None = None,
+        show_ratings: bool = False,
     ) -> None:
         super().__init__(timeout=120 if confirm_delete_for is not None else None)
         color = 0x57F287 if festival.status != "open" else 0x7C9CFF
@@ -390,6 +448,12 @@ class FestivalCardView(ui.LayoutView):
             row.add_item(FestivalAddButton(bot, festival.id))
             row.add_item(FestivalRemoveButton(bot, festival.id))
             container.add_item(row)
+        if show_ratings and confirm_delete_for is None:
+            for start in (1, 6):
+                row = ui.ActionRow()
+                for score in range(start, start + 5):
+                    row.add_item(FestivalRateButton(bot, festival.id, score))
+                container.add_item(row)
         self.add_item(container)
 
 
@@ -402,7 +466,16 @@ class FestivalView(discord.ui.View):
         self.add_item(FestivalRemoveButton(bot, festival_id))
 
 
+class FestivalRateView(discord.ui.View):
+    def __init__(self, bot: ErundaBot, festival_id: int) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.festival_id = festival_id
+        for score in range(1, 11):
+            self.add_item(FestivalRateButton(bot, festival_id, score))
+
+
 def register_festival_views(bot: ErundaBot, festivals: list[Festival]) -> None:
     for festival in festivals:
-        if festival.message_id and festival.status == "open":
-            bot.add_view(FestivalView(bot, festival.id), message_id=festival.message_id)
+        if festival.message_id:
+            bind_festival_view(bot, festival, festival.message_id)

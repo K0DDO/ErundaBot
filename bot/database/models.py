@@ -314,16 +314,19 @@ class FestivalFilm:
     title: str
     image_url: str | None = None
     age_rating: str | None = None
+    runtime_minutes: int | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> FestivalFilm:
         keys = row.keys()
+        runtime = row["runtime_minutes"] if "runtime_minutes" in keys else None
         return cls(
             festival_id=row["festival_id"],
             user_id=row["user_id"],
             title=row["title"],
             image_url=row["image_url"] if "image_url" in keys else None,
             age_rating=row["age_rating"] if "age_rating" in keys else None,
+            runtime_minutes=int(runtime) if runtime else None,
         )
 
 

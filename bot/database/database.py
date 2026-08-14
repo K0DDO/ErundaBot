@@ -256,6 +256,16 @@ CREATE TABLE IF NOT EXISTS festival_films (
     title TEXT NOT NULL,
     image_url TEXT,
     age_rating TEXT,
+    runtime_minutes INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (festival_id, user_id),
+    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS festival_ratings (
+    festival_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 10),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (festival_id, user_id),
     FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
@@ -613,6 +623,25 @@ class Database:
             except Exception:
                 pass
             await self._db.execute("PRAGMA user_version = 16")
+        if version < 17:
+            for sql in (
+                "ALTER TABLE festival_films ADD COLUMN runtime_minutes INTEGER",
+                """
+                CREATE TABLE IF NOT EXISTS festival_ratings (
+                    festival_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 10),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (festival_id, user_id),
+                    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
+                )
+                """,
+            ):
+                try:
+                    await self._db.execute(sql)
+                except Exception:
+                    pass
+            await self._db.execute("PRAGMA user_version = 17")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1267,6 +1296,18 @@ class Database:
         row = await cursor.fetchone()
         return Quote.from_row(row) if row else None
 
+    async def get_quote_by_posted_message(
+        self,
+        guild_id: int,
+        message_id: int,
+    ) -> Quote | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM quotes WHERE guild_id = ? AND posted_message_id = ?",
+            (guild_id, message_id),
+        )
+        row = await cursor.fetchone()
+        return Quote.from_row(row) if row else None
+
     async def list_quotes(
         self,
         guild_id: int,
@@ -1844,6 +1885,7 @@ class Database:
         title: str,
         image_url: str | None = None,
         age_rating: str | None = None,
+        runtime_minutes: int | None = None,
         *,
         overwrite_age: bool = False,
     ) -> FestivalFilm:
@@ -1854,17 +1896,23 @@ class Database:
         )
         await self.connection.execute(
             f"""
-            INSERT INTO festival_films (festival_id, user_id, title, image_url, age_rating)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO festival_films (
+                festival_id, user_id, title, image_url, age_rating, runtime_minutes
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(festival_id, user_id) DO UPDATE SET
                 title = excluded.title,
                 image_url = CASE
                     WHEN festival_films.title != excluded.title THEN excluded.image_url
                     ELSE COALESCE(excluded.image_url, festival_films.image_url)
                 END,
-                {age_assign}
+                {age_assign},
+                runtime_minutes = CASE
+                    WHEN festival_films.title != excluded.title THEN excluded.runtime_minutes
+                    ELSE COALESCE(excluded.runtime_minutes, festival_films.runtime_minutes)
+                END
             """,
-            (festival_id, user_id, title, image_url, age_rating),
+            (festival_id, user_id, title, image_url, age_rating, runtime_minutes),
         )
         await self.connection.commit()
         cursor = await self.connection.execute(
@@ -1898,6 +1946,36 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [FestivalFilm.from_row(r) for r in rows]
+
+    async def upsert_festival_rating(
+        self,
+        festival_id: int,
+        user_id: int,
+        score: int,
+    ) -> None:
+        await self.connection.execute(
+            """
+            INSERT INTO festival_ratings (festival_id, user_id, score)
+            VALUES (?, ?, ?)
+            ON CONFLICT(festival_id, user_id) DO UPDATE SET score = excluded.score
+            """,
+            (festival_id, user_id, score),
+        )
+        await self.connection.commit()
+
+    async def festival_rating_stats(self, festival_id: int) -> tuple[float | None, int]:
+        cursor = await self.connection.execute(
+            """
+            SELECT AVG(score) AS average, COUNT(*) AS votes
+            FROM festival_ratings
+            WHERE festival_id = ?
+            """,
+            (festival_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None or not row["votes"]:
+            return None, 0
+        return float(row["average"]), int(row["votes"])
 
     async def add_blocked_film(self, guild_id: int, title_key: str, title: str) -> bool:
         await self.ensure_guild(guild_id)

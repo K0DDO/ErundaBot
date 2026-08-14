@@ -38,10 +38,7 @@ class FestivalCog(commands.Cog):
         self._views_restored = True
         try:
             festivals = await self.bot.db.list_posted_festivals()
-            register_festival_views(
-                self.bot,
-                [item for item in festivals if item.status == "open"],
-            )
+            register_festival_views(self.bot, festivals)
             for festival in festivals:
                 await refresh_festival_message(self.bot, festival)
             log.info("Restored %s festival cards", len(festivals))

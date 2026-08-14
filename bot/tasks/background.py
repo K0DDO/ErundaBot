@@ -25,6 +25,7 @@ class BackgroundTasks:
     def __init__(self, bot: ErundaBot) -> None:
         self.bot = bot
         self._started = False
+        self._fest_phase: dict[int, str] = {}
 
     @property
     def started(self) -> bool:
@@ -198,6 +199,27 @@ class BackgroundTasks:
     async def fest_loop(self) -> None:
         await self.bot.wait_until_ready()
         now = datetime.now(timezone.utc)
+        try:
+            from bot.views.festival_views import refresh_festival_message
+
+            for festival in await self.bot.db.list_posted_festivals():
+                if not festival.winner_user_id:
+                    continue
+                films = await self.bot.festival_service.films(festival.id)
+                winner = None
+                if festival.winner_user_id:
+                    winner = next(
+                        (film for film in films if film.user_id == festival.winner_user_id),
+                        None,
+                    )
+                runtime = winner.runtime_minutes if winner is not None else None
+                phase = self.bot.festival_service.session_phase(festival, runtime, now)
+                previous = self._fest_phase.get(festival.id)
+                self._fest_phase[festival.id] = phase
+                if previous is not None and previous != phase:
+                    await refresh_festival_message(self.bot, festival)
+        except Exception:
+            log.exception("Festival session refresh failed")
         try:
             guilds = await self.bot.db.list_guilds()
         except Exception:

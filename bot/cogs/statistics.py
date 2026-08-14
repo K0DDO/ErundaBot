@@ -89,7 +89,27 @@ class StatisticsCog(commands.Cog):
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return
 
-        if message.author.bot or message.author.id == payload.user_id:
+        if message.author.bot:
+            if self.bot.user is None or message.author.id != self.bot.user.id:
+                return
+            quote = await self.bot.db.get_quote_by_posted_message(
+                payload.guild_id,
+                payload.message_id,
+            )
+            if quote is None or not quote.author_ids:
+                return
+            for author_id in quote.author_ids:
+                if author_id == payload.user_id:
+                    continue
+                await self.bot.statistics_service.record_reaction(
+                    payload.guild_id,
+                    author_id,
+                    tz_name,
+                    amount=amount,
+                )
+            return
+
+        if message.author.id == payload.user_id:
             return
 
         await self.bot.statistics_service.record_reaction(

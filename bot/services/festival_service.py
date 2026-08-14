@@ -16,11 +16,13 @@ import discord
 from bot.database.database import Database
 from bot.database.models import Festival, FestivalFilm, GuildConfig
 from bot.utils.birthday_emojis import escape_markdown_inline, guild_emoji_pool
+from bot.utils.formatting import format_duration
 from bot.utils.permissions import fetch_bot_member, is_guild_admin
 from bot.utils.timezones import format_countdown, format_datetime_local, parse_event_datetime
 
 FEST_ROLE_NAME = "Кино"
 MSK_TIMEZONE = "Europe/Moscow"
+DEFAULT_RUNTIME_MINUTES = 120
 POSTER_USER_AGENT = "ErundaBot/1.0 (https://github.com/K0DDO/ErundaBot)"
 OG_IMAGE_RE = re.compile(
     r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
@@ -148,7 +150,7 @@ _CERT_TO_AGE = {
     "18": "18+",
 }
 _TMDB_SEARCH_CACHE: dict[str, str] = {}
-_TMDB_META_CACHE: dict[str, tuple[str, str]] = {}
+_TMDB_META_CACHE: dict[str, tuple[str, str, int]] = {}
 _TMDB_MOVIE_HREF_RE = re.compile(
     r'href="/movie/(\d+)(?:-([^"?]*))?',
     re.IGNORECASE,
@@ -157,6 +159,11 @@ _TMDB_CERT_RE = re.compile(
     r'<span[^>]*class="[^"]*certification[^"]*"[^>]*>\s*([^<]+?)\s*</span>',
     re.IGNORECASE,
 )
+_TMDB_RUNTIME_RE = re.compile(
+    r'<span[^>]*class="[^"]*runtime[^"]*"[^>]*>\s*([^<]+?)\s*</span>',
+    re.IGNORECASE,
+)
+_TMDB_ISO_DURATION_RE = re.compile(r'"duration"\s*:\s*"(PT[^"]+)"')
 
 
 def film_age_rating(film: FestivalFilm) -> str | None:
@@ -523,16 +530,40 @@ def _wikidata_is_film(entity_id: str) -> bool:
     return False
 
 
-def _tmdb_meta(tmdb_id: str) -> tuple[str | None, str | None]:
+def _iso_duration_minutes(value: str) -> int | None:
+    match = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", value.strip().upper())
+    if match is None:
+        return None
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    total = hours * 60 + minutes + (1 if seconds else 0)
+    return total or None
+
+
+def _label_duration_minutes(text: str) -> int | None:
+    folded = text.casefold().replace("ё", "е")
+    hours = re.search(r"(\d+)\s*(?:h|ч)", folded)
+    minutes = re.search(r"(\d+)\s*(?:m|мин)", folded)
+    total = 0
+    if hours:
+        total += int(hours.group(1)) * 60
+    if minutes:
+        total += int(minutes.group(1))
+    return total or None
+
+
+def _tmdb_meta(tmdb_id: str) -> tuple[str | None, str | None, int | None]:
     cached = _TMDB_META_CACHE.get(tmdb_id)
     if cached is not None:
-        rating, poster = cached
-        return rating or None, poster or None
+        rating, poster, runtime = cached
+        return rating or None, poster or None, runtime or None
     html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}?language=ru")
     if not html:
         html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}")
     rating = None
     poster = None
+    runtime = None
     if html:
         match = _TMDB_CERT_RE.search(html)
         raw = " ".join(match.group(1).split()) if match else ""
@@ -544,8 +575,15 @@ def _tmdb_meta(tmdb_id: str) -> tuple[str | None, str | None]:
         poster = _og_image_from_html(html)
         if poster:
             poster = poster.replace("/t/p/w500/", "/t/p/w780/")
-    _TMDB_META_CACHE[tmdb_id] = (rating or "", poster or "")
-    return rating, poster
+        iso = _TMDB_ISO_DURATION_RE.search(html)
+        if iso:
+            runtime = _iso_duration_minutes(iso.group(1))
+        if runtime is None:
+            label = _TMDB_RUNTIME_RE.search(html)
+            if label:
+                runtime = _label_duration_minutes(" ".join(label.group(1).split()))
+    _TMDB_META_CACHE[tmdb_id] = (rating or "", poster or "", runtime or 0)
+    return rating, poster, runtime
 
 
 def _tmdb_age(tmdb_id: str) -> str | None:
@@ -661,6 +699,13 @@ def fetch_film_poster(title: str) -> str | None:
         if poster:
             return poster
     return _wikipedia_poster(title) or _itunes_poster(title) or _kinopoisk_poster(title)
+
+
+def fetch_film_runtime(title: str) -> int | None:
+    tmdb_id = _tmdb_search_id(title)
+    if not tmdb_id:
+        return None
+    return _tmdb_meta(tmdb_id)[2]
 
 
 def pick_guild_emoji(guild: discord.Guild | None, seed: int) -> str:
@@ -798,12 +843,14 @@ class FestivalService:
         if rating is None:
             _AGE_CACHE.pop(film_title_key(cleaned), None)
             rating = await asyncio.to_thread(fetch_film_age, cleaned)
+        runtime = await asyncio.to_thread(fetch_film_runtime, cleaned)
         film = await self.db.upsert_festival_film(
             festival.id,
             user_id,
             cleaned,
             None,
             rating or "",
+            runtime,
             overwrite_age=True,
         )
         return festival, film, existing is not None
@@ -824,9 +871,17 @@ class FestivalService:
                 result.append(film)
                 continue
             image_url = await asyncio.to_thread(fetch_film_poster, film.title)
-            if image_url:
+            runtime = film.runtime_minutes or await asyncio.to_thread(
+                fetch_film_runtime, film.title
+            )
+            if image_url or runtime:
                 film = await self.db.upsert_festival_film(
-                    festival_id, film.user_id, film.title, image_url
+                    festival_id,
+                    film.user_id,
+                    film.title,
+                    image_url,
+                    film.age_rating,
+                    runtime,
                 )
             result.append(film)
         return result
@@ -870,6 +925,7 @@ class FestivalService:
                 cleaned,
                 film.image_url,
                 rating,
+                film.runtime_minutes,
                 overwrite_age=True,
             )
             result.append(film)
@@ -899,6 +955,42 @@ class FestivalService:
         )
         return festival, film
 
+    async def ensure_runtime(self, film: FestivalFilm) -> FestivalFilm:
+        if film.runtime_minutes:
+            return film
+        runtime = await asyncio.to_thread(fetch_film_runtime, film.title)
+        if not runtime:
+            return film
+        return await self.db.upsert_festival_film(
+            film.festival_id,
+            film.user_id,
+            film.title,
+            film.image_url,
+            film.age_rating,
+            runtime,
+        )
+
+    async def set_film_score(
+        self,
+        festival_id: int,
+        user_id: int,
+        score: int,
+    ) -> tuple[Festival, float | None, int]:
+        if score < 1 or score > 10:
+            raise ValueError("Оценка от 1 до 10")
+        festival = await self.db.get_festival(festival_id)
+        if festival is None:
+            raise ValueError("Кинофестиваль не найден")
+        if not festival.winner_user_id:
+            raise ValueError("Пока нечего оценивать")
+        winner = await self.db.get_festival_film(festival.id, festival.winner_user_id)
+        runtime = winner.runtime_minutes if winner is not None else None
+        if self.session_phase(festival, runtime) == "upcoming":
+            raise ValueError("Сеанс ещё не начался")
+        await self.db.upsert_festival_rating(festival_id, user_id, score)
+        average, count = await self.db.festival_rating_stats(festival_id)
+        return festival, average, count
+
     async def block_film(self, guild_id: int, title: str) -> tuple[str, Festival | None]:
         cleaned = normalize_film_title(title)
         key = film_title_key(cleaned)
@@ -927,16 +1019,50 @@ class FestivalService:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
 
-    def session_text(self, festival: Festival) -> str:
-        if festival.status != "open":
-            return "Сеанс: **закончился**"
-        dt = self._starts_at(festival)
-        date_label, time_label = format_datetime_local(dt, MSK_TIMEZONE)
-        unix = int(dt.timestamp())
-        return (
-            f"Сеанс: **{date_label} {time_label} МСК**\n"
-            f"-# местное время: <t:{unix}:f>"
-        )
+    def session_bounds(
+        self,
+        festival: Festival,
+        runtime_minutes: int | None = None,
+    ) -> tuple[datetime, datetime]:
+        starts = self._starts_at(festival)
+        minutes = runtime_minutes if runtime_minutes and runtime_minutes > 0 else DEFAULT_RUNTIME_MINUTES
+        return starts, starts + timedelta(minutes=minutes)
+
+    def session_phase(
+        self,
+        festival: Festival,
+        runtime_minutes: int | None = None,
+        now: datetime | None = None,
+    ) -> str:
+        current = now or datetime.now(timezone.utc)
+        starts, ends = self.session_bounds(festival, runtime_minutes)
+        if current < starts:
+            return "upcoming"
+        if current < ends:
+            return "playing"
+        return "finished"
+
+    def session_text(
+        self,
+        festival: Festival,
+        runtime_minutes: int | None = None,
+        *,
+        has_winner: bool = False,
+    ) -> str:
+        starts, ends = self.session_bounds(festival, runtime_minutes)
+        phase = self.session_phase(festival, runtime_minutes)
+        if not has_winner or phase == "upcoming":
+            date_label, time_label = format_datetime_local(starts, MSK_TIMEZONE)
+            unix = int(starts.timestamp())
+            return (
+                f"Сеанс: **{date_label} {time_label} МСК**\n"
+                f"-# местное время: <t:{unix}:f>"
+            )
+        length = format_duration(int((ends - starts).total_seconds()))
+        if phase == "playing":
+            end_unix = int(ends.timestamp())
+            return f"Сеанс: **идёт** · {length}\n-# до конца: <t:{end_unix}:R>"
+        return f"Сеанс: **прошёл** · {length}"
 
     def starts_input(self, festival: Festival, tz_name: str) -> tuple[str, str]:
         dt = datetime.fromisoformat(festival.starts_at)
@@ -988,22 +1114,28 @@ class FestivalService:
         *,
         winner_emoji: str = "🎬",
         ping_role: discord.Role | None = None,
+        rating_average: float | None = None,
+        rating_count: int = 0,
     ) -> list[str]:
         has_winner = bool(festival.winner_user_id and festival.winner_film)
+        winner_film = next(
+            (film for film in films if film.user_id == festival.winner_user_id),
+            None,
+        ) if has_winner else None
+        runtime = winner_film.runtime_minutes if winner_film is not None else None
         sections: list[str] = []
         if has_winner and ping_role is not None:
             sections.append(ping_role.mention)
-        sections.append(self.session_text(festival))
+        sections.append(self.session_text(festival, runtime, has_winner=has_winner))
         sections.append(self.film_list_text(films, guild))
         if has_winner:
-            winner_film = next(
-                (film for film in films if film.user_id == festival.winner_user_id),
-                None,
-            )
             winner_rating = film_age_rating(winner_film) if winner_film is not None else None
+            score_line = "Оценка: пока нет"
+            if rating_count:
+                score_line = f"Оценка: **{rating_average:.1f}** · {rating_count}"
             sections.append(
                 f"### {winner_emoji} {normalize_film_title(festival.winner_film or '')}"
-                f"{format_age_tag(winner_rating)}"
+                f"{format_age_tag(winner_rating)}\n{score_line}"
             )
         else:
             sections.append("Победитель: ещё не выбран")
