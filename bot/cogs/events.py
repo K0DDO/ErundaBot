@@ -9,8 +9,14 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.utils.embeds import base_embed, error_embed, success_embed
-from bot.views.event_views import EventCreateModal, register_event_views, resync_event_cards, retire_event
+from bot.utils.embeds import base_embed, error_embed
+from bot.views.event_views import (
+    EventCancelConfirmView,
+    EventCreateModal,
+    register_event_views,
+    render_event_embed,
+    resync_event_cards,
+)
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -97,9 +103,14 @@ class EventsCog(commands.Cog):
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.response.defer()
-        await retire_event(self.bot, event, status="cancelled")
-        await interaction.followup.send(embed=success_embed("Ивент отменён"))
+        config = await self.bot.config_service.get(interaction.guild.id)
+        embed = await render_event_embed(self.bot, event, config.timezone)
+        await interaction.response.send_message(
+            content="**Удалить этот ивент?**",
+            embed=embed,
+            view=EventCancelConfirmView(self.bot, event.id, interaction.user.id),
+            ephemeral=True,
+        )
 
 
 async def setup(bot: ErundaBot) -> None:

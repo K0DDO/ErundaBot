@@ -45,9 +45,15 @@ def event_embed(
     participant_ids: list[int],
 ) -> discord.Embed:
     date_label, time_label = bot.event_service.format_starts_at(event, tz_name)
+    desc_parts: list[str] = []
+    if event.status == "cancelled":
+        desc_parts.append("**Ивент отменён**")
+    italic = _italic_description(event.description)
+    if italic:
+        desc_parts.append(italic)
     embed = base_embed(
         title=f"🎮 {event.title}",
-        description=_italic_description(event.description),
+        description="\n\n".join(desc_parts) or None,
     )
     embed.add_field(name="📅 Дата", value=date_label, inline=True)
     embed.add_field(name="🕘 Время", value=time_label, inline=True)
@@ -55,7 +61,7 @@ def event_embed(
     embed.add_field(name=field_name, value=field_value, inline=False)
     if event.status == "cancelled":
         embed.color = 0xED4245
-        embed.set_footer(text="Ерунда • отменено")
+        embed.set_footer(text="Ерунда")
     elif event.status == "completed":
         embed.color = 0x57F287
         embed.set_footer(text="Ерунда • завершено")
@@ -264,6 +270,58 @@ class EventView(discord.ui.View):
                 description=f"{desc}\n\n{extra}" if desc else extra,
             ),
             ephemeral=True,
+        )
+
+
+class EventCancelConfirmView(discord.ui.View):
+    def __init__(self, bot: ErundaBot, event_id: int, requester_id: int) -> None:
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.event_id = event_id
+        self.requester_id = requester_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                embed=error_embed("Это подтверждение не для тебя"),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Удалить", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        event = await self.bot.event_service.get(self.event_id)
+        if event is None:
+            await interaction.response.edit_message(
+                content=None,
+                embed=error_embed("Ивент не найден"),
+                view=None,
+            )
+            return
+        try:
+            event = await self.bot.event_service.cancel(event.id, interaction.user.id)
+        except ValueError as exc:
+            await interaction.response.edit_message(
+                content=None,
+                embed=error_embed(str(exc)),
+                view=None,
+            )
+            return
+        await interaction.response.defer()
+        await retire_event(self.bot, event, status="cancelled")
+        await interaction.edit_original_response(
+            content=None,
+            embed=success_embed("Ивент отменён"),
+            view=None,
+        )
+
+    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
+    async def abort(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+        await interaction.response.edit_message(
+            content=None,
+            embed=success_embed("Ивент не отменён"),
+            view=None,
         )
 
 
