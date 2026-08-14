@@ -36,16 +36,21 @@ async def festival_card(
 ) -> FestivalCardView:
     config = await bot.config_service.get(guild.id)
     await ensure_guild_emojis(guild)
-    films = await bot.festival_service.ensure_posters(festival.id)
-    winner_emoji = pick_guild_emoji(guild, festival.id)
     has_winner = bool(festival.winner_user_id and festival.winner_film)
+    if has_winner:
+        films = await bot.festival_service.ensure_posters(
+            festival.id,
+            user_id=festival.winner_user_id,
+        )
+    else:
+        films = await bot.festival_service.films(festival.id)
+    winner_emoji = pick_guild_emoji(guild, festival.id)
     body = bot.festival_service.card_body(
         festival,
         films,
         config.timezone,
         guild,
         winner_emoji=winner_emoji,
-        include_films=has_winner or not films,
     )
     return FestivalCardView(
         bot,
@@ -136,10 +141,10 @@ class FestivalAddModal(discord.ui.Modal, title="Предложить фильм"
             return
         await refresh_festival_message(self.bot, festival)
         text = "Фильм заменён" if replaced else "Фильм предложен"
-        extra = f"**{normalize_film_title(film.title)}**"
-        if film.image_url:
-            extra += "\nПостер найден."
-        await interaction.followup.send(embed=success_embed(text, extra), ephemeral=True)
+        await interaction.followup.send(
+            embed=success_embed(text, f"**{normalize_film_title(film.title)}**"),
+            ephemeral=True,
+        )
 
 
 class FestivalNewModal(discord.ui.Modal, title="Новый кинофестиваль"):
@@ -284,8 +289,6 @@ class FestivalAddButton(ui.Button):
 
 
 class FestivalCardView(ui.LayoutView):
-    MAX_FILM_SECTIONS = 6
-
     def __init__(
         self,
         bot: ErundaBot,
@@ -317,28 +320,6 @@ class FestivalCardView(ui.LayoutView):
                         ),
                     )
                 )
-        else:
-            shown = films[: self.MAX_FILM_SECTIONS]
-            extra = len(films) - len(shown)
-            if films:
-                label = "**Фильмы**"
-                if extra > 0:
-                    label += f"\n… и ещё {extra}"
-                container.add_item(ui.TextDisplay(label))
-            for film in shown:
-                line = f"{self._mention(film)} — {normalize_film_title(film.title)}"
-                if film.image_url:
-                    container.add_item(
-                        ui.Section(
-                            ui.TextDisplay(line),
-                            accessory=ui.Thumbnail(
-                                media=film.image_url,
-                                description=normalize_film_title(film.title)[:256],
-                            ),
-                        )
-                    )
-                else:
-                    container.add_item(ui.TextDisplay(line))
         if confirm_delete_for is not None:
             row = ui.ActionRow()
             row.add_item(FestivalDeleteConfirmButton(bot, festival.id, confirm_delete_for))
@@ -349,10 +330,6 @@ class FestivalCardView(ui.LayoutView):
             row.add_item(FestivalAddButton(bot, festival.id))
             container.add_item(row)
         self.add_item(container)
-
-    @staticmethod
-    def _mention(film) -> str:
-        return f"<@{film.user_id}>"
 
 
 class FestivalView(discord.ui.View):

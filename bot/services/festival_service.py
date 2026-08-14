@@ -15,7 +15,7 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Festival, FestivalFilm, GuildConfig
-from bot.utils.birthday_emojis import guild_emoji_pool
+from bot.utils.birthday_emojis import escape_markdown_inline, guild_emoji_pool
 from bot.utils.permissions import fetch_bot_member
 from bot.utils.timezones import format_countdown, format_datetime_local, parse_event_datetime
 
@@ -269,14 +269,21 @@ class FestivalService:
         if not cleaned:
             raise ValueError("Название фильма пустое")
         existing = await self.db.get_festival_film(festival.id, user_id)
-        image_url = await asyncio.to_thread(fetch_film_poster, cleaned)
-        film = await self.db.upsert_festival_film(festival.id, user_id, cleaned, image_url)
+        film = await self.db.upsert_festival_film(festival.id, user_id, cleaned, None)
         return festival, film, existing is not None
 
-    async def ensure_posters(self, festival_id: int) -> list[FestivalFilm]:
+    async def ensure_posters(
+        self,
+        festival_id: int,
+        *,
+        user_id: int | None = None,
+    ) -> list[FestivalFilm]:
         films = await self.films(festival_id)
         result: list[FestivalFilm] = []
         for film in films:
+            if user_id is not None and film.user_id != user_id:
+                result.append(film)
+                continue
             if film.image_url:
                 result.append(film)
                 continue
@@ -328,13 +335,12 @@ class FestivalService:
         current = now or datetime.now(timezone.utc)
         return format_countdown((starts - current).total_seconds())
 
-    def _mention(self, user_id: int, guild: discord.Guild | None) -> str:
-        name = f"<@{user_id}>"
+    def _display_name(self, user_id: int, guild: discord.Guild | None) -> str:
         if guild is not None:
             member = guild.get_member(user_id)
             if member is not None:
-                name = member.mention
-        return name
+                return escape_markdown_inline(member.display_name)
+        return f"участник #{user_id}"
 
     def card_body(
         self,
@@ -344,25 +350,25 @@ class FestivalService:
         guild: discord.Guild | None = None,
         *,
         winner_emoji: str = "🎬",
-        include_films: bool = True,
     ) -> str:
         date_label, time_label = self.format_starts(festival, tz_name)
         parts = [f"Сеанс: **{date_label} {time_label}**"]
-        if include_films:
-            shown = films[:40]
+        shown = films[:40]
+        if shown:
             lines = [
-                f"{self._mention(film.user_id, guild)} — {normalize_film_title(film.title)}"
+                f"**{self._display_name(film.user_id, guild)}** — {normalize_film_title(film.title)}"
                 for film in shown
             ]
             extra = len(films) - len(shown)
             if extra > 0:
-                lines.append(f"… и ещё {extra}")
-            films_text = "\n".join(lines) if lines else "пока никто не предложил"
-            parts.append(f"**Фильмы**\n{films_text}")
+                lines.append(f"📌 …и ещё {extra}")
+            parts.append("\n".join(lines))
+        else:
+            parts.append("_Пока никто не предложил._")
         if festival.winner_user_id and festival.winner_film:
             parts.append(
                 "**Победитель**\n"
-                f"{self._mention(festival.winner_user_id, guild)}\n"
+                f"**{self._display_name(festival.winner_user_id, guild)}**\n"
                 f"### {winner_emoji} {normalize_film_title(festival.winner_film)}"
             )
         else:
