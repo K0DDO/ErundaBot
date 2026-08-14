@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from bot.database.database import Database
@@ -41,13 +41,29 @@ class EventService:
             channel_id,
         )
         await self.ensure_organizer_participant(event)
-        return event
+        await self.db.renumber_events(guild_id)
+        refreshed = await self.db.get_event(event.id)
+        return refreshed if refreshed is not None else event
 
     async def get(self, event_id: int) -> Event | None:
         return await self.db.get_event(event_id)
 
+    async def get_by_number(self, guild_id: int, number: int) -> Event | None:
+        return await self.db.get_event_by_number(guild_id, number)
+
     async def list_scheduled(self, guild_id: int) -> list[Event]:
         return await self.db.list_events(guild_id, status="scheduled")
+
+    async def list_upcoming(self, guild_id: int) -> list[Event]:
+        now = datetime.now(timezone.utc)
+        upcoming: list[Event] = []
+        for event in await self.db.list_events(guild_id, status="scheduled"):
+            starts = datetime.fromisoformat(event.starts_at)
+            if starts.tzinfo is None:
+                starts = starts.replace(tzinfo=timezone.utc)
+            if starts > now:
+                upcoming.append(event)
+        return upcoming
 
     async def cancel(self, event_id: int, user_id: int) -> Event:
         event = await self.db.get_event(event_id)
@@ -57,7 +73,12 @@ class EventService:
             raise ValueError("Ивент уже завершён или отменён")
         if event.organizer_id != user_id:
             raise ValueError("Отменить может только создатель")
-        return await self.db.update_event(event_id, status="cancelled")
+        return event
+
+    async def delete_and_renumber(self, event: Event) -> list[Event]:
+        guild_id = event.guild_id
+        await self.db.delete_event(event.id)
+        return await self.db.renumber_events(guild_id)
 
     async def join(self, event_id: int, user_id: int) -> tuple[Event, int]:
         event = await self.db.get_event(event_id)
@@ -100,8 +121,15 @@ class EventService:
     async def set_message(self, event_id: int, message_id: int) -> Event:
         return await self.db.update_event(event_id, message_id=message_id)
 
-    async def complete(self, event_id: int) -> Event:
-        return await self.db.update_event(event_id, status="completed")
+    async def overdue_events(self, now: datetime) -> list[Event]:
+        due: list[Event] = []
+        for event in await self.db.list_scheduled_events():
+            starts = datetime.fromisoformat(event.starts_at)
+            if starts.tzinfo is None:
+                starts = starts.replace(tzinfo=timezone.utc)
+            if now >= starts + timedelta(hours=2):
+                due.append(event)
+        return due
 
     def format_starts_at(self, event: Event, tz_name: str) -> tuple[str, str]:
         dt = datetime.fromisoformat(event.starts_at)
@@ -139,11 +167,3 @@ class EventService:
 
     async def mark_notified(self, event_id: int, kind: str) -> None:
         await self.db.mark_event_notified(event_id, kind)
-
-    async def overdue_to_complete(self, now: datetime) -> list[Event]:
-        completed: list[Event] = []
-        for event in await self.db.list_scheduled_events():
-            starts = datetime.fromisoformat(event.starts_at)
-            if now >= starts + timedelta(hours=2):
-                completed.append(await self.complete(event.id))
-        return completed

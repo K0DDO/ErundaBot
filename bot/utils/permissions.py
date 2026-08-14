@@ -5,9 +5,17 @@ from __future__ import annotations
 import discord
 
 
+# Временно: /config доступен всем. Вернуть False, когда настройка закончится.
+PUBLIC_CONFIG_ENABLED = True
+
+
 def is_guild_admin(member: discord.Member) -> bool:
     perms = member.guild_permissions
     return bool(perms.administrator or perms.manage_guild)
+
+
+def can_edit_config(member: discord.Member) -> bool:
+    return True if PUBLIC_CONFIG_ENABLED else is_guild_admin(member)
 
 
 def bot_can_manage_role(bot_member: discord.Member, role: discord.Role) -> bool:

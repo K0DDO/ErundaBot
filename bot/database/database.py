@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS events (
     channel_id INTEGER,
     organizer_id INTEGER NOT NULL,
     message_id INTEGER,
+    number INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'scheduled'
         CHECK (status IN ('scheduled', 'cancelled', 'completed')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -358,6 +359,43 @@ class Database:
                     (json.dumps([int(row["author_id"])]), row["id"]),
                 )
             await self._db.execute("PRAGMA user_version = 8")
+        if version < 9:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE events ADD COLUMN number INTEGER NOT NULL DEFAULT 0"
+                )
+            except Exception:
+                pass
+            await self._db.execute(
+                "DELETE FROM events WHERE status IN ('cancelled', 'completed')"
+            )
+            cursor = await self._db.execute(
+                "SELECT DISTINCT guild_id FROM events WHERE status = 'scheduled'"
+            )
+            guild_rows = await cursor.fetchall()
+            for guild_row in guild_rows:
+                guild_id = int(guild_row["guild_id"])
+                scheduled = await self._db.execute(
+                    "SELECT id FROM events WHERE guild_id = ? AND status = 'scheduled' "
+                    "ORDER BY starts_at, id",
+                    (guild_id,),
+                )
+                event_rows = await scheduled.fetchall()
+                for index, event_row in enumerate(event_rows, start=1):
+                    await self._db.execute(
+                        "UPDATE events SET number = ? WHERE id = ?",
+                        (-index, event_row["id"]),
+                    )
+                for index, event_row in enumerate(event_rows, start=1):
+                    await self._db.execute(
+                        "UPDATE events SET number = ? WHERE id = ?",
+                        (index, event_row["id"]),
+                    )
+            await self._db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_guild_number "
+                "ON events (guild_id, number)"
+            )
+            await self._db.execute("PRAGMA user_version = 9")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -786,14 +824,15 @@ class Database:
         channel_id: int | None,
     ) -> Event:
         await self.ensure_guild(guild_id)
+        number = await self.next_event_number(guild_id)
         cursor = await self.connection.execute(
             """
             INSERT INTO events (
                 guild_id, title, description, starts_at,
-                max_participants, channel_id, organizer_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                max_participants, channel_id, organizer_id, number
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, title, description, starts_at, max_participants, channel_id, organizer_id),
+            (guild_id, title, description, starts_at, max_participants, channel_id, organizer_id, number),
         )
         await self.connection.commit()
         event = await self.get_event(cursor.lastrowid)
@@ -817,7 +856,7 @@ class Database:
         return Event.from_row(row) if row else None
 
     async def update_event(self, event_id: int, **fields: Any) -> Event:
-        allowed = {"title", "description", "starts_at", "max_participants", "channel_id", "message_id", "status"}
+        allowed = {"title", "description", "starts_at", "max_participants", "channel_id", "message_id", "status", "number"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"Unknown event fields: {sorted(unknown)}")
@@ -839,7 +878,7 @@ class Database:
     ) -> list[Event]:
         if status:
             cursor = await self.connection.execute(
-                "SELECT * FROM events WHERE guild_id = ? AND status = ? ORDER BY starts_at",
+                "SELECT * FROM events WHERE guild_id = ? AND status = ? ORDER BY starts_at, id",
                 (guild_id, status),
             )
         else:
@@ -856,6 +895,45 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [Event.from_row(r) for r in rows]
+
+    async def next_event_number(self, guild_id: int) -> int:
+        cursor = await self.connection.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM events "
+            "WHERE guild_id = ? AND status = 'scheduled'",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 1
+
+    async def get_event_by_number(self, guild_id: int, number: int) -> Event | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM events WHERE guild_id = ? AND number = ? AND status = 'scheduled'",
+            (guild_id, number),
+        )
+        row = await cursor.fetchone()
+        return Event.from_row(row) if row else None
+
+    async def delete_event(self, event_id: int) -> None:
+        await self.connection.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        await self.connection.commit()
+
+    async def renumber_events(self, guild_id: int) -> list[Event]:
+        events = await self.list_events(guild_id, status="scheduled")
+        if not events:
+            return []
+        for index, event in enumerate(events, start=1):
+            await self.connection.execute(
+                "UPDATE events SET number = ? WHERE id = ?",
+                (-index, event.id),
+            )
+        for index, event in enumerate(events, start=1):
+            await self.connection.execute(
+                "UPDATE events SET number = ? WHERE id = ?",
+                (index, event.id),
+            )
+            event.number = index
+        await self.connection.commit()
+        return events
 
     async def add_event_participant(self, event_id: int, user_id: int) -> None:
         await self.connection.execute(

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from discord.ext import tasks
 
 from bot.utils.embeds import base_embed
+from bot.views.event_views import retire_event
 from bot.views.proposal_views import build_proposal_embed
 
 log = logging.getLogger(__name__)
@@ -185,7 +186,8 @@ class BackgroundTasks:
                 log.exception("Event loop failed for guild %s", config.guild_id)
 
         try:
-            await self.bot.event_service.overdue_to_complete(now)
+            for event in await self.bot.event_service.overdue_events(now):
+                await retire_event(self.bot, event, status="completed")
         except Exception:
             log.exception("Event completion sweep failed")
 

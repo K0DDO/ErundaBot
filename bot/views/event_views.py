@@ -59,12 +59,68 @@ def event_embed(
     elif event.status == "completed":
         embed.color = 0x57F287
         embed.set_footer(text="Ерунда • завершено")
+    elif event.number:
+        embed.set_footer(text=f"Ерунда · #{event.number}")
     return embed
 
 
 async def render_event_embed(bot: ErundaBot, event: Event, tz_name: str) -> discord.Embed:
     participants = await bot.event_service.participants_for_display(event)
     return event_embed(bot, event, tz_name, participants)
+
+
+async def close_event_card(
+    bot: ErundaBot,
+    event: Event,
+    tz_name: str,
+    participant_ids: list[int],
+) -> None:
+    if not event.message_id:
+        return
+    guild = bot.get_guild(event.guild_id)
+    if guild is None:
+        return
+    config = await bot.config_service.get(event.guild_id)
+    channel_id = event.channel_id or config.events_channel_id
+    channel = guild.get_channel(channel_id or 0) if channel_id else None
+    if channel is None or not hasattr(channel, "fetch_message"):
+        return
+    try:
+        msg = await channel.fetch_message(event.message_id)
+        embed = event_embed(bot, event, tz_name, participant_ids)
+        await msg.edit(embed=embed, view=None)
+    except discord.HTTPException:
+        pass
+
+
+async def resync_event_cards(bot: ErundaBot, events: list[Event]) -> None:
+    for event in events:
+        await bot.event_service.ensure_organizer_participant(event)
+        if not event.message_id:
+            continue
+        guild = bot.get_guild(event.guild_id)
+        if guild is None:
+            continue
+        config = await bot.config_service.get(event.guild_id)
+        channel_id = event.channel_id or config.events_channel_id
+        channel = guild.get_channel(channel_id or 0) if channel_id else None
+        if channel is None or not hasattr(channel, "fetch_message"):
+            continue
+        try:
+            msg = await channel.fetch_message(event.message_id)
+            embed = await render_event_embed(bot, event, config.timezone)
+            await msg.edit(embed=embed)
+        except discord.HTTPException:
+            pass
+
+
+async def retire_event(bot: ErundaBot, event: Event, *, status: str) -> None:
+    participants = await bot.event_service.participants_for_display(event)
+    event.status = status
+    config = await bot.config_service.get(event.guild_id)
+    await close_event_card(bot, event, config.timezone, participants)
+    remaining = await bot.event_service.delete_and_renumber(event)
+    await resync_event_cards(bot, remaining)
 
 
 class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
@@ -132,6 +188,8 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
             embed=success_embed("Ивент создан", f"[Открыть]({message.jump_url})"),
             ephemeral=True,
         )
+        remaining = await self.bot.db.list_events(self.guild_id, status="scheduled")
+        await resync_event_cards(self.bot, remaining)
 
 
 class EventView(discord.ui.View):

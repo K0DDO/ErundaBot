@@ -47,7 +47,7 @@ Apps → Add quote
 
 ### Ивенты
 
-Slash только create / list / cancel. Join / leave / info — **кнопки** на embed: «Участвовать», «Не участвовать», «Подробнее». Описание курсивом, поле «Организатор» нет: создатель сразу первый в «Участники» (нельзя выйти кнопкой). Views восстанавливаются после рестарта, карточки перерисовываются. Лимит участников, напоминания `event_reminder_minutes`, auto-complete +2ч.
+Slash только create / list / cancel. Join / leave / info — **кнопки** на embed. Описание курсивом, создатель первый в «Участники». Номера гильдии `1..N` (как у цитат): после отмены/завершения ивент удаляется из БД, остальные перенумеровываются, карточки синкаются. `/event list` показывает только ещё не начавшиеся. Через 2 часа после старта карточка помечается завершённой и запись удаляется. `PUBLIC_CONFIG_ENABLED = True` в `bot/utils/permissions.py` — временный доступ `/config` для всех, потом вернуть `False`.
 
 ### Цитаты (заморожено)
 
@@ -78,11 +78,11 @@ bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v8)
+## БД (миграции до v9)
 
 Таблицы: `guilds`, `users`, `birthdays`, `message_statistics`, `voice_sessions`, `reaction_statistics`, `events`, `event_participants`, `quotes`, `custom_roles`, `proposals`, `proposal_votes`, `birthday_star_grants`, `birthday_notifications`, `event_notifications`.
 
-Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`.
+Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
 
 `Database.close()` должен оставаться отдельным методом — не вшивать его в `_migrate` (уже ломалось).
 
@@ -99,6 +99,7 @@ bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timez
 
 ## Recent changes (2026-08)
 
+- Ивенты: гильдийные номера, удаление после завершения, `/config` временно для всех
 - Карточка ивента: курсивное описание, участники списком, создатель первый
 - Groq: дефолт `openai/gpt-oss-20b` вместо снятой `llama-3.1-8b-instant`
 - Убраны `/event join|info|leave` — функционал кнопок на карточке

@@ -96,9 +96,12 @@ class Event:
     organizer_id: int
     message_id: int | None
     status: str
+    number: int = 0
 
     @classmethod
     def from_row(cls, row: Any) -> Event:
+        keys = row.keys()
+        number = row["number"] if "number" in keys else None
         return cls(
             id=row["id"],
             guild_id=row["guild_id"],
@@ -110,6 +113,7 @@ class Event:
             organizer_id=row["organizer_id"],
             message_id=row["message_id"],
             status=row["status"],
+            number=int(number) if number else 0,
         )
 
 

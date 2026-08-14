@@ -87,7 +87,9 @@ class ConfigPanel(discord.ui.View):
         member = interaction.user
         if not isinstance(member, discord.Member):
             return False
-        if not (member.guild_permissions.administrator or member.guild_permissions.manage_guild):
+        from bot.utils.permissions import can_edit_config
+
+        if not can_edit_config(member):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Недостаточно прав",

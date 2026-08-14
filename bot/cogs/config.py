@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.utils.embeds import error_embed
-from bot.utils.permissions import is_guild_admin
+from bot.utils.permissions import can_edit_config
 from bot.views.config_views import ConfigPanel, config_overview_embed
 
 if TYPE_CHECKING:
@@ -30,7 +30,7 @@ class ConfigCog(commands.Cog):
             )
             return
 
-        if not is_guild_admin(interaction.user):
+        if not can_edit_config(interaction.user):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Недостаточно прав",
