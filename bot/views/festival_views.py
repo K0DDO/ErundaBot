@@ -9,17 +9,27 @@ from discord import ui
 
 from bot.services.festival_service import normalize_film_title, pick_guild_emoji
 from bot.utils.birthday_emojis import ensure_guild_emojis
-from bot.utils.embeds import error_embed, success_embed
+from bot.utils.embeds import BRAND_COLOR, ERROR_COLOR, SUCCESS_COLOR, error_embed, success_embed
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
     from bot.database.models import Festival
 
 
+def _notice(text: str, color: int) -> ui.LayoutView:
+    view = ui.LayoutView(timeout=None)
+    container = ui.Container(accent_color=color)
+    container.add_item(ui.TextDisplay(f"**{text}**"))
+    view.add_item(container)
+    return view
+
+
 async def festival_card(
     bot: ErundaBot,
     guild: discord.Guild,
     festival: Festival,
+    *,
+    confirm_delete_for: int | None = None,
 ) -> FestivalCardView:
     config = await bot.config_service.get(guild.id)
     await ensure_guild_emojis(guild)
@@ -34,7 +44,13 @@ async def festival_card(
         winner_emoji=winner_emoji,
         include_films=has_winner or not films,
     )
-    return FestivalCardView(bot, festival, body, films)
+    return FestivalCardView(
+        bot,
+        festival,
+        body,
+        films,
+        confirm_delete_for=confirm_delete_for,
+    )
 
 
 async def publish_festival_message(
@@ -201,48 +217,43 @@ class FestivalEditModal(discord.ui.Modal, title="Изменить кинофес
         )
 
 
-class FestivalDeleteConfirmView(discord.ui.View):
+class FestivalDeleteConfirmButton(ui.Button):
     def __init__(self, bot: ErundaBot, festival_id: int, requester_id: int) -> None:
-        super().__init__(timeout=120)
+        super().__init__(label="Удалить", style=discord.ButtonStyle.danger)
         self.bot = bot
         self.festival_id = festival_id
         self.requester_id = requester_id
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    async def callback(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.requester_id:
             await interaction.response.send_message(
                 embed=error_embed("Это подтверждение не для тебя"),
                 ephemeral=True,
             )
-            return False
-        return True
-
-    @discord.ui.button(label="Удалить", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+            return
         festival = await self.bot.db.get_festival(self.festival_id)
         if festival is None:
-            await interaction.response.edit_message(
-                content=None,
-                embed=error_embed("Кинофестиваль не найден"),
-                view=None,
-            )
+            await interaction.response.edit_message(view=_notice("Кинофестиваль не найден", ERROR_COLOR))
             return
         await interaction.response.defer()
         await delete_festival_message(self.bot, festival)
         await self.bot.db.delete_festival(festival.id)
-        await interaction.edit_original_response(
-            content=None,
-            embed=success_embed("Кинофестиваль удалён"),
-            view=None,
-        )
+        await interaction.edit_original_response(view=_notice("Кинофестиваль удалён", SUCCESS_COLOR))
 
-    @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
-    async def abort(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await interaction.response.edit_message(
-            content=None,
-            embed=success_embed("Кинофестиваль не удалён"),
-            view=None,
-        )
+
+class FestivalDeleteAbortButton(ui.Button):
+    def __init__(self, requester_id: int) -> None:
+        super().__init__(label="Отмена", style=discord.ButtonStyle.secondary)
+        self.requester_id = requester_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                embed=error_embed("Это подтверждение не для тебя"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.edit_message(view=_notice("Кинофестиваль не удалён", BRAND_COLOR))
 
 
 class FestivalAddButton(ui.Button):
@@ -270,10 +281,18 @@ class FestivalCardView(ui.LayoutView):
         festival: Festival,
         body: str,
         films: list,
+        *,
+        confirm_delete_for: int | None = None,
     ) -> None:
-        super().__init__(timeout=None)
+        super().__init__(timeout=120 if confirm_delete_for is not None else None)
         color = 0x57F287 if festival.status != "open" else 0x7C9CFF
         container = ui.Container(accent_color=color)
+        if confirm_delete_for is not None:
+            container.add_item(
+                ui.TextDisplay(
+                    "**Удалить этот кинофестиваль?**\nКарточка и заявки пропадут."
+                )
+            )
         container.add_item(ui.TextDisplay(f"## 🎬 Кинофестиваль #{festival.number}\n\n{body}"))
         if festival.winner_user_id:
             winner = next((film for film in films if film.user_id == festival.winner_user_id), None)
@@ -309,7 +328,12 @@ class FestivalCardView(ui.LayoutView):
                     )
                 else:
                     container.add_item(ui.TextDisplay(line))
-        if festival.status == "open":
+        if confirm_delete_for is not None:
+            row = ui.ActionRow()
+            row.add_item(FestivalDeleteConfirmButton(bot, festival.id, confirm_delete_for))
+            row.add_item(FestivalDeleteAbortButton(confirm_delete_for))
+            container.add_item(row)
+        elif festival.status == "open":
             row = ui.ActionRow()
             row.add_item(FestivalAddButton(bot, festival.id))
             container.add_item(row)

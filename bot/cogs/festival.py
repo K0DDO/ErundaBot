@@ -13,7 +13,6 @@ from bot.services.festival_service import normalize_film_title
 from bot.utils.embeds import error_embed, success_embed
 from bot.views.festival_views import (
     FestivalAddModal,
-    FestivalDeleteConfirmView,
     FestivalEditModal,
     FestivalNewModal,
     festival_card,
@@ -211,14 +210,13 @@ class FestivalCog(commands.Cog):
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await interaction.response.send_message(
-            embed=success_embed(
-                f"Удалить кинофестиваль #{festival.number}?",
-                "Карточка и заявки пропадут.",
-            ),
-            view=FestivalDeleteConfirmView(self.bot, festival.id, interaction.user.id),
-            ephemeral=True,
+        view = await festival_card(
+            self.bot,
+            interaction.guild,
+            festival,
+            confirm_delete_for=interaction.user.id,
         )
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @fest_delete.autocomplete("number")
     async def fest_delete_autocomplete(
