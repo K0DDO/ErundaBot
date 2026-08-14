@@ -145,17 +145,28 @@ class TgkService:
         view.add_item(container)
         return view
 
-    async def sync_board(self, guild: discord.Guild, bot) -> None:
+    async def sync_board(
+        self,
+        guild: discord.Guild,
+        bot,
+        fallback_channel: discord.abc.Messageable | None = None,
+    ) -> discord.Message | None:
         config = await self.db.get_guild(guild.id)
-        if config is None or config.tgk_channel_id is None:
-            return
-        channel = guild.get_channel(config.tgk_channel_id)
+        channel = None
+        official = False
+        if config is not None and config.tgk_channel_id:
+            found = guild.get_channel(config.tgk_channel_id)
+            if found is not None and hasattr(found, "send"):
+                channel = found
+                official = True
+        if channel is None:
+            channel = fallback_channel
         if channel is None or not hasattr(channel, "send"):
-            return
+            return None
         channels = await self.list_all(guild.id)
         view = self.build_board(guild, channels)
         message = None
-        if config.tgk_board_message_id:
+        if official and config is not None and config.tgk_board_message_id:
             try:
                 message = await channel.fetch_message(config.tgk_board_message_id)
                 await message.edit(content=None, embeds=[], view=view)
@@ -163,4 +174,6 @@ class TgkService:
                 message = None
         if message is None:
             message = await channel.send(view=view)
-            await self.db.set_tgk_board_message_id(guild.id, message.id)
+            if official:
+                await self.db.set_tgk_board_message_id(guild.id, message.id)
+        return message

@@ -42,6 +42,30 @@ class TgkCog(commands.Cog):
     async def tgk_add(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(TgkAddModal(self.bot))
 
+    @tgk.command(name="list", description="Список ТГК участников")
+    @app_commands.guild_only()
+    async def tgk_list(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if config.tgk_channel_id:
+            await interaction.response.defer(ephemeral=True)
+            message = await self.bot.tgk_service.sync_board(interaction.guild, self.bot)
+            if message is None:
+                await interaction.followup.send(
+                    embed=error_embed("Канал ТГК недоступен"),
+                    ephemeral=True,
+                )
+                return
+            await interaction.followup.send(
+                embed=success_embed("Доска ТГК", f"[Открыть]({message.jump_url})"),
+                ephemeral=True,
+            )
+            return
+        channels = await self.bot.tgk_service.list_all(interaction.guild.id)
+        view = self.bot.tgk_service.build_board(interaction.guild, channels)
+        await interaction.response.send_message(view=view)
+
     @tgk.command(name="remove", description="Удалить ТГК по номеру")
     @app_commands.describe(number="Номер с доски")
     @app_commands.guild_only()

@@ -36,7 +36,7 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 /top
 /event create|list|cancel
 /fest add|remove|role|new|export|winner|ping
-/tgk add|remove
+/tgk add|remove|list
 /quote add|edit|delete|cleanup|random|user
 Apps → Add quote
 /myrole edit|delete
@@ -57,7 +57,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### ТГК
 
-Несколько каналов на человека: название + `https://t.me/...`. Картинка с og:image публичного канала, иначе без неё. Доска в канале из `/config`. `/tgk add`, `/tgk remove номер`.
+Несколько каналов на человека: название + `https://t.me/...`. Картинка с og:image публичного канала, иначе без неё. Доска в канале из `/config`, пока канала нет — `/tgk list` шлёт список туда, откуда вызвали. `/tgk add`, `/tgk remove номер`, `/tgk list`.
 
 ### Цитаты (заморожено)
 
