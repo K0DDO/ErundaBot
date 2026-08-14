@@ -8,7 +8,7 @@ import discord
 
 from bot.utils.embeds import error_embed, success_embed
 from bot.utils.formatting import bool_label, channel_mention, role_mention
-from bot.utils.permissions import bot_cannot_send_reason
+from bot.utils.permissions import bot_cannot_send_reason, can_edit_config, config_denied_reason
 from bot.utils.timezones import is_valid_timezone
 
 if TYPE_CHECKING:
@@ -29,6 +29,11 @@ FLAG_OPTIONS = (
     ("statistics_enabled", "Статистика"),
     ("personal_roles_enabled", "Персональные роли"),
     ("auto_execute_proposals", "Автовыполнение предложений"),
+)
+
+ROLE_OPTIONS = (
+    ("config_role_id", "Доступ к /config"),
+    ("fest_ping_role_id", "Пинг кинофестиваля"),
 )
 
 
@@ -52,7 +57,10 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
     )
     embed.add_field(
         name="Роли",
-        value=f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}",
+        value=(
+            f"Доступ к /config: {role_mention(config.config_role_id)}\n"
+            f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}"
+        ),
         inline=False,
     )
     embed.add_field(
@@ -98,13 +106,12 @@ class ConfigPanel(discord.ui.View):
         member = interaction.user
         if not isinstance(member, discord.Member):
             return False
-        from bot.utils.permissions import can_edit_config
-
-        if not can_edit_config(member):
+        config = await self.bot.config_service.get(self.guild_id)
+        if not can_edit_config(member, config.config_role_id):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Недостаточно прав",
-                    "Нужны права администратора или Manage Server.",
+                    config_denied_reason(config.config_role_id),
                 ),
                 ephemeral=True,
             )
@@ -136,7 +143,7 @@ class ConfigPanel(discord.ui.View):
             )
         elif value == "roles":
             await interaction.response.send_message(
-                "Роль, которую пинговать в карточке после `/fest winner`.",
+                "Сначала выбери тип роли, затем саму роль.",
                 view=RoleConfigView(self.bot, self.guild_id),
                 ephemeral=True,
             )
@@ -244,26 +251,50 @@ class ChannelConfigView(discord.ui.View):
         self.add_item(ChannelPicker(self))
 
 
-class FestPingRolePicker(discord.ui.RoleSelect):
+class RoleFieldSelect(discord.ui.Select):
     def __init__(self, parent: "RoleConfigView") -> None:
         super().__init__(
-            placeholder="Роль пинга кинофестиваля",
+            placeholder="Какую роль настроить?",
+            options=[
+                discord.SelectOption(label=label, value=field)
+                for field, label in ROLE_OPTIONS
+            ],
+        )
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.parent_view.selected_field = self.values[0]
+        await interaction.response.defer(ephemeral=True)
+
+
+class ConfigRolePicker(discord.ui.RoleSelect):
+    def __init__(self, parent: "RoleConfigView") -> None:
+        super().__init__(
+            placeholder="Выбери роль",
             min_values=1,
             max_values=1,
         )
         self.parent_view = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        if self.parent_view.selected_field is None:
+            await interaction.response.send_message(
+                embed=error_embed("Сначала выбери тип роли"),
+                ephemeral=True,
+            )
+            return
         role = self.values[0]
+        field = self.parent_view.selected_field
         config = await self.parent_view.bot.config_service.set_role(
             self.parent_view.guild_id,
-            "fest_ping_role_id",
+            field,
             role.id,
         )
+        label = dict(ROLE_OPTIONS).get(field, field)
         await interaction.response.send_message(
             embed=success_embed(
                 "Роль обновлена",
-                f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}",
+                f"{label}: {role_mention(getattr(config, field))}",
             ),
             ephemeral=True,
         )
@@ -274,7 +305,9 @@ class RoleConfigView(discord.ui.View):
         super().__init__(timeout=180)
         self.bot = bot
         self.guild_id = guild_id
-        self.add_item(FestPingRolePicker(self))
+        self.selected_field: str | None = None
+        self.add_item(RoleFieldSelect(self))
+        self.add_item(ConfigRolePicker(self))
 
 
 class FlagSelect(discord.ui.Select):

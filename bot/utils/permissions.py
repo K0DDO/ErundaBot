@@ -5,17 +5,21 @@ from __future__ import annotations
 import discord
 
 
-# Временно: /config доступен всем. Вернуть False, когда настройка закончится.
-PUBLIC_CONFIG_ENABLED = True
-
-
 def is_guild_admin(member: discord.Member) -> bool:
     perms = member.guild_permissions
     return bool(perms.administrator or perms.manage_guild)
 
 
-def can_edit_config(member: discord.Member) -> bool:
-    return True if PUBLIC_CONFIG_ENABLED else is_guild_admin(member)
+def can_edit_config(member: discord.Member, config_role_id: int | None = None) -> bool:
+    if config_role_id is not None and any(role.id == config_role_id for role in member.roles):
+        return True
+    return is_guild_admin(member)
+
+
+def config_denied_reason(config_role_id: int | None) -> str:
+    if config_role_id is not None:
+        return "Нужна роль доступа к /config."
+    return "Нужны права администратора или Manage Server."
 
 
 def bot_cannot_send_reason(guild: discord.Guild, channel: discord.abc.Snowflake) -> str | None:

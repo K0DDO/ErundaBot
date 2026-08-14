@@ -32,6 +32,7 @@ class GuildConfig:
     birthday_star_role_id: int | None = None
     fest_staff_role_id: int | None = None
     fest_ping_role_id: int | None = None
+    config_role_id: int | None = None
     fest_reminder_minutes: int = 60
     tgk_board_message_id: int | None = None
     created_at: str | None = None
@@ -70,6 +71,9 @@ class GuildConfig:
             else None,
             fest_ping_role_id=row["fest_ping_role_id"]
             if "fest_ping_role_id" in row.keys()
+            else None,
+            config_role_id=row["config_role_id"]
+            if "config_role_id" in row.keys()
             else None,
             fest_reminder_minutes=int(row["fest_reminder_minutes"])
             if "fest_reminder_minutes" in row.keys() and row["fest_reminder_minutes"] is not None
@@ -371,6 +375,7 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "birthday_star_role_id",
         "fest_staff_role_id",
         "fest_ping_role_id",
+        "config_role_id",
         "fest_reminder_minutes",
         "tgk_board_message_id",
     }

@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.utils.embeds import error_embed
-from bot.utils.permissions import can_edit_config
+from bot.utils.permissions import can_edit_config, config_denied_reason
 from bot.views.config_views import ConfigPanel, config_overview_embed
 
 if TYPE_CHECKING:
@@ -30,17 +30,17 @@ class ConfigCog(commands.Cog):
             )
             return
 
-        if not can_edit_config(interaction.user):
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if not can_edit_config(interaction.user, config.config_role_id):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Недостаточно прав",
-                    "Нужны права администратора или Manage Server.",
+                    config_denied_reason(config.config_role_id),
                 ),
                 ephemeral=True,
             )
             return
 
-        config = await self.bot.config_service.get(interaction.guild.id)
         view = ConfigPanel(self.bot, interaction.guild.id)
         await interaction.response.send_message(
             embed=config_overview_embed(config),

@@ -49,7 +49,7 @@ Apps → Add quote
 
 ### Ивенты
 
-Slash только create / list / cancel. Кнопки на карточке: «Участвовать» и «Не участвовать». Описание курсивом, создатель первый в «Участники». `/event cancel` показывает карточку и спрашивает «Удалить этот ивент?» (как цитаты). После отмены в оригинале жирно **Ивент отменён**, кнопки снимаются, запись удаляется, номера сдвигаются. `/event list` — ephemeral, только ещё не начавшиеся, ссылка на оригинал. Через 2 часа после старта карточка завершается и запись удаляется. `PUBLIC_CONFIG_ENABLED = True` — `/config` временно для всех.
+Slash только create / list / cancel. Кнопки на карточке: «Участвовать» и «Не участвовать». Описание курсивом, создатель первый в «Участники». `/event cancel` показывает карточку и спрашивает «Удалить этот ивент?» (как цитаты). После отмены в оригинале жирно **Ивент отменён**, кнопки снимаются, запись удаляется, номера сдвигаются. `/event list` — ephemeral, только ещё не начавшиеся, ссылка на оригинал. Через 2 часа после старта карточка завершается и запись удаляется.
 
 ### Кинофестиваль
 
@@ -73,9 +73,9 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Остальное
 
-- `/profile` ephemeral. Статистика: messages + voice_minutes + reactions.
+- `/profile` ephemeral. Статистика: messages + voice_minutes + reactions. `/top` через 180с удаляет сообщение, а не оставляет мёртвые кнопки.
 - Демократия: 👍/👎, кворум/% из config, auto-actions если `auto_execute_proposals`.
-- `/config`: каналы, роли (пинг кинофестиваля), timezone, флаги, времена уведомлений, правила голосований.
+- `/config`: каналы, роли (доступ к `/config` и пинг кинофестиваля), timezone, флаги, времена уведомлений, правила голосований. `/config` только у выбранной роли (или админ / Manage Server).
 
 ## Структура
 
@@ -88,11 +88,11 @@ bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v15)
+## БД (миграции до v16)
 
 Таблицы: … `festivals` (номера с 29), `festival_films` (`image_url` постер, `age_rating` вроде `12+` / `NSFW`), `festival_blocked_films` (прошлые победители и ручной блок), `tg_channels`.
 
-Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
+Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `config_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
 
 `Database.close()` должен оставаться отдельным методом — не вшивать его в `_migrate` (уже ломалось).
 
@@ -106,12 +106,11 @@ bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timez
 ## Known issues
 
 - Global `tree.sync()` может задерживать появление slash-команд
-- `/top` view timeout 180с
 
 ## Recent changes (2026-08)
 
 - Кинофестиваль и ТГК: сбор фильмов, победитель по имени, доска каналов
-- Ивенты: гильдийные номера, удаление после завершения, `/config` временно для всех
+- Ивенты: гильдийные номера, удаление после завершения
 - Карточка ивента: курсивное описание, участники списком, создатель первый
 - Groq: дефолт `openai/gpt-oss-20b` вместо снятой `llama-3.1-8b-instant`
 - Убраны `/event join|info|leave` — функционал кнопок на карточке

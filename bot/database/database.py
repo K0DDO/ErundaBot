@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS guilds (
     birthday_star_role_id INTEGER,
     fest_staff_role_id INTEGER,
     fest_ping_role_id INTEGER,
+    config_role_id INTEGER,
     fest_reminder_minutes INTEGER NOT NULL DEFAULT 60,
     tgk_board_message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -606,6 +607,12 @@ class Database:
                         (int(row["number"]) + offset, row["id"]),
                     )
             await self._db.execute("PRAGMA user_version = 15")
+        if version < 16:
+            try:
+                await self._db.execute("ALTER TABLE guilds ADD COLUMN config_role_id INTEGER")
+            except Exception:
+                pass
+            await self._db.execute("PRAGMA user_version = 16")
 
     async def close(self) -> None:
         if self._db is not None:

@@ -106,6 +106,15 @@ class TopView(discord.ui.View):
         self.period_select.callback = self.on_period
         self.add_item(self.period_select)
 
+    async def on_timeout(self) -> None:
+        message = self.message
+        if message is None:
+            return
+        try:
+            await message.delete()
+        except discord.HTTPException:
+            pass
+
     async def on_category(self, interaction: discord.Interaction) -> None:
         self.category = StatCategory(self.category_select.values[0])
         await self.refresh(interaction)
@@ -146,4 +155,6 @@ class TopView(discord.ui.View):
             period=self.period,
         )
         embed = await new_view.build_embed()
+        self.stop()
         await interaction.response.edit_message(embed=embed, view=new_view)
+        new_view.message = interaction.message

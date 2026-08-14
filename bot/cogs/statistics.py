@@ -223,6 +223,7 @@ class StatisticsCog(commands.Cog):
         view = TopView(self.bot, interaction.guild.id, config.timezone)
         embed = await view.build_embed()
         await interaction.response.send_message(embed=embed, view=view)
+        view.message = await interaction.original_response()
 
 
 async def setup(bot: ErundaBot) -> None:
