@@ -255,13 +255,13 @@ class FestivalService:
         current = now or datetime.now(timezone.utc)
         return format_countdown((starts - current).total_seconds())
 
-    def _film_block(self, user_id: int, title: str, guild: discord.Guild | None) -> str:
+    def _mention(self, user_id: int, guild: discord.Guild | None) -> str:
         name = f"<@{user_id}>"
         if guild is not None:
             member = guild.get_member(user_id)
             if member is not None:
                 name = member.mention
-        return f"{name}\n### 🎬 {normalize_film_title(title)}"
+        return name
 
     def card_body(
         self,
@@ -270,15 +270,19 @@ class FestivalService:
         guild: discord.Guild | None = None,
     ) -> str:
         shown = films[:40]
-        blocks = [self._film_block(film.user_id, film.title, guild) for film in shown]
+        lines = [
+            f"{self._mention(film.user_id, guild)} — {normalize_film_title(film.title)}"
+            for film in shown
+        ]
         extra = len(films) - len(shown)
         if extra > 0:
-            blocks.append(f"… и ещё {extra}")
-        films_text = "\n\n".join(blocks) if blocks else "пока никто не предложил"
+            lines.append(f"… и ещё {extra}")
+        films_text = "\n".join(lines) if lines else "пока никто не предложил"
         if festival.winner_user_id and festival.winner_film:
             winner = (
                 "**Победитель**\n"
-                + self._film_block(festival.winner_user_id, festival.winner_film, guild)
+                f"{self._mention(festival.winner_user_id, guild)}\n"
+                f"### 🎬 {normalize_film_title(festival.winner_film)}"
             )
         else:
             winner = "Победитель: ещё не выбран"
