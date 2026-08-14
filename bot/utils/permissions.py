@@ -18,6 +18,29 @@ def can_edit_config(member: discord.Member) -> bool:
     return True if PUBLIC_CONFIG_ENABLED else is_guild_admin(member)
 
 
+def bot_cannot_send_reason(guild: discord.Guild, channel: discord.abc.Snowflake) -> str | None:
+    bot_member = guild.me
+    if bot_member is None:
+        return "Бот не найден на сервере"
+    resolved = guild.get_channel(channel.id)
+    if resolved is None:
+        return "Канал не найден"
+    perms = resolved.permissions_for(bot_member)
+    missing: list[str] = []
+    if not perms.view_channel:
+        missing.append("Просмотр канала")
+    if not perms.send_messages:
+        missing.append("Отправка сообщений")
+    if not perms.embed_links:
+        missing.append("Встраивание ссылок")
+    if not missing:
+        return None
+    return (
+        f"У бота нет прав в {resolved.mention}: {', '.join(missing)}. "
+        "Выдай их роли бота в настройках канала."
+    )
+
+
 def bot_can_manage_role(bot_member: discord.Member, role: discord.Role) -> bool:
     if role.is_default() or role.managed:
         return False

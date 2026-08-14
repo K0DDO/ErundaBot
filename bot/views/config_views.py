@@ -8,6 +8,7 @@ import discord
 
 from bot.utils.embeds import error_embed, success_embed
 from bot.utils.formatting import bool_label, channel_mention
+from bot.utils.permissions import bot_cannot_send_reason
 from bot.utils.timezones import is_valid_timezone
 
 if TYPE_CHECKING:
@@ -171,6 +172,21 @@ class ChannelPicker(discord.ui.ChannelSelect):
             return
 
         channel = self.values[0]
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                embed=error_embed("Только на сервере"),
+                ephemeral=True,
+            )
+            return
+        reason = bot_cannot_send_reason(guild, channel)
+        if reason:
+            await interaction.response.send_message(
+                embed=error_embed("Нельзя выбрать этот канал", reason),
+                ephemeral=True,
+            )
+            return
+
         field = self.parent_view.selected_field
         config = await self.parent_view.bot.config_service.set_channel(
             self.parent_view.guild_id,
