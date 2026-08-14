@@ -115,7 +115,8 @@ async def resync_event_cards(bot: ErundaBot, events: list[Event]) -> None:
         try:
             msg = await channel.fetch_message(event.message_id)
             embed = await render_event_embed(bot, event, config.timezone)
-            await msg.edit(embed=embed)
+            view = EventView(bot, event.id)
+            await msg.edit(embed=embed, view=view)
         except discord.HTTPException:
             pass
 
@@ -220,20 +221,12 @@ class EventView(discord.ui.View):
         leave_btn.callback = self.leave_button
         self.add_item(leave_btn)
 
-        info_btn = discord.ui.Button(
-            label="Подробнее",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"event:info:{event_id}",
-        )
-        info_btn.callback = self.info_button
-        self.add_item(info_btn)
-
     async def _refresh_message(self, interaction: discord.Interaction, event: Event) -> None:
         config = await self.bot.config_service.get(event.guild_id)
         embed = await render_event_embed(self.bot, event, config.timezone)
         disabled = event.status != "scheduled"
         for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.custom_id != f"event:info:{event.id}":
+            if isinstance(item, discord.ui.Button):
                 item.disabled = disabled
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -252,25 +245,6 @@ class EventView(discord.ui.View):
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         await self._refresh_message(interaction, event)
-
-    async def info_button(self, interaction: discord.Interaction) -> None:
-        event = await self.bot.event_service.get(self.event_id)
-        if event is None:
-            await interaction.response.send_message(embed=error_embed("Не найдено"), ephemeral=True)
-            return
-        participants = await self.bot.event_service.participants_for_display(event)
-        names = ", ".join(f"<@{uid}>" for uid in participants[:20]) or "пока никого"
-        config = await self.bot.config_service.get(event.guild_id)
-        date_label, time_label = self.bot.event_service.format_starts_at(event, config.timezone)
-        desc = _italic_description(event.description)
-        extra = f"📅 {date_label} 🕘 {time_label}\nУчастники: {names}"
-        await interaction.response.send_message(
-            embed=base_embed(
-                title=event.title,
-                description=f"{desc}\n\n{extra}" if desc else extra,
-            ),
-            ephemeral=True,
-        )
 
 
 class EventCancelConfirmView(discord.ui.View):
