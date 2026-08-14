@@ -11,15 +11,17 @@ def is_guild_admin(member: discord.Member) -> bool:
 
 
 def can_edit_config(member: discord.Member, config_role_id: int | None = None) -> bool:
-    if config_role_id is not None and any(role.id == config_role_id for role in member.roles):
+    if config_role_id is None:
+        return True
+    if any(role.id == config_role_id for role in member.roles):
         return True
     return is_guild_admin(member)
 
 
 def config_denied_reason(config_role_id: int | None) -> str:
-    if config_role_id is not None:
-        return "Нужна роль доступа к /config."
-    return "Нужны права администратора или Manage Server."
+    if config_role_id is None:
+        return "Нужны права администратора или Manage Server."
+    return "Нужна роль доступа к /config или права администратора."
 
 
 def bot_cannot_send_reason(guild: discord.Guild, channel: discord.abc.Snowflake) -> str | None:
