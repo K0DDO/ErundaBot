@@ -15,6 +15,8 @@ from bot.database.models import Birthday
 log = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+DEPRECATED_GROQ_MODELS = {"llama-3.1-8b-instant"}
 LATIN_WORD_RE = re.compile(r"\b[A-Za-z]{2,}\b")
 SIGN_OFF_RE = re.compile(
     r"(?im)^\s*(sincerely|с уважением|с любовью|your friends|друзья сервера).*$"
@@ -35,7 +37,8 @@ SYSTEM_PROMPT = (
 class AIService:
     def __init__(self) -> None:
         self.api_key = os.getenv("GROQ_API_KEY", "").strip()
-        self.model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip() or "llama-3.1-8b-instant"
+        raw_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
+        self.model = DEFAULT_GROQ_MODEL if raw_model in DEPRECATED_GROQ_MODELS else raw_model
 
     @property
     def enabled(self) -> bool:
