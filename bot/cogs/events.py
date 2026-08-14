@@ -73,51 +73,6 @@ class EventsCog(commands.Cog):
             embed=base_embed(title="Мероприятия", description="\n".join(lines)),
         )
 
-    @event.command(name="info", description="Информация о мероприятии")
-    @app_commands.describe(event_id="ID мероприятия")
-    @app_commands.guild_only()
-    async def event_info(self, interaction: discord.Interaction, event_id: int) -> None:
-        if interaction.guild is None:
-            return
-        event = await self.bot.event_service.get(event_id)
-        if event is None or event.guild_id != interaction.guild.id:
-            await interaction.response.send_message(embed=error_embed("Не найдено"), ephemeral=True)
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        count = await self.bot.event_service.participant_count(event.id)
-        await interaction.response.send_message(
-            embed=event_embed(self.bot, event, config.timezone, count),
-        )
-
-    @event.command(name="join", description="Присоединиться к мероприятию")
-    @app_commands.describe(event_id="ID мероприятия")
-    @app_commands.guild_only()
-    async def event_join(self, interaction: discord.Interaction, event_id: int) -> None:
-        try:
-            event, count = await self.bot.event_service.join(event_id, interaction.user.id)
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        config = await self.bot.config_service.get(event.guild_id)
-        await interaction.response.send_message(
-            embed=success_embed("Вы участвуете", f"Участников: {count}"),
-            ephemeral=True,
-        )
-
-    @event.command(name="leave", description="Покинуть мероприятие")
-    @app_commands.describe(event_id="ID мероприятия")
-    @app_commands.guild_only()
-    async def event_leave(self, interaction: discord.Interaction, event_id: int) -> None:
-        try:
-            event, count = await self.bot.event_service.leave(event_id, interaction.user.id)
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        await interaction.response.send_message(
-            embed=success_embed("Вы вышли", f"Участников: {count}"),
-            ephemeral=True,
-        )
-
     @event.command(name="cancel", description="Отменить мероприятие (организатор)")
     @app_commands.describe(event_id="ID мероприятия")
     @app_commands.guild_only()
