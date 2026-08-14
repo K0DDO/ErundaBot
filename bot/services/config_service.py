@@ -25,6 +25,8 @@ class ConfigService:
             "events_channel_id",
             "proposals_channel_id",
             "quotes_channel_id",
+            "fest_channel_id",
+            "tgk_channel_id",
         }
         if field not in allowed:
             raise ValueError(f"Invalid channel field: {field}")
@@ -54,6 +56,7 @@ class ConfigService:
         bounds: dict[str, tuple[int, int]] = {
             "birthday_reminder_days": (0, 30),
             "event_reminder_minutes": (5, 10080),
+            "fest_reminder_minutes": (0, 10080),
             "proposal_duration_hours": (1, 720),
             "proposal_quorum": (1, 1000),
         }

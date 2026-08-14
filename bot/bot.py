@@ -16,9 +16,11 @@ from bot.services.birthday_star_service import BirthdayStarService
 from bot.services.config_service import ConfigService
 from bot.services.democracy_service import DemocracyService
 from bot.services.event_service import EventService
+from bot.services.festival_service import FestivalService
 from bot.services.quote_service import QuoteService
 from bot.services.role_service import RoleService
 from bot.services.statistics_service import StatisticsService
+from bot.services.tgk_service import TgkService
 from bot.tasks.background import BackgroundTasks
 
 log = logging.getLogger(__name__)
@@ -28,6 +30,8 @@ COG_MODULES = (
     "bot.cogs.birthdays",
     "bot.cogs.statistics",
     "bot.cogs.events",
+    "bot.cogs.festival",
+    "bot.cogs.tgk",
     "bot.cogs.quotes",
     "bot.cogs.roles",
     "bot.cogs.democracy",
@@ -59,6 +63,8 @@ class ErundaBot(commands.Bot):
         self.ai_service = AIService()
         self.statistics_service = StatisticsService(self.db)
         self.event_service = EventService(self.db)
+        self.festival_service = FestivalService(self.db)
+        self.tgk_service = TgkService(self.db)
         self.quote_service = QuoteService(self.db)
         self.role_service = RoleService(self.db)
         self.democracy_service = DemocracyService(self.db)

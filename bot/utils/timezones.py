@@ -57,6 +57,19 @@ def parse_event_datetime(date_str: str, time_str: str, tz_name: str) -> datetime
         raise ValueError("Некорректная дата или время") from exc
 
 
+def format_countdown(delta_seconds: float) -> str:
+    if delta_seconds <= 0:
+        return "сеанс уже начался"
+    total = int(delta_seconds)
+    hours, rem = divmod(total, 3600)
+    minutes = rem // 60
+    if hours and minutes:
+        return f"{hours} ч {minutes} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{max(minutes, 1)} мин"
+
+
 def format_datetime_local(dt: datetime, tz_name: str) -> tuple[str, str]:
     """Return (date_label, time_label) in guild timezone."""
     local = dt.astimezone(ZoneInfo(tz_name))

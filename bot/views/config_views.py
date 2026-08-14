@@ -21,6 +21,8 @@ CHANNEL_OPTIONS = (
     ("events_channel_id", "Ивенты"),
     ("proposals_channel_id", "Голосования"),
     ("quotes_channel_id", "Цитаты"),
+    ("fest_channel_id", "Кинофестиваль"),
+    ("tgk_channel_id", "ТГК"),
 )
 
 FLAG_OPTIONS = (
@@ -42,7 +44,9 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
             f"Дни рождения: {channel_mention(config.birthday_channel_id)}\n"
             f"Ивенты: {channel_mention(config.events_channel_id)}\n"
             f"Голосования: {channel_mention(config.proposals_channel_id)}\n"
-            f"Цитаты: {channel_mention(config.quotes_channel_id)}"
+            f"Цитаты: {channel_mention(config.quotes_channel_id)}\n"
+            f"Кинофестиваль: {channel_mention(config.fest_channel_id)}\n"
+            f"ТГК: {channel_mention(config.tgk_channel_id)}"
         ),
         inline=False,
     )
@@ -62,6 +66,7 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
             f"Поздравления: `{config.birthday_announce_time}`\n"
             f"Напоминание ДР (дней): `{config.birthday_reminder_days}`\n"
             f"Напоминание ивента (мин): `{config.event_reminder_minutes}`\n"
+            f"Напоминание кино (мин): `{config.fest_reminder_minutes}`\n"
             f"Длительность голосования (ч): `{config.proposal_duration_hours}`\n"
             f"Кворум: `{config.proposal_quorum}`\n"
             f"Порог принятия: `{config.proposal_pass_ratio:.0%}`"
@@ -208,6 +213,13 @@ class ChannelPicker(discord.ui.ChannelSelect):
             from bot.views.birthday_views import refresh_birthday_board
 
             await refresh_birthday_board(self.parent_view.bot, interaction.guild)
+        if field == "tgk_channel_id" and interaction.guild is not None:
+            await self.parent_view.bot.db.set_tgk_board_message_id(
+                self.parent_view.guild_id, None
+            )
+            from bot.views.tgk_views import refresh_tgk_board
+
+            await refresh_tgk_board(self.parent_view.bot, interaction.guild)
 
 
 class ChannelConfigView(discord.ui.View):
@@ -305,6 +317,12 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
         required=True,
         max_length=5,
     )
+    fest_minutes = discord.ui.TextInput(
+        label="Напоминание кино (минут, 0 = выкл)",
+        placeholder="60",
+        required=True,
+        max_length=5,
+    )
 
     def __init__(self, bot: ErundaBot, guild_id: int) -> None:
         super().__init__()
@@ -322,10 +340,15 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
                 "birthday_reminder_days",
                 int(str(self.reminder_days.value).strip()),
             )
-            config = await self.bot.config_service.set_int(
+            await self.bot.config_service.set_int(
                 self.guild_id,
                 "event_reminder_minutes",
                 int(str(self.event_minutes.value).strip()),
+            )
+            config = await self.bot.config_service.set_int(
+                self.guild_id,
+                "fest_reminder_minutes",
+                int(str(self.fest_minutes.value).strip()),
             )
         except ValueError as exc:
             await interaction.response.send_message(
@@ -340,7 +363,8 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
                 (
                     f"Поздравления: `{config.birthday_announce_time}`\n"
                     f"ДР заранее: `{config.birthday_reminder_days}` дн.\n"
-                    f"Ивент: `{config.event_reminder_minutes}` мин."
+                    f"Ивент: `{config.event_reminder_minutes}` мин.\n"
+                    f"Кино: `{config.fest_reminder_minutes}` мин."
                 ),
             ),
             ephemeral=True,

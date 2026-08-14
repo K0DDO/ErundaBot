@@ -18,9 +18,12 @@ from .models import (
     BirthdayStarGrant,
     CustomRole,
     Event,
+    Festival,
+    FestivalFilm,
     GuildConfig,
     Proposal,
     Quote,
+    TgChannel,
 )
 
 log = logging.getLogger(__name__)
@@ -35,6 +38,8 @@ CREATE TABLE IF NOT EXISTS guilds (
     events_channel_id INTEGER,
     proposals_channel_id INTEGER,
     quotes_channel_id INTEGER,
+    fest_channel_id INTEGER,
+    tgk_channel_id INTEGER,
     statistics_enabled INTEGER NOT NULL DEFAULT 1,
     personal_roles_enabled INTEGER NOT NULL DEFAULT 1,
     auto_execute_proposals INTEGER NOT NULL DEFAULT 0,
@@ -48,6 +53,10 @@ CREATE TABLE IF NOT EXISTS guilds (
     proposal_pass_ratio REAL NOT NULL DEFAULT 0.5,
     birthday_board_message_id INTEGER,
     birthday_star_role_id INTEGER,
+    fest_staff_role_id INTEGER,
+    fest_ping_role_id INTEGER,
+    fest_reminder_minutes INTEGER NOT NULL DEFAULT 60,
+    tgk_board_message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -219,6 +228,45 @@ CREATE TABLE IF NOT EXISTS event_notifications (
     sent_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (event_id, kind),
     FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS festivals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    number INTEGER NOT NULL,
+    starts_at TEXT NOT NULL,
+    channel_id INTEGER,
+    message_id INTEGER,
+    winner_user_id INTEGER,
+    winner_film TEXT,
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'closed')),
+    reminder_sent INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (guild_id, number),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS festival_films (
+    festival_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (festival_id, user_id),
+    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS tg_channels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    url TEXT NOT NULL,
+    image_url TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (guild_id, number),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
 );
 """
 
@@ -396,6 +444,60 @@ class Database:
                 "ON events (guild_id, number)"
             )
             await self._db.execute("PRAGMA user_version = 9")
+        if version < 10:
+            for sql in (
+                "ALTER TABLE guilds ADD COLUMN fest_channel_id INTEGER",
+                "ALTER TABLE guilds ADD COLUMN tgk_channel_id INTEGER",
+                "ALTER TABLE guilds ADD COLUMN fest_staff_role_id INTEGER",
+                "ALTER TABLE guilds ADD COLUMN fest_ping_role_id INTEGER",
+                "ALTER TABLE guilds ADD COLUMN fest_reminder_minutes INTEGER NOT NULL DEFAULT 60",
+                "ALTER TABLE guilds ADD COLUMN tgk_board_message_id INTEGER",
+            ):
+                try:
+                    await self._db.execute(sql)
+                except Exception:
+                    pass
+            await self._db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS festivals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    number INTEGER NOT NULL,
+                    starts_at TEXT NOT NULL,
+                    channel_id INTEGER,
+                    message_id INTEGER,
+                    winner_user_id INTEGER,
+                    winner_film TEXT,
+                    status TEXT NOT NULL DEFAULT 'open'
+                        CHECK (status IN ('open', 'closed')),
+                    reminder_sent INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (guild_id, number),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS festival_films (
+                    festival_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (festival_id, user_id),
+                    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS tg_channels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    number INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    image_url TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    UNIQUE (guild_id, number),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                );
+                """
+            )
+            await self._db.execute("PRAGMA user_version = 10")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1490,3 +1592,208 @@ class Database:
         )
         row = await cursor.fetchone()
         return int(row["yes_count"] or 0), int(row["no_count"] or 0)
+
+    # --- Festivals ---
+
+    async def next_festival_number(self, guild_id: int) -> int:
+        cursor = await self.connection.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM festivals WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 1
+
+    async def create_festival(self, guild_id: int, starts_at: str) -> Festival:
+        await self.ensure_guild(guild_id)
+        number = await self.next_festival_number(guild_id)
+        cursor = await self.connection.execute(
+            """
+            INSERT INTO festivals (guild_id, number, starts_at)
+            VALUES (?, ?, ?)
+            """,
+            (guild_id, number, starts_at),
+        )
+        await self.connection.commit()
+        festival = await self.get_festival(cursor.lastrowid)
+        assert festival is not None
+        return festival
+
+    async def get_festival(self, festival_id: int) -> Festival | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festivals WHERE id = ?",
+            (festival_id,),
+        )
+        row = await cursor.fetchone()
+        return Festival.from_row(row) if row else None
+
+    async def get_open_festival(self, guild_id: int) -> Festival | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festivals WHERE guild_id = ? AND status = 'open' ORDER BY number DESC LIMIT 1",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return Festival.from_row(row) if row else None
+
+    async def list_open_festivals(self) -> list[Festival]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festivals WHERE status = 'open' ORDER BY starts_at",
+        )
+        rows = await cursor.fetchall()
+        return [Festival.from_row(r) for r in rows]
+
+    async def update_festival(self, festival_id: int, **fields: Any) -> Festival:
+        allowed = {
+            "starts_at",
+            "channel_id",
+            "message_id",
+            "winner_user_id",
+            "winner_film",
+            "status",
+            "reminder_sent",
+        }
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"Unknown festival fields: {sorted(unknown)}")
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [festival_id]
+        await self.connection.execute(
+            f"UPDATE festivals SET {assignments} WHERE id = ?",
+            values,
+        )
+        await self.connection.commit()
+        festival = await self.get_festival(festival_id)
+        assert festival is not None
+        return festival
+
+    async def upsert_festival_film(self, festival_id: int, user_id: int, title: str) -> FestivalFilm:
+        await self.connection.execute(
+            """
+            INSERT INTO festival_films (festival_id, user_id, title)
+            VALUES (?, ?, ?)
+            ON CONFLICT(festival_id, user_id) DO UPDATE SET
+                title = excluded.title
+            """,
+            (festival_id, user_id, title),
+        )
+        await self.connection.commit()
+        cursor = await self.connection.execute(
+            "SELECT * FROM festival_films WHERE festival_id = ? AND user_id = ?",
+            (festival_id, user_id),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        return FestivalFilm.from_row(row)
+
+    async def remove_festival_film(self, festival_id: int, user_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM festival_films WHERE festival_id = ? AND user_id = ?",
+            (festival_id, user_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def get_festival_film(self, festival_id: int, user_id: int) -> FestivalFilm | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festival_films WHERE festival_id = ? AND user_id = ?",
+            (festival_id, user_id),
+        )
+        row = await cursor.fetchone()
+        return FestivalFilm.from_row(row) if row else None
+
+    async def list_festival_films(self, festival_id: int) -> list[FestivalFilm]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festival_films WHERE festival_id = ? ORDER BY created_at, user_id",
+            (festival_id,),
+        )
+        rows = await cursor.fetchall()
+        return [FestivalFilm.from_row(r) for r in rows]
+
+    # --- Telegram channels ---
+
+    async def next_tg_channel_number(self, guild_id: int) -> int:
+        cursor = await self.connection.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM tg_channels WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 1
+
+    async def add_tg_channel(
+        self,
+        guild_id: int,
+        user_id: int,
+        title: str,
+        url: str,
+        image_url: str | None,
+    ) -> TgChannel:
+        await self.ensure_guild(guild_id)
+        number = await self.next_tg_channel_number(guild_id)
+        cursor = await self.connection.execute(
+            """
+            INSERT INTO tg_channels (guild_id, user_id, number, title, url, image_url)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, user_id, number, title, url, image_url),
+        )
+        await self.connection.commit()
+        channel = await self.get_tg_channel(cursor.lastrowid)
+        assert channel is not None
+        return channel
+
+    async def get_tg_channel(self, channel_id: int) -> TgChannel | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM tg_channels WHERE id = ?",
+            (channel_id,),
+        )
+        row = await cursor.fetchone()
+        return TgChannel.from_row(row) if row else None
+
+    async def get_tg_channel_by_number(self, guild_id: int, number: int) -> TgChannel | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM tg_channels WHERE guild_id = ? AND number = ?",
+            (guild_id, number),
+        )
+        row = await cursor.fetchone()
+        return TgChannel.from_row(row) if row else None
+
+    async def list_tg_channels(self, guild_id: int) -> list[TgChannel]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM tg_channels WHERE guild_id = ? ORDER BY number",
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        return [TgChannel.from_row(r) for r in rows]
+
+    async def delete_tg_channel(self, channel_id: int, guild_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM tg_channels WHERE id = ? AND guild_id = ?",
+            (channel_id, guild_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def renumber_tg_channels(self, guild_id: int) -> list[TgChannel]:
+        channels = await self.list_tg_channels(guild_id)
+        if not channels:
+            return []
+        for index, channel in enumerate(channels, start=1):
+            await self.connection.execute(
+                "UPDATE tg_channels SET number = ? WHERE id = ?",
+                (-index, channel.id),
+            )
+        for index, channel in enumerate(channels, start=1):
+            await self.connection.execute(
+                "UPDATE tg_channels SET number = ? WHERE id = ?",
+                (index, channel.id),
+            )
+            channel.number = index
+        await self.connection.commit()
+        return channels
+
+    async def set_tgk_board_message_id(self, guild_id: int, message_id: int | None) -> None:
+        await self.ensure_guild(guild_id)
+        await self.connection.execute(
+            "UPDATE guilds SET tgk_board_message_id = ?, updated_at = datetime('now') WHERE guild_id = ?",
+            (message_id, guild_id),
+        )
+        await self.connection.commit()

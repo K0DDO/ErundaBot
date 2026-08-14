@@ -25,7 +25,7 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 - Python 3.12+, `discord.py>=2.6`, aiosqlite, Docker + GitHub Actions deploy (`DEPLOY.md`)
 - Intents: members, message content, `emojis_and_stickers`
 - Env: `DISCORD_TOKEN`, `DATABASE_PATH`, `DEFAULT_TIMEZONE`, `GROQ_API_KEY`, `GROQ_MODEL` (дефолт `openai/gpt-oss-20b`; `llama-3.1-8b-instant` снимают 16.08.2026)
-- Slash-группы в Discord визуально не группируются в пикере; группы уже есть (`quote`, `birthday`, `myrole`, `event`, `proposal`)
+- Slash-группы в Discord визуально не группируются в пикере; группы уже есть (`quote`, `birthday`, `myrole`, `event`, `proposal`, `fest`, `tgk`)
 
 ## Команды (актуально)
 
@@ -35,6 +35,8 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 /profile [user]          # ephemeral
 /top
 /event create|list|cancel
+/fest add|remove|role|new|export|winner|ping
+/tgk add|remove
 /quote add|edit|delete|cleanup|random|user
 Apps → Add quote
 /myrole edit|delete
@@ -48,6 +50,14 @@ Apps → Add quote
 ### Ивенты
 
 Slash только create / list / cancel. Кнопки на карточке: «Участвовать» и «Не участвовать». Описание курсивом, создатель первый в «Участники». `/event cancel` показывает карточку и спрашивает «Удалить этот ивент?» (как цитаты). После отмены в оригинале жирно **Ивент отменён**, кнопки снимаются, запись удаляется, номера сдвигаются. `/event list` — только ещё не начавшиеся, ссылка на оригинал. Через 2 часа после старта карточка завершается и запись удаляется. `PUBLIC_CONFIG_ENABLED = True` — `/config` временно для всех.
+
+### Кинофестиваль
+
+Канал в `/config`. Одно сообщение = `#N`: список фильмов + победитель внизу. Один фильм с человека, повторный add заменяет. Все: `add`/`remove` и кнопка «Предложить фильм». Роль «Кино» (не админ): `new`, `winner`, `export`, `ping`. `/fest role` — дебаг, любой берёт/снимает роль. `/fest winner @user` сам подставляет его фильм. `/fest export` — display names для колеса. `/fest ping роль` — считает время до сеанса; роль запоминается для автонапоминания (`fest_reminder_minutes`, 0 = выкл).
+
+### ТГК
+
+Несколько каналов на человека: название + `https://t.me/...`. Картинка с og:image публичного канала, иначе без неё. Доска в канале из `/config`. `/tgk add`, `/tgk remove номер`.
 
 ### Цитаты (заморожено)
 
@@ -70,19 +80,19 @@ Slash только create / list / cancel. Кнопки на карточке: �
 ## Структура
 
 ```text
-bot/cogs/        config, birthdays, statistics, events, quotes, roles, democracy
+bot/cogs/        config, birthdays, statistics, events, festival, tgk, quotes, roles, democracy
 bot/database/    database.py (миграции в _migrate), models.py
-bot/services/    * + ai_service.py (Groq), birthday_star_service.py
-bot/views/       * + quote_views.py
+bot/services/    * + ai_service.py (Groq), birthday_star_service.py, festival_service.py, tgk_service.py
+bot/views/       * + quote_views.py, festival_views.py, tgk_views.py
 bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v9)
+## БД (миграции до v10)
 
-Таблицы: `guilds`, `users`, `birthdays`, `message_statistics`, `voice_sessions`, `reaction_statistics`, `events`, `event_participants`, `quotes`, `custom_roles`, `proposals`, `proposal_votes`, `birthday_star_grants`, `birthday_notifications`, `event_notifications`.
+Таблицы: … `festivals`, `festival_films`, `tg_channels`.
 
-Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
+Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
 
 `Database.close()` должен оставаться отдельным методом — не вшивать его в `_migrate` (уже ломалось).
 
@@ -90,6 +100,7 @@ bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timez
 
 - `birthday_loop` — поздравления и напоминания
 - `event_loop` — напоминания, старт, auto-complete
+- `fest_loop` — напоминание о сеансе по `fest_reminder_minutes`
 - `proposal_loop` — закрытие голосований, auto-actions
 
 ## Known issues
@@ -99,6 +110,7 @@ bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timez
 
 ## Recent changes (2026-08)
 
+- Кинофестиваль и ТГК: сбор фильмов, победитель по имени, доска каналов
 - Ивенты: гильдийные номера, удаление после завершения, `/config` временно для всех
 - Карточка ивента: курсивное описание, участники списком, создатель первый
 - Groq: дефолт `openai/gpt-oss-20b` вместо снятой `llama-3.1-8b-instant`

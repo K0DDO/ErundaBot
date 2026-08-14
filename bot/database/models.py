@@ -15,6 +15,8 @@ class GuildConfig:
     events_channel_id: int | None = None
     proposals_channel_id: int | None = None
     quotes_channel_id: int | None = None
+    fest_channel_id: int | None = None
+    tgk_channel_id: int | None = None
     statistics_enabled: bool = True
     personal_roles_enabled: bool = True
     auto_execute_proposals: bool = False
@@ -28,6 +30,10 @@ class GuildConfig:
     proposal_pass_ratio: float = 0.5
     birthday_board_message_id: int | None = None
     birthday_star_role_id: int | None = None
+    fest_staff_role_id: int | None = None
+    fest_ping_role_id: int | None = None
+    fest_reminder_minutes: int = 60
+    tgk_board_message_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -40,6 +46,8 @@ class GuildConfig:
             events_channel_id=row["events_channel_id"],
             proposals_channel_id=row["proposals_channel_id"],
             quotes_channel_id=row["quotes_channel_id"],
+            fest_channel_id=row["fest_channel_id"] if "fest_channel_id" in row.keys() else None,
+            tgk_channel_id=row["tgk_channel_id"] if "tgk_channel_id" in row.keys() else None,
             statistics_enabled=bool(row["statistics_enabled"]),
             personal_roles_enabled=bool(row["personal_roles_enabled"]),
             auto_execute_proposals=bool(row["auto_execute_proposals"]),
@@ -56,6 +64,18 @@ class GuildConfig:
             else None,
             birthday_star_role_id=row["birthday_star_role_id"]
             if "birthday_star_role_id" in row.keys()
+            else None,
+            fest_staff_role_id=row["fest_staff_role_id"]
+            if "fest_staff_role_id" in row.keys()
+            else None,
+            fest_ping_role_id=row["fest_ping_role_id"]
+            if "fest_ping_role_id" in row.keys()
+            else None,
+            fest_reminder_minutes=int(row["fest_reminder_minutes"])
+            if "fest_reminder_minutes" in row.keys() and row["fest_reminder_minutes"] is not None
+            else 60,
+            tgk_board_message_id=row["tgk_board_message_id"]
+            if "tgk_board_message_id" in row.keys()
             else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -253,6 +273,75 @@ class Proposal:
         )
 
 
+@dataclass(slots=True)
+class Festival:
+    id: int
+    guild_id: int
+    number: int
+    starts_at: str
+    channel_id: int | None
+    message_id: int | None
+    winner_user_id: int | None
+    winner_film: str | None
+    status: str
+    reminder_sent: bool = False
+
+    @classmethod
+    def from_row(cls, row: Any) -> Festival:
+        keys = row.keys()
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            number=row["number"],
+            starts_at=row["starts_at"],
+            channel_id=row["channel_id"],
+            message_id=row["message_id"],
+            winner_user_id=row["winner_user_id"],
+            winner_film=row["winner_film"],
+            status=row["status"],
+            reminder_sent=bool(row["reminder_sent"]) if "reminder_sent" in keys else False,
+        )
+
+
+@dataclass(slots=True)
+class FestivalFilm:
+    festival_id: int
+    user_id: int
+    title: str
+
+    @classmethod
+    def from_row(cls, row: Any) -> FestivalFilm:
+        return cls(
+            festival_id=row["festival_id"],
+            user_id=row["user_id"],
+            title=row["title"],
+        )
+
+
+@dataclass(slots=True)
+class TgChannel:
+    id: int
+    guild_id: int
+    user_id: int
+    number: int
+    title: str
+    url: str
+    image_url: str | None = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> TgChannel:
+        keys = row.keys()
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            user_id=row["user_id"],
+            number=row["number"],
+            title=row["title"],
+            url=row["url"],
+            image_url=row["image_url"] if "image_url" in keys else None,
+        )
+
+
 # Columns that /config may update (whitelist).
 GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
     {
@@ -261,6 +350,8 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "events_channel_id",
         "proposals_channel_id",
         "quotes_channel_id",
+        "fest_channel_id",
+        "tgk_channel_id",
         "statistics_enabled",
         "personal_roles_enabled",
         "auto_execute_proposals",
@@ -273,5 +364,9 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "proposal_quorum",
         "proposal_pass_ratio",
         "birthday_star_role_id",
+        "fest_staff_role_id",
+        "fest_ping_role_id",
+        "fest_reminder_minutes",
+        "tgk_board_message_id",
     }
 )
