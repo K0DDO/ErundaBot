@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from bot.bot import ErundaBot
     from bot.database.models import Festival
 
-FEST_MENTIONS = discord.AllowedMentions(everyone=False, users=True, roles=True)
+FEST_MENTIONS = discord.AllowedMentions(everyone=False, users=False, roles=True)
 log = logging.getLogger(__name__)
 
 
