@@ -90,29 +90,6 @@ class FestivalCog(commands.Cog):
         await refresh_festival_message(self.bot, festival)
         await interaction.response.send_message(embed=success_embed("Фильм убран"), ephemeral=True)
 
-    @fest.command(name="block", description="Запретить предлагать фильм")
-    @app_commands.describe(title="Название, которое больше нельзя предлагать")
-    @app_commands.guild_only()
-    async def fest_block(self, interaction: discord.Interaction, title: str) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        try:
-            await self.bot.festival_service.require_staff(interaction.user, config)
-            cleaned, festival = await self.bot.festival_service.block_film(
-                interaction.guild.id,
-                title,
-            )
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        if festival is not None:
-            await refresh_festival_message(self.bot, festival)
-        await interaction.response.send_message(
-            embed=success_embed("Фильм в блоке", f"**{cleaned}** больше нельзя предлагать"),
-            ephemeral=True,
-        )
-
     @fest.command(name="role", description="Взять / снять роль Кино (дебаг)")
     @app_commands.guild_only()
     async def fest_role(self, interaction: discord.Interaction) -> None:
@@ -128,47 +105,6 @@ class FestivalCog(commands.Cog):
             return
         text = "Роль «Кино» выдана" if added else "Роль «Кино» снята"
         await interaction.response.send_message(embed=success_embed(text), ephemeral=True)
-
-    @fest.command(name="preview", description="Дебаг: карточка фестиваля только тебе")
-    @app_commands.guild_only()
-    async def fest_preview(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        try:
-            festival = await self.bot.festival_service.require_open(interaction.guild.id)
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        view = await festival_card(self.bot, interaction.guild, festival)
-        await interaction.response.send_message(view=view, ephemeral=True)
-
-    @fest.command(name="test-ping", description="Дебаг: пинг до сеанса только тебе")
-    @app_commands.describe(role="Кого пингануть, по умолчанию роль из прошлого ping")
-    @app_commands.guild_only()
-    async def fest_test_ping(
-        self,
-        interaction: discord.Interaction,
-        role: discord.Role | None = None,
-    ) -> None:
-        if interaction.guild is None:
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        ping_role = role
-        if ping_role is None and config.fest_ping_role_id:
-            ping_role = interaction.guild.get_role(config.fest_ping_role_id)
-        if ping_role is None:
-            await interaction.response.send_message(
-                embed=error_embed("Укажи роль или сначала вызови /fest ping"),
-                ephemeral=True,
-            )
-            return
-        try:
-            festival = await self.bot.festival_service.require_open(interaction.guild.id)
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        text = self.bot.festival_service.ping_text(festival, config.timezone, ping_role)
-        await interaction.response.send_message(text, ephemeral=True)
 
     @fest.command(name="new", description="Открыть новый кинофестиваль")
     @app_commands.guild_only()

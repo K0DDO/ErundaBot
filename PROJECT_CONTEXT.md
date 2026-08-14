@@ -35,7 +35,7 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 /profile [user]          # ephemeral
 /top
 /event create|list|cancel
-/fest add|remove|role|new|edit|delete|export|winner|ping|preview|test-ping|block
+/fest add|remove|role|new|edit|delete|export|winner|ping
 /tgk add|remove|list
 /quote add|edit|delete|cleanup|random|user
 Apps → Add quote
@@ -43,7 +43,7 @@ Apps → Add quote
 /proposal create|list|info|cancel
 ```
 
-Удалены и не возвращать без запроса: `/birthday list|next|preview` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`; `/fest list`. Вернули по запросу: `/birthday test-announce` (ephemeral ИИ-поздравление).
+Удалены и не возвращать без запроса: `/birthday list|next|preview` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`; `/fest list|block|preview|test-ping`. Вернули по запросу: `/birthday test-announce` (ephemeral ИИ-поздравление).
 
 ## Модули
 
@@ -53,7 +53,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Кинофестиваль
 
-Канал в `/config`. Пока канала нет — `/fest new` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`, как доска ДР: сеанс **МСК** + серая строка «местное время» (`<t:unix:f>` у каждого своё). В списке заявок рядом с названием возраст (`12+`, `🔞 NSFW`). Маркеры `nsfw` / `нсфв` / `18+` в названии снимаются и помечают заявку; иначе рейтинг с iTunes, Викиданных или TMDB. При add/replace возраст пересчитывается заново. Между сеансом, списком и победителем — пустые промежутки (`Separator`). Закрытый фестиваль: «Сеанс: закончился». После `/fest winner` пингуется только роль из `/config` → Роли, снизу большой постер (MediaGallery), название крупно со случайным эмодзи сервера. Победивший фильм больше нельзя предлагать ни в каком фестивале (скобки, запятые и регистр не важны: `(1993)` и `1993` — одно и то же). Победитель прошлого фестиваля не предлагает в следующем, со через один — снова можно. `/fest block название` — ручной блок (роль «Кино»), снимает заявку с текущего если она есть. Один фильм с человека. Все: `add`/`remove`. Роль «Кино»: `new`, `edit`, `delete`, `winner`, `export`, `ping`, `block`. `/fest delete` без номера — текущий открытый, с номером — любой старый (`#1`, `#2`…); подтверждение показывает карточку, оставшиеся перенумеровываются, блок победившего фильма снимается если он больше нигде не выигрывал. `/fest ping` — если сеанс уже начался, «мы уже смотрим фильм». При старте бот обновляет карточки.
+Канал в `/config`. Пока канала нет — `/fest new` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`, нумерация с **#29**. Как доска ДР: сеанс **МСК** + серая строка «местное время» (`<t:unix:f>` у каждого своё). В списке заявок рядом с названием возраст (`12+`, `🔞 NSFW`). Маркеры `nsfw` / `нсфв` / `18+` в названии снимаются и помечают заявку; иначе рейтинг с iTunes, Викиданных или TMDB. При add/replace возраст пересчитывается заново. Между сеансом, списком и победителем — пустые промежутки (`Separator`). Закрытый фестиваль: «Сеанс: закончился». После `/fest winner` пингуется только роль из `/config` → Роли, снизу большой постер (MediaGallery), название крупно со случайным эмодзи сервера. Победивший фильм больше нельзя предлагать ни в каком фестивале (скобки, запятые и регистр не важны: `(1993)` и `1993` — одно и то же). Победитель прошлого фестиваля не предлагает в следующем, со через один — снова можно. Один фильм с человека. Все: `add`/`remove`. Роль «Кино» **или админ** (Administrator / Manage Server): `new`, `edit`, `delete`, `winner`, `export`, `ping`. `/fest delete` без номера — текущий открытый, с номером — любой старый; подтверждение показывает карточку, оставшиеся перенумеровываются с #29, блок победившего фильма снимается если он больше нигде не выигрывал. `/fest ping` — если сеанс уже начался, «мы уже смотрим фильм». При старте бот обновляет карточки.
 
 ### ТГК
 
@@ -88,9 +88,9 @@ bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v14)
+## БД (миграции до v15)
 
-Таблицы: … `festivals`, `festival_films` (`image_url` постер, `age_rating` вроде `12+` / `NSFW`), `festival_blocked_films` (прошлые победители и ручной блок), `tg_channels`.
+Таблицы: … `festivals` (номера с 29), `festival_films` (`image_url` постер, `age_rating` вроде `12+` / `NSFW`), `festival_blocked_films` (прошлые победители и ручной блок), `tg_channels`.
 
 Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
 

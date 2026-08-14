@@ -16,7 +16,7 @@ import discord
 from bot.database.database import Database
 from bot.database.models import Festival, FestivalFilm, GuildConfig
 from bot.utils.birthday_emojis import escape_markdown_inline, guild_emoji_pool
-from bot.utils.permissions import fetch_bot_member
+from bot.utils.permissions import fetch_bot_member, is_guild_admin
 from bot.utils.timezones import format_countdown, format_datetime_local, parse_event_datetime
 
 FEST_ROLE_NAME = "Кино"
@@ -480,13 +480,15 @@ class FestivalService:
         return festival
 
     def has_staff(self, member: discord.Member, config: GuildConfig) -> bool:
+        if is_guild_admin(member):
+            return True
         if config.fest_staff_role_id is None:
             return False
         return any(role.id == config.fest_staff_role_id for role in member.roles)
 
     async def require_staff(self, member: discord.Member, config: GuildConfig) -> None:
         if not self.has_staff(member, config):
-            raise ValueError("Нужна роль «Кино». Возьми её через /fest role")
+            raise ValueError("Нужна роль «Кино» или права администратора")
 
     async def ensure_staff_role(self, guild: discord.Guild) -> discord.Role:
         config = await self.db.ensure_guild(guild.id)

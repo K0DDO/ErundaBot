@@ -12,6 +12,8 @@ import aiosqlite
 
 from bot.utils.birthday_emojis import clean_birthday_emoji, pick_birthday_emoji
 
+FESTIVAL_START_NUMBER = 29
+
 from .models import (
     GUILD_CONFIG_FIELDS,
     Birthday,
@@ -573,6 +575,37 @@ class Database:
             except Exception:
                 pass
             await self._db.execute("PRAGMA user_version = 14")
+        if version < 15:
+            cursor = await self._db.execute(
+                "SELECT guild_id FROM festivals GROUP BY guild_id"
+            )
+            guild_ids = [int(row["guild_id"]) for row in await cursor.fetchall()]
+            for guild_id in guild_ids:
+                cursor = await self._db.execute(
+                    """
+                    SELECT id, number FROM festivals
+                    WHERE guild_id = ? ORDER BY number ASC, id ASC
+                    """,
+                    (guild_id,),
+                )
+                rows = await cursor.fetchall()
+                if not rows:
+                    continue
+                min_number = min(int(row["number"]) for row in rows)
+                if min_number >= FESTIVAL_START_NUMBER:
+                    continue
+                offset = FESTIVAL_START_NUMBER - min_number
+                for row in rows:
+                    await self._db.execute(
+                        "UPDATE festivals SET number = ? WHERE id = ?",
+                        (-int(row["id"]), row["id"]),
+                    )
+                for row in rows:
+                    await self._db.execute(
+                        "UPDATE festivals SET number = ? WHERE id = ?",
+                        (int(row["number"]) + offset, row["id"]),
+                    )
+            await self._db.execute("PRAGMA user_version = 15")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1672,11 +1705,11 @@ class Database:
 
     async def next_festival_number(self, guild_id: int) -> int:
         cursor = await self.connection.execute(
-            "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM festivals WHERE guild_id = ?",
-            (guild_id,),
+            "SELECT COALESCE(MAX(number), ?) + 1 AS n FROM festivals WHERE guild_id = ?",
+            (FESTIVAL_START_NUMBER - 1, guild_id),
         )
         row = await cursor.fetchone()
-        return int(row["n"]) if row else 1
+        return int(row["n"]) if row else FESTIVAL_START_NUMBER
 
     async def create_festival(self, guild_id: int, starts_at: str) -> Festival:
         await self.ensure_guild(guild_id)
@@ -1759,12 +1792,12 @@ class Database:
         festivals = [Festival.from_row(row) for row in await cursor.fetchall()]
         if not festivals:
             return []
-        for index, festival in enumerate(festivals, start=1):
+        for index, festival in enumerate(festivals, start=FESTIVAL_START_NUMBER):
             await self.connection.execute(
                 "UPDATE festivals SET number = ? WHERE id = ?",
                 (-index, festival.id),
             )
-        for index, festival in enumerate(festivals, start=1):
+        for index, festival in enumerate(festivals, start=FESTIVAL_START_NUMBER):
             await self.connection.execute(
                 "UPDATE festivals SET number = ? WHERE id = ?",
                 (index, festival.id),
