@@ -13,23 +13,46 @@ if TYPE_CHECKING:
     from bot.database.models import Event
 
 
+def _italic_description(raw: str) -> str | None:
+    text = raw.strip()
+    if not text:
+        return None
+    lines: list[str] = []
+    for line in text.replace("*", "\\*").split("\n"):
+        lines.append(f"*{line}*" if line.strip() else line)
+    return "\n".join(lines)
+
+
+def _participant_field(event: Event, participant_ids: list[int]) -> tuple[str, str]:
+    count = len(participant_ids)
+    if event.max_participants:
+        name = f"👥 Участники · {count}/{event.max_participants}"
+    else:
+        name = f"👥 Участники · {count}"
+    shown = participant_ids[:25]
+    lines = [f"<@{uid}>" for uid in shown]
+    extra = count - len(shown)
+    if extra > 0:
+        lines.append(f"+{extra}")
+    value = "\n".join(lines) if lines else "пока никого"
+    return name, value[:1024]
+
+
 def event_embed(
     bot: ErundaBot,
     event: Event,
     tz_name: str,
-    participant_count: int,
+    participant_ids: list[int],
 ) -> discord.Embed:
     date_label, time_label = bot.event_service.format_starts_at(event, tz_name)
-    limit = f"{participant_count}/{event.max_participants}" if event.max_participants else str(participant_count)
-    desc = event.description or "—"
     embed = base_embed(
         title=f"🎮 {event.title}",
-        description=desc,
+        description=_italic_description(event.description),
     )
     embed.add_field(name="📅 Дата", value=date_label, inline=True)
     embed.add_field(name="🕘 Время", value=time_label, inline=True)
-    embed.add_field(name="👥 Участники", value=limit, inline=True)
-    embed.add_field(name="Организатор", value=f"<@{event.organizer_id}>", inline=False)
+    field_name, field_value = _participant_field(event, participant_ids)
+    embed.add_field(name=field_name, value=field_value, inline=False)
     if event.status == "cancelled":
         embed.color = 0xED4245
         embed.set_footer(text="Ерунда • отменено")
@@ -39,7 +62,12 @@ def event_embed(
     return embed
 
 
-class EventCreateModal(discord.ui.Modal, title="Создать мероприятие"):
+async def render_event_embed(bot: ErundaBot, event: Event, tz_name: str) -> discord.Embed:
+    participants = await bot.event_service.participants_for_display(event)
+    return event_embed(bot, event, tz_name, participants)
+
+
+class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
     title_input = discord.ui.TextInput(label="Название", max_length=100, required=True)
     description = discord.ui.TextInput(
         label="Описание",
@@ -93,8 +121,7 @@ class EventCreateModal(discord.ui.Modal, title="Создать мероприя�
             )
             return
 
-        count = await self.bot.event_service.participant_count(event.id)
-        embed = event_embed(self.bot, event, self.tz_name, count)
+        embed = await render_event_embed(self.bot, event, self.tz_name)
         view = EventView(self.bot, event.id)
         message = await channel.send(embed=embed, view=view)
         await self.bot.event_service.set_message(event.id, message.id)
@@ -102,7 +129,7 @@ class EventCreateModal(discord.ui.Modal, title="Создать мероприя�
         self.bot.add_view(view, message_id=message.id)
 
         await interaction.response.send_message(
-            embed=success_embed("Мероприятие создано", f"[Открыть]({message.jump_url})"),
+            embed=success_embed("Ивент создан", f"[Открыть]({message.jump_url})"),
             ephemeral=True,
         )
 
@@ -139,8 +166,7 @@ class EventView(discord.ui.View):
 
     async def _refresh_message(self, interaction: discord.Interaction, event: Event) -> None:
         config = await self.bot.config_service.get(event.guild_id)
-        count = await self.bot.event_service.participant_count(event.id)
-        embed = event_embed(self.bot, event, config.timezone, count)
+        embed = await render_event_embed(self.bot, event, config.timezone)
         disabled = event.status != "scheduled"
         for item in self.children:
             if isinstance(item, discord.ui.Button) and item.custom_id != f"event:info:{event.id}":
@@ -168,18 +194,16 @@ class EventView(discord.ui.View):
         if event is None:
             await interaction.response.send_message(embed=error_embed("Не найдено"), ephemeral=True)
             return
-        participants = await self.bot.db.list_event_participants(event.id)
+        participants = await self.bot.event_service.participants_for_display(event)
         names = ", ".join(f"<@{uid}>" for uid in participants[:20]) or "пока никого"
         config = await self.bot.config_service.get(event.guild_id)
         date_label, time_label = self.bot.event_service.format_starts_at(event, config.timezone)
+        desc = _italic_description(event.description)
+        extra = f"📅 {date_label} 🕘 {time_label}\nУчастники: {names}"
         await interaction.response.send_message(
             embed=base_embed(
                 title=event.title,
-                description=(
-                    f"{event.description or '—'}\n\n"
-                    f"📅 {date_label} 🕘 {time_label}\n"
-                    f"Участники: {names}"
-                ),
+                description=f"{desc}\n\n{extra}" if desc else extra,
             ),
             ephemeral=True,
         )

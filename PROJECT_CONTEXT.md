@@ -47,7 +47,7 @@ Apps → Add quote
 
 ### Ивенты
 
-Slash только create / list / cancel. Join / leave / info — **кнопки** на embed: «Участвовать», «Не участвовать», «Подробнее». Views восстанавливаются после рестарта. Лимит участников, напоминания `event_reminder_minutes`, auto-complete +2ч.
+Slash только create / list / cancel. Join / leave / info — **кнопки** на embed: «Участвовать», «Не участвовать», «Подробнее». Описание курсивом, поле «Организатор» нет: создатель сразу первый в «Участники» (нельзя выйти кнопкой). Views восстанавливаются после рестарта, карточки перерисовываются. Лимит участников, напоминания `event_reminder_minutes`, auto-complete +2ч.
 
 ### Цитаты (заморожено)
 
@@ -99,6 +99,7 @@ bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timez
 
 ## Recent changes (2026-08)
 
+- Карточка ивента: курсивное описание, участники списком, создатель первый
 - Groq: дефолт `openai/gpt-oss-20b` вместо снятой `llama-3.1-8b-instant`
 - Убраны `/event join|info|leave` — функционал кнопок на карточке
 - Цитаты: карточки V2, номера, author_ids, эмодзи сервера, confirm delete, без list/import

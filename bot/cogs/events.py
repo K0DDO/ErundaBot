@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.utils.embeds import base_embed, error_embed, success_embed
-from bot.views.event_views import EventCreateModal, event_embed, register_event_views
+from bot.views.event_views import EventCreateModal, register_event_views, render_event_embed
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -31,13 +31,14 @@ class EventsCog(commands.Cog):
         try:
             events = await self.bot.db.list_scheduled_events()
             register_event_views(self.bot, events)
+            await self._resync_event_cards(events)
             log.info("Restored %s event views", len(events))
         except Exception:
             log.exception("Failed to restore event views")
 
-    event = app_commands.Group(name="event", description="Мероприятия")
+    event = app_commands.Group(name="event", description="Ивенты")
 
-    @event.command(name="create", description="Создать мероприятие")
+    @event.command(name="create", description="Создать ивент")
     @app_commands.guild_only()
     async def event_create(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
@@ -52,7 +53,7 @@ class EventsCog(commands.Cog):
             )
         )
 
-    @event.command(name="list", description="Список мероприятий")
+    @event.command(name="list", description="Список ивентов")
     @app_commands.guild_only()
     async def event_list(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
@@ -60,7 +61,7 @@ class EventsCog(commands.Cog):
         events = await self.bot.event_service.list_scheduled(interaction.guild.id)
         if not events:
             await interaction.response.send_message(
-                embed=base_embed(title="Мероприятия", description="Нет запланированных."),
+                embed=base_embed(title="Ивенты", description="Пока нет запланированных ивентов."),
             )
             return
         config = await self.bot.config_service.get(interaction.guild.id)
@@ -70,11 +71,11 @@ class EventsCog(commands.Cog):
             count = await self.bot.event_service.participant_count(ev.id)
             lines.append(f"**#{ev.id}** {ev.title} — {date_label} {time_label} ({count} чел.)")
         await interaction.response.send_message(
-            embed=base_embed(title="Мероприятия", description="\n".join(lines)),
+            embed=base_embed(title="Ивенты", description="\n".join(lines)),
         )
 
-    @event.command(name="cancel", description="Отменить мероприятие (организатор)")
-    @app_commands.describe(event_id="ID мероприятия")
+    @event.command(name="cancel", description="Отменить ивент (создатель)")
+    @app_commands.describe(event_id="ID ивента")
     @app_commands.guild_only()
     async def event_cancel(self, interaction: discord.Interaction, event_id: int) -> None:
         try:
@@ -83,18 +84,35 @@ class EventsCog(commands.Cog):
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         config = await self.bot.config_service.get(event.guild_id)
-        count = await self.bot.event_service.participant_count(event.id)
         if event.message_id and interaction.guild:
             ch_id = event.channel_id or config.events_channel_id
             channel = interaction.guild.get_channel(ch_id or 0) if ch_id else None
             if channel and hasattr(channel, "fetch_message"):
                 try:
                     msg = await channel.fetch_message(event.message_id)
-                    embed = event_embed(self.bot, event, config.timezone, count)
+                    embed = await render_event_embed(self.bot, event, config.timezone)
                     await msg.edit(embed=embed, view=None)
                 except discord.HTTPException:
                     pass
-        await interaction.response.send_message(embed=success_embed("Мероприятие отменено"))
+        await interaction.response.send_message(embed=success_embed("Ивент отменён"))
+
+    async def _resync_event_cards(self, events) -> None:
+        for event in events:
+            await self.bot.event_service.ensure_organizer_participant(event)
+            guild = self.bot.get_guild(event.guild_id)
+            if guild is None or not event.message_id:
+                continue
+            config = await self.bot.config_service.get(event.guild_id)
+            channel_id = event.channel_id or config.events_channel_id
+            channel = guild.get_channel(channel_id or 0) if channel_id else None
+            if channel is None or not hasattr(channel, "fetch_message"):
+                continue
+            try:
+                msg = await channel.fetch_message(event.message_id)
+                embed = await render_event_embed(self.bot, event, config.timezone)
+                await msg.edit(embed=embed)
+            except discord.HTTPException:
+                log.debug("Could not resync event card %s", event.id)
 
 
 async def setup(bot: ErundaBot) -> None:

@@ -31,7 +31,7 @@ class EventService:
             raise ValueError("Время начала должно быть в будущем")
         if max_participants is not None and max_participants < 1:
             raise ValueError("Лимит участников должен быть ≥ 1")
-        return await self.db.create_event(
+        event = await self.db.create_event(
             guild_id,
             title.strip(),
             description.strip(),
@@ -40,6 +40,8 @@ class EventService:
             max_participants,
             channel_id,
         )
+        await self.ensure_organizer_participant(event)
+        return event
 
     async def get(self, event_id: int) -> Event | None:
         return await self.db.get_event(event_id)
@@ -50,17 +52,17 @@ class EventService:
     async def cancel(self, event_id: int, user_id: int) -> Event:
         event = await self.db.get_event(event_id)
         if event is None:
-            raise ValueError("Мероприятие не найдено")
+            raise ValueError("Ивент не найден")
         if event.status != "scheduled":
-            raise ValueError("Мероприятие уже завершено или отменено")
+            raise ValueError("Ивент уже завершён или отменён")
         if event.organizer_id != user_id:
-            raise ValueError("Отменить может только организатор")
+            raise ValueError("Отменить может только создатель")
         return await self.db.update_event(event_id, status="cancelled")
 
     async def join(self, event_id: int, user_id: int) -> tuple[Event, int]:
         event = await self.db.get_event(event_id)
         if event is None:
-            raise ValueError("Мероприятие не найдено")
+            raise ValueError("Ивент не найден")
         if event.status != "scheduled":
             raise ValueError("Регистрация закрыта")
         if await self.db.is_event_participant(event_id, user_id):
@@ -74,7 +76,9 @@ class EventService:
     async def leave(self, event_id: int, user_id: int) -> tuple[Event, int]:
         event = await self.db.get_event(event_id)
         if event is None:
-            raise ValueError("Мероприятие не найдено")
+            raise ValueError("Ивент не найден")
+        if event.organizer_id == user_id:
+            raise ValueError("Создатель ивента всегда в списке участников")
         if not await self.db.remove_event_participant(event_id, user_id):
             raise ValueError("Вы не участвуете")
         count = await self.db.count_event_participants(event_id)
@@ -82,6 +86,16 @@ class EventService:
 
     async def participant_count(self, event_id: int) -> int:
         return await self.db.count_event_participants(event_id)
+
+    async def ensure_organizer_participant(self, event: Event) -> None:
+        await self.db.add_event_participant(event.id, event.organizer_id)
+
+    async def participants_for_display(self, event: Event) -> list[int]:
+        ids = await self.db.list_event_participants(event.id)
+        rest = [uid for uid in ids if uid != event.organizer_id]
+        if event.organizer_id in ids:
+            return [event.organizer_id, *rest]
+        return ids
 
     async def set_message(self, event_id: int, message_id: int) -> Event:
         return await self.db.update_event(event_id, message_id=message_id)

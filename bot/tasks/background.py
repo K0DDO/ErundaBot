@@ -159,11 +159,13 @@ class BackgroundTasks:
                     date_label, time_label = self.bot.event_service.format_starts_at(
                         event, config.timezone
                     )
+                    participants = await self.bot.event_service.participants_for_display(event)
+                    mentions = " ".join(f"<@{uid}>" for uid in participants[:20])
                     embed = base_embed(
-                        title="Напоминание о мероприятии",
+                        title="Напоминание об ивенте",
                         description=(
-                            f"**{event.title}** начнётся {date_label} в {time_label}.\n"
-                            f"Организатор: <@{event.organizer_id}>"
+                            f"**{event.title}** начнётся {date_label} в {time_label}."
+                            + (f"\n{mentions}" if mentions else "")
                         ),
                     )
                     await channel.send(embed=embed)
@@ -171,11 +173,11 @@ class BackgroundTasks:
 
                 starts = await self.bot.event_service.due_starts(config, now)
                 for event in starts:
-                    participants = await self.bot.db.list_event_participants(event.id)
+                    participants = await self.bot.event_service.participants_for_display(event)
                     mentions = " ".join(f"<@{uid}>" for uid in participants[:20])
                     embed = base_embed(
-                        title="Мероприятие начинается",
-                        description=f"**{event.title}** сейчас!\n{mentions or ''}".strip(),
+                        title="Ивент начинается",
+                        description=f"**{event.title}** сейчас!\n{mentions}".strip(),
                     )
                     await channel.send(embed=embed)
                     await self.bot.event_service.mark_notified(event.id, "start")
