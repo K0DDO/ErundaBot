@@ -118,7 +118,44 @@ _FILM_INSTANCE_IDS = {
     "Q506240",
 }
 _AGE_STOP_WORDS = {"фильм", "film", "the", "a", "an", "и", "movie", "кино"}
-_TMDB_CERT_RE = re.compile(r'class="certification"\s*>\s*([^<\n]+)', re.IGNORECASE)
+_CERT_TO_AGE = {
+    "g": "0+",
+    "tv-g": "0+",
+    "tvg": "0+",
+    "u": "0+",
+    "0+": "0+",
+    "0": "0+",
+    "pg": "6+",
+    "tv-pg": "6+",
+    "tvpg": "6+",
+    "6+": "6+",
+    "6": "6+",
+    "pg-13": "12+",
+    "pg13": "12+",
+    "tv-14": "12+",
+    "tv14": "12+",
+    "12+": "12+",
+    "12": "12+",
+    "r": "18+",
+    "16+": "16+",
+    "16": "16+",
+    "15": "16+",
+    "nc-17": "18+",
+    "nc17": "18+",
+    "tv-ma": "18+",
+    "tvma": "18+",
+    "18+": "18+",
+    "18": "18+",
+}
+_TMDB_AGE_CACHE: dict[str, str] = {}
+_TMDB_MOVIE_HREF_RE = re.compile(
+    r'href="/movie/(\d+)(?:-([^"?]*))?',
+    re.IGNORECASE,
+)
+_TMDB_CERT_RE = re.compile(
+    r'<span[^>]*class="[^"]*certification[^"]*"[^>]*>\s*([^<]+?)\s*</span>',
+    re.IGNORECASE,
+)
 
 
 def film_age_rating(film: FestivalFilm) -> str | None:
@@ -272,6 +309,9 @@ def _age_from_rating_label(label: str) -> str | None:
         .replace("–", "-")
         .replace("—", "-")
     )
+    mapped = _CERT_TO_AGE.get(text)
+    if mapped:
+        return mapped
     if any(token in text for token in ("nc-17", "nc17", "tv-ma", "tvma")):
         return "18+"
     if "pg-13" in text or "pg13" in text or "tv-14" in text or "tv14" in text:
@@ -483,20 +523,58 @@ def _wikidata_is_film(entity_id: str) -> bool:
 
 
 def _tmdb_age(tmdb_id: str) -> str | None:
+    cached = _TMDB_AGE_CACHE.get(tmdb_id)
+    if cached is not None:
+        return cached or None
     html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}?language=ru")
     if not html:
         html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}")
-    if not html:
-        return None
-    match = _TMDB_CERT_RE.search(html)
-    if match is None:
-        return None
-    raw = " ".join(match.group(1).split())
-    mapped = _age_from_rating_label(raw)
-    if mapped:
-        return mapped
-    token = re.search(r"\b(18\+|16\+|12\+|6\+|0\+)\b", raw)
-    return token.group(1) if token else None
+    rating = None
+    if html:
+        match = _TMDB_CERT_RE.search(html)
+        raw = " ".join(match.group(1).split()) if match else ""
+        if raw:
+            rating = _age_from_rating_label(raw)
+            if rating is None:
+                token = re.search(r"\b(18\+|16\+|12\+|6\+|0\+)\b", raw)
+                rating = token.group(1) if token else None
+    _TMDB_AGE_CACHE[tmdb_id] = rating or ""
+    return rating
+
+
+def _tmdb_search_id(title: str) -> str | None:
+    best_id: str | None = None
+    best_score = 0.0
+    fallback: str | None = None
+    for term in _search_terms(title):
+        url = "https://www.themoviedb.org/search/movie?" + urllib.parse.urlencode(
+            {"query": term, "language": "ru"}
+        )
+        html = _http_html(url)
+        if not html:
+            continue
+        seen: set[str] = set()
+        for match in _TMDB_MOVIE_HREF_RE.finditer(html):
+            tmdb_id = match.group(1)
+            if tmdb_id in seen:
+                continue
+            seen.add(tmdb_id)
+            slug = (match.group(2) or "").replace("-", " ")
+            if fallback is None:
+                fallback = tmdb_id
+            score = _title_score(title, slug)
+            if score == 0 and slug:
+                score = 0.5
+                if _sequel_mark(title) == _sequel_mark(slug):
+                    score += 0.25
+                else:
+                    score -= 0.35
+            if score > best_score:
+                best_score = score
+                best_id = tmdb_id
+    if best_score >= 0.4:
+        return best_id
+    return fallback
 
 
 def _wikidata_age(entity_id: str) -> str | None:
@@ -551,15 +629,13 @@ def fetch_film_age(title: str) -> str | None:
     if key in _AGE_CACHE:
         return _AGE_CACHE[key] or None
     rating = None
-    entity = _find_film_entity(title)
-    if entity:
-        rating = _wikidata_age(entity)
+    tmdb_id = _tmdb_search_id(title)
+    if tmdb_id:
+        rating = _tmdb_age(tmdb_id)
     if rating is None:
-        for country in ("ru", "us"):
-            poster, itunes_rating = _itunes_lookup(title, country)
-            if itunes_rating and poster:
-                rating = itunes_rating
-                break
+        entity = _find_film_entity(title)
+        if entity:
+            rating = _wikidata_age(entity)
     _AGE_CACHE[key] = rating or ""
     return rating
 
