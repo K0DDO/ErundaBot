@@ -69,7 +69,12 @@ class EventsCog(commands.Cog):
         for ev in events[:15]:
             date_label, time_label = self.bot.event_service.format_starts_at(ev, config.timezone)
             count = await self.bot.event_service.participant_count(ev.id)
-            lines.append(f"**#{ev.number}** {ev.title} — {date_label} {time_label} ({count} чел.)")
+            line = f"**#{ev.number}** {ev.title} — {date_label} {time_label} ({count} чел.)"
+            channel_id = ev.channel_id or config.events_channel_id
+            if channel_id and ev.message_id:
+                url = f"https://discord.com/channels/{ev.guild_id}/{channel_id}/{ev.message_id}"
+                line += f" — [открыть]({url})"
+            lines.append(line)
         await interaction.response.send_message(
             embed=base_embed(title="Ивенты", description="\n".join(lines)),
         )
