@@ -277,7 +277,7 @@ class FestivalCog(commands.Cog):
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
-        await refresh_festival_message(self.bot, festival)
+        await refresh_festival_message(self.bot, festival, repost=True)
         await interaction.response.send_message(
             embed=success_embed(
                 "Победитель записан",

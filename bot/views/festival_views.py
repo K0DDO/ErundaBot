@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from bot.bot import ErundaBot
     from bot.database.models import Festival
 
+FEST_MENTIONS = discord.AllowedMentions(everyone=False, users=True, roles=True)
 log = logging.getLogger(__name__)
 
 
@@ -45,12 +46,16 @@ async def festival_card(
     else:
         films = await bot.festival_service.films(festival.id)
     winner_emoji = pick_guild_emoji(guild, festival.id)
+    ping_role = None
+    if has_winner and config.fest_ping_role_id:
+        ping_role = guild.get_role(config.fest_ping_role_id)
     body = bot.festival_service.card_body(
         festival,
         films,
         config.timezone,
         guild,
         winner_emoji=winner_emoji,
+        ping_role=ping_role,
     )
     return FestivalCardView(
         bot,
@@ -78,7 +83,7 @@ async def publish_festival_message(
         except discord.HTTPException:
             message = None
     if message is None:
-        message = await channel.send(view=view)
+        message = await channel.send(view=view, allowed_mentions=FEST_MENTIONS)
         if save:
             await bot.festival_service.set_message(festival.id, channel.id, message.id)
             if festival.status == "open":
@@ -86,7 +91,12 @@ async def publish_festival_message(
     return message
 
 
-async def refresh_festival_message(bot: ErundaBot, festival: Festival) -> None:
+async def refresh_festival_message(
+    bot: ErundaBot,
+    festival: Festival,
+    *,
+    repost: bool = False,
+) -> None:
     guild = bot.get_guild(festival.guild_id)
     if guild is None or not festival.message_id:
         return
@@ -96,9 +106,14 @@ async def refresh_festival_message(bot: ErundaBot, festival: Festival) -> None:
     if channel is None or not hasattr(channel, "fetch_message"):
         return
     view = await festival_card(bot, guild, festival)
+    if repost and hasattr(channel, "send"):
+        await delete_festival_message(bot, festival)
+        message = await channel.send(view=view, allowed_mentions=FEST_MENTIONS)
+        await bot.festival_service.set_message(festival.id, channel.id, message.id)
+        return
     try:
         msg = await channel.fetch_message(festival.message_id)
-        await msg.edit(content=None, embeds=[], view=view)
+        await msg.edit(content=None, embeds=[], view=view, allowed_mentions=FEST_MENTIONS)
     except discord.HTTPException:
         pass
 
@@ -314,12 +329,11 @@ class FestivalCardView(ui.LayoutView):
             winner = next((film for film in films if film.user_id == festival.winner_user_id), None)
             if winner is not None and winner.image_url:
                 container.add_item(
-                    ui.Section(
-                        ui.TextDisplay(normalize_film_title(winner.title)),
-                        accessory=ui.Thumbnail(
-                            media=winner.image_url,
+                    ui.MediaGallery(
+                        discord.MediaGalleryItem(
+                            winner.image_url,
                             description=normalize_film_title(winner.title)[:256],
-                        ),
+                        )
                     )
                 )
         if confirm_delete_for is not None:

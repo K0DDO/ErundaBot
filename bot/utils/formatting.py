@@ -13,6 +13,12 @@ def channel_mention(channel_id: int | None) -> str:
     return f"<#{channel_id}>"
 
 
+def role_mention(role_id: int | None) -> str:
+    if role_id is None:
+        return "не задана"
+    return f"<@&{role_id}>"
+
+
 def format_duration(total_seconds: int) -> str:
     total_seconds = max(0, int(total_seconds))
     hours, rem = divmod(total_seconds, 3600)

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import discord
 
 from bot.utils.embeds import error_embed, success_embed
-from bot.utils.formatting import bool_label, channel_mention
+from bot.utils.formatting import bool_label, channel_mention, role_mention
 from bot.utils.permissions import bot_cannot_send_reason
 from bot.utils.timezones import is_valid_timezone
 
@@ -48,6 +48,11 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
             f"Кинофестиваль: {channel_mention(config.fest_channel_id)}\n"
             f"ТГК: {channel_mention(config.tgk_channel_id)}"
         ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Роли",
+        value=f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}",
         inline=False,
     )
     embed.add_field(
@@ -110,6 +115,7 @@ class ConfigPanel(discord.ui.View):
         placeholder="Раздел настроек…",
         options=[
             discord.SelectOption(label="Каналы", value="channels", emoji="📺"),
+            discord.SelectOption(label="Роли", value="roles", emoji="🎭"),
             discord.SelectOption(label="Флаги", value="flags", emoji="🏳️"),
             discord.SelectOption(label="Timezone", value="timezone", emoji="🌍"),
             discord.SelectOption(label="Время уведомлений", value="times", emoji="⏰"),
@@ -126,6 +132,12 @@ class ConfigPanel(discord.ui.View):
             await interaction.response.send_message(
                 "Сначала выбери тип канала, затем сам канал.",
                 view=ChannelConfigView(self.bot, self.guild_id),
+                ephemeral=True,
+            )
+        elif value == "roles":
+            await interaction.response.send_message(
+                "Роль, которую пинговать в карточке после `/fest winner`.",
+                view=RoleConfigView(self.bot, self.guild_id),
                 ephemeral=True,
             )
         elif value == "flags":
@@ -230,6 +242,39 @@ class ChannelConfigView(discord.ui.View):
         self.selected_field: str | None = None
         self.add_item(ChannelFieldSelect(self))
         self.add_item(ChannelPicker(self))
+
+
+class FestPingRolePicker(discord.ui.RoleSelect):
+    def __init__(self, parent: "RoleConfigView") -> None:
+        super().__init__(
+            placeholder="Роль пинга кинофестиваля",
+            min_values=1,
+            max_values=1,
+        )
+        self.parent_view = parent
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        role = self.values[0]
+        config = await self.parent_view.bot.config_service.set_role(
+            self.parent_view.guild_id,
+            "fest_ping_role_id",
+            role.id,
+        )
+        await interaction.response.send_message(
+            embed=success_embed(
+                "Роль обновлена",
+                f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}",
+            ),
+            ephemeral=True,
+        )
+
+
+class RoleConfigView(discord.ui.View):
+    def __init__(self, bot: ErundaBot, guild_id: int) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.guild_id = guild_id
+        self.add_item(FestPingRolePicker(self))
 
 
 class FlagSelect(discord.ui.Select):

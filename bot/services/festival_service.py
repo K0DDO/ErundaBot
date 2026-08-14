@@ -342,6 +342,11 @@ class FestivalService:
                 return escape_markdown_inline(member.display_name)
         return f"участник #{user_id}"
 
+    def _film_name(self, user_id: int, guild: discord.Guild | None, *, ping: bool) -> str:
+        if ping:
+            return f"<@{user_id}>"
+        return f"**{self._display_name(user_id, guild)}**"
+
     def card_body(
         self,
         festival: Festival,
@@ -350,13 +355,18 @@ class FestivalService:
         guild: discord.Guild | None = None,
         *,
         winner_emoji: str = "🎬",
+        ping_role: discord.Role | None = None,
     ) -> str:
         date_label, time_label = self.format_starts(festival, tz_name)
-        parts = [f"Сеанс: **{date_label} {time_label}**"]
+        ping = bool(festival.winner_user_id and festival.winner_film)
+        parts: list[str] = []
+        if ping and ping_role is not None:
+            parts.append(ping_role.mention)
+        parts.append(f"Сеанс: **{date_label} {time_label}**")
         shown = films[:40]
         if shown:
             lines = [
-                f"**{self._display_name(film.user_id, guild)}** — {normalize_film_title(film.title)}"
+                f"{self._film_name(film.user_id, guild, ping=ping)} — {normalize_film_title(film.title)}"
                 for film in shown
             ]
             extra = len(films) - len(shown)
@@ -365,11 +375,11 @@ class FestivalService:
             parts.append("\n".join(lines))
         else:
             parts.append("_Пока никто не предложил._")
-        if festival.winner_user_id and festival.winner_film:
+        if ping:
             parts.append(
                 "**Победитель**\n"
-                f"**{self._display_name(festival.winner_user_id, guild)}**\n"
-                f"### {winner_emoji} {normalize_film_title(festival.winner_film)}"
+                f"{self._film_name(festival.winner_user_id or 0, guild, ping=True)}\n"
+                f"### {winner_emoji} {normalize_film_title(festival.winner_film or '')}"
             )
         else:
             parts.append("Победитель: ещё не выбран")
