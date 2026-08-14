@@ -251,10 +251,10 @@ class FestivalService:
             reminder_sent=0,
         )
 
-    async def delete(self, guild_id: int) -> Festival:
-        festival = await self.require_open(guild_id)
+    async def delete_and_renumber(self, festival: Festival) -> list[Festival]:
+        guild_id = festival.guild_id
         await self.db.delete_festival(festival.id)
-        return festival
+        return await self.db.renumber_festivals(guild_id)
 
     async def set_message(self, festival_id: int, channel_id: int, message_id: int) -> Festival:
         return await self.db.update_festival(

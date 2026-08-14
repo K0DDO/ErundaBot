@@ -253,7 +253,9 @@ class FestivalDeleteConfirmButton(ui.Button):
             return
         await interaction.response.defer()
         await delete_festival_message(self.bot, festival)
-        await self.bot.db.delete_festival(festival.id)
+        remaining = await self.bot.festival_service.delete_and_renumber(festival)
+        for item in remaining:
+            await refresh_festival_message(self.bot, item)
         await interaction.edit_original_response(view=_notice("Кинофестиваль удалён", SUCCESS_COLOR))
 
 

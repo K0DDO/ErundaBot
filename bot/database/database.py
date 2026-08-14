@@ -1675,6 +1675,28 @@ class Database:
         await self.connection.execute("DELETE FROM festivals WHERE id = ?", (festival_id,))
         await self.connection.commit()
 
+    async def renumber_festivals(self, guild_id: int) -> list[Festival]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festivals WHERE guild_id = ? ORDER BY number ASC, id ASC",
+            (guild_id,),
+        )
+        festivals = [Festival.from_row(row) for row in await cursor.fetchall()]
+        if not festivals:
+            return []
+        for index, festival in enumerate(festivals, start=1):
+            await self.connection.execute(
+                "UPDATE festivals SET number = ? WHERE id = ?",
+                (-index, festival.id),
+            )
+        for index, festival in enumerate(festivals, start=1):
+            await self.connection.execute(
+                "UPDATE festivals SET number = ? WHERE id = ?",
+                (index, festival.id),
+            )
+            festival.number = index
+        await self.connection.commit()
+        return festivals
+
     async def update_festival(self, festival_id: int, **fields: Any) -> Festival:
         allowed = {
             "starts_at",
