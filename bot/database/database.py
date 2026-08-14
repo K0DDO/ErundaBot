@@ -251,6 +251,7 @@ CREATE TABLE IF NOT EXISTS festival_films (
     festival_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     title TEXT NOT NULL,
+    image_url TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (festival_id, user_id),
     FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
@@ -498,6 +499,12 @@ class Database:
                 """
             )
             await self._db.execute("PRAGMA user_version = 10")
+        if version < 11:
+            try:
+                await self._db.execute("ALTER TABLE festival_films ADD COLUMN image_url TEXT")
+            except Exception:
+                pass
+            await self._db.execute("PRAGMA user_version = 11")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1665,15 +1672,22 @@ class Database:
         assert festival is not None
         return festival
 
-    async def upsert_festival_film(self, festival_id: int, user_id: int, title: str) -> FestivalFilm:
+    async def upsert_festival_film(
+        self,
+        festival_id: int,
+        user_id: int,
+        title: str,
+        image_url: str | None = None,
+    ) -> FestivalFilm:
         await self.connection.execute(
             """
-            INSERT INTO festival_films (festival_id, user_id, title)
-            VALUES (?, ?, ?)
+            INSERT INTO festival_films (festival_id, user_id, title, image_url)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(festival_id, user_id) DO UPDATE SET
-                title = excluded.title
+                title = excluded.title,
+                image_url = excluded.image_url
             """,
-            (festival_id, user_id, title),
+            (festival_id, user_id, title, image_url),
         )
         await self.connection.commit()
         cursor = await self.connection.execute(

@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.services.festival_service import normalize_film_title
 from bot.utils.embeds import error_embed, success_embed
 from bot.views.festival_views import (
     FestivalAddModal,
@@ -128,8 +129,8 @@ class FestivalCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        embed, view = await festival_card(self.bot, interaction.guild, festival)
-        await interaction.response.send_message(embed=embed, view=view)
+        view = await festival_card(self.bot, interaction.guild, festival)
+        await interaction.response.send_message(view=view)
 
     @fest.command(name="preview", description="Дебаг: карточка фестиваля только тебе")
     @app_commands.guild_only()
@@ -141,8 +142,8 @@ class FestivalCog(commands.Cog):
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
-        embed, view = await festival_card(self.bot, interaction.guild, festival)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        view = await festival_card(self.bot, interaction.guild, festival)
+        await interaction.response.send_message(view=view, ephemeral=True)
 
     @fest.command(name="test-ping", description="Дебаг: пинг до сеанса только тебе")
     @app_commands.describe(role="Кого пингануть, по умолчанию роль из прошлого ping")
@@ -226,8 +227,9 @@ class FestivalCog(commands.Cog):
         await interaction.response.send_message(
             embed=success_embed(
                 "Победитель записан",
-                f"{user.mention} — **{film.title}**",
+                f"{user.mention} — **{normalize_film_title(film.title)}**",
             ),
+            ephemeral=True,
         )
 
     @fest.command(name="ping", description="Напомнить о сеансе")

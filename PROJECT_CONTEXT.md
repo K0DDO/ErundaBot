@@ -53,7 +53,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Кинофестиваль
 
-Канал в `/config`. Пока канала нет — `/fest new`, `/fest list` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`: список фильмов + победитель внизу. Один фильм с человека, повторный add заменяет. Все: `add`/`remove`/`list` и кнопка «Предложить фильм». Роль «Кино» (не админ): `new`, `winner`, `export`, `ping`. Дебаг: `/fest role` (взять роль), `/fest preview` (карточка ephemeral), `/fest test-ping` (пинг ephemeral). `/fest winner @user` сам подставляет его фильм. `/fest export` — display names для колеса. `/fest ping роль` — считает время до сеанса; роль запоминается для автонапоминания (`fest_reminder_minutes`, 0 = выкл).
+Канал в `/config`. Пока канала нет — `/fest new`, `/fest list` и `/fest ping` пишут туда, откуда вызвали. Одно сообщение = `#N`: список фильмов + победитель внизу. Название сразу с больших букв. Постер с Википедии/iTunes, если нет — без картинки. Один фильм с человека, повторный add заменяет. Все: `add`/`remove`/`list` и кнопка «Предложить фильм». Роль «Кино» (не админ): `new`, `winner`, `export`, `ping`. `/fest winner` пишет победителя в карточку, ответ команды ephemeral. Дебаг: `/fest role`, `/fest preview`, `/fest test-ping`. `/fest export` — display names для колеса. `/fest ping роль` — время до сеанса; роль запоминается (`fest_reminder_minutes`, 0 = выкл).
 
 ### ТГК
 
@@ -88,9 +88,9 @@ bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v10)
+## БД (миграции до v11)
 
-Таблицы: … `festivals`, `festival_films`, `tg_channels`.
+Таблицы: … `festivals`, `festival_films` (`image_url` постер), `tg_channels`.
 
 Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
 

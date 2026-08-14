@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import discord
+from discord import ui
 
+from bot.services.festival_service import normalize_film_title
 from bot.utils.embeds import error_embed, success_embed
 
 if TYPE_CHECKING:
@@ -17,12 +19,12 @@ async def festival_card(
     bot: ErundaBot,
     guild: discord.Guild,
     festival: Festival,
-) -> tuple[discord.Embed, FestivalView | None]:
+) -> FestivalCardView:
     config = await bot.config_service.get(guild.id)
     films = await bot.festival_service.films(festival.id)
     embed = bot.festival_service.build_embed(festival, films, config.timezone, guild)
-    view = FestivalView(bot, festival.id) if festival.status == "open" else None
-    return embed, view
+    posters = bot.festival_service.poster_urls(festival, films)
+    return FestivalCardView(bot, festival, embed.description or "", posters)
 
 
 async def publish_festival_message(
@@ -33,19 +35,19 @@ async def publish_festival_message(
     *,
     save: bool = True,
 ) -> discord.Message:
-    embed, view = await festival_card(bot, guild, festival)
+    view = await festival_card(bot, guild, festival)
     message = None
     if save and festival.message_id and festival.channel_id == getattr(channel, "id", None):
         try:
             message = await channel.fetch_message(festival.message_id)
-            await message.edit(embed=embed, view=view)
+            await message.edit(content=None, embeds=[], view=view)
         except discord.HTTPException:
             message = None
     if message is None:
-        message = await channel.send(embed=embed, view=view)
+        message = await channel.send(view=view)
         if save:
             await bot.festival_service.set_message(festival.id, channel.id, message.id)
-            if view is not None:
+            if festival.status == "open":
                 bot.add_view(FestivalView(bot, festival.id), message_id=message.id)
     return message
 
@@ -59,10 +61,10 @@ async def refresh_festival_message(bot: ErundaBot, festival: Festival) -> None:
     channel = guild.get_channel(channel_id or 0) if channel_id else None
     if channel is None or not hasattr(channel, "fetch_message"):
         return
-    embed, view = await festival_card(bot, guild, festival)
+    view = await festival_card(bot, guild, festival)
     try:
         msg = await channel.fetch_message(festival.message_id)
-        await msg.edit(embed=embed, view=view)
+        await msg.edit(content=None, embeds=[], view=view)
     except discord.HTTPException:
         pass
 
@@ -77,18 +79,22 @@ class FestivalAddModal(discord.ui.Modal, title="Предложить фильм"
         self.user_id = user_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
         try:
-            festival, _film, replaced = await self.bot.festival_service.add_film(
+            festival, film, replaced = await self.bot.festival_service.add_film(
                 self.guild_id,
                 self.user_id,
                 str(self.title_input.value),
             )
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+        except ValueError as extra:
+            await interaction.followup.send(embed=error_embed(str(extra)), ephemeral=True)
             return
         await refresh_festival_message(self.bot, festival)
         text = "Фильм заменён" if replaced else "Фильм предложен"
-        await interaction.response.send_message(embed=success_embed(text), ephemeral=True)
+        extra = f"**{normalize_film_title(film.title)}**"
+        if film.image_url:
+            extra += "\nПостер найден."
+        await interaction.followup.send(embed=success_embed(text, extra), ephemeral=True)
 
 
 class FestivalNewModal(discord.ui.Modal, title="Новый кинофестиваль"):
@@ -125,8 +131,8 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
                 str(self.time.value),
                 self.tz_name,
             )
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+        except ValueError as extra:
+            await interaction.response.send_message(embed=error_embed(str(extra)), ephemeral=True)
             return
         if previous is not None:
             await refresh_festival_message(self.bot, previous)
@@ -139,23 +145,52 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
         )
 
 
+class FestivalAddButton(ui.Button):
+    def __init__(self, bot: ErundaBot, festival_id: int) -> None:
+        super().__init__(
+            label="Предложить фильм",
+            style=discord.ButtonStyle.success,
+            custom_id=f"fest:add:{festival_id}",
+        )
+        self.bot = bot
+        self.festival_id = festival_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(
+            FestivalAddModal(self.bot, interaction.guild_id or 0, interaction.user.id)
+        )
+
+
+class FestivalCardView(ui.LayoutView):
+    def __init__(
+        self,
+        bot: ErundaBot,
+        festival: Festival,
+        body: str,
+        posters: list[tuple[str, str]],
+    ) -> None:
+        super().__init__(timeout=None)
+        color = 0x57F287 if festival.status != "open" else 0x7C9CFF
+        container = ui.Container(accent_color=color)
+        container.add_item(ui.TextDisplay(f"## 🎬 Кинофестиваль #{festival.number}\n\n{body}"))
+        if posters:
+            gallery = ui.MediaGallery()
+            for url, title in posters:
+                gallery.add_item(media=url, description=title[:256])
+            container.add_item(gallery)
+        if festival.status == "open":
+            row = ui.ActionRow()
+            row.add_item(FestivalAddButton(bot, festival.id))
+            container.add_item(row)
+        self.add_item(container)
+
+
 class FestivalView(discord.ui.View):
     def __init__(self, bot: ErundaBot, festival_id: int) -> None:
         super().__init__(timeout=None)
         self.bot = bot
         self.festival_id = festival_id
-        add_btn = discord.ui.Button(
-            label="Предложить фильм",
-            style=discord.ButtonStyle.success,
-            custom_id=f"fest:add:{festival_id}",
-        )
-        add_btn.callback = self.add_button
-        self.add_item(add_btn)
-
-    async def add_button(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_modal(
-            FestivalAddModal(self.bot, interaction.guild_id or 0, interaction.user.id)
-        )
+        self.add_item(FestivalAddButton(bot, festival_id))
 
 
 def register_festival_views(bot: ErundaBot, festivals: list[Festival]) -> None:
