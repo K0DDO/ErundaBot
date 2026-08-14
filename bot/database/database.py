@@ -252,6 +252,7 @@ CREATE TABLE IF NOT EXISTS festival_films (
     user_id INTEGER NOT NULL,
     title TEXT NOT NULL,
     image_url TEXT,
+    age_rating TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (festival_id, user_id),
     FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
@@ -566,6 +567,12 @@ class Database:
                     (guild_id, key, title),
                 )
             await self._db.execute("PRAGMA user_version = 13")
+        if version < 14:
+            try:
+                await self._db.execute("ALTER TABLE festival_films ADD COLUMN age_rating TEXT")
+            except Exception:
+                pass
+            await self._db.execute("PRAGMA user_version = 14")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1796,16 +1803,25 @@ class Database:
         user_id: int,
         title: str,
         image_url: str | None = None,
+        age_rating: str | None = None,
+        *,
+        overwrite_age: bool = False,
     ) -> FestivalFilm:
+        age_assign = (
+            "age_rating = excluded.age_rating"
+            if overwrite_age
+            else "age_rating = COALESCE(excluded.age_rating, festival_films.age_rating)"
+        )
         await self.connection.execute(
-            """
-            INSERT INTO festival_films (festival_id, user_id, title, image_url)
-            VALUES (?, ?, ?, ?)
+            f"""
+            INSERT INTO festival_films (festival_id, user_id, title, image_url, age_rating)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(festival_id, user_id) DO UPDATE SET
                 title = excluded.title,
-                image_url = excluded.image_url
+                image_url = COALESCE(excluded.image_url, festival_films.image_url),
+                {age_assign}
             """,
-            (festival_id, user_id, title, image_url),
+            (festival_id, user_id, title, image_url, age_rating),
         )
         await self.connection.commit()
         cursor = await self.connection.execute(

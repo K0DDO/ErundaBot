@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import discord
 from discord import ui
 
-from bot.services.festival_service import normalize_film_title, pick_guild_emoji
+from bot.services.festival_service import format_age_tag, normalize_film_title, pick_guild_emoji
 from bot.utils.birthday_emojis import ensure_guild_emojis
 from bot.utils.embeds import BRAND_COLOR, ERROR_COLOR, SUCCESS_COLOR, error_embed, success_embed
 
@@ -39,12 +39,11 @@ async def festival_card(
     await ensure_guild_emojis(guild)
     has_winner = bool(festival.winner_user_id and festival.winner_film)
     if has_winner:
-        films = await bot.festival_service.ensure_posters(
+        await bot.festival_service.ensure_posters(
             festival.id,
             user_id=festival.winner_user_id,
         )
-    else:
-        films = await bot.festival_service.films(festival.id)
+    films = await bot.festival_service.ensure_age_ratings(festival.id)
     winner_emoji = pick_guild_emoji(guild, festival.id)
     ping_role = None
     if has_winner and config.fest_ping_role_id:
@@ -135,7 +134,12 @@ async def delete_festival_message(bot: ErundaBot, festival: Festival) -> None:
 
 
 class FestivalAddModal(discord.ui.Modal, title="Предложить фильм"):
-    title_input = discord.ui.TextInput(label="Название фильма", max_length=120, required=True)
+    title_input = discord.ui.TextInput(
+        label="Название фильма",
+        placeholder="Можно дописать nsfw, нсфв или 18+",
+        max_length=120,
+        required=True,
+    )
 
     def __init__(self, bot: ErundaBot, guild_id: int, user_id: int) -> None:
         super().__init__()
@@ -156,8 +160,9 @@ class FestivalAddModal(discord.ui.Modal, title="Предложить фильм"
             return
         await refresh_festival_message(self.bot, festival)
         text = "Фильм заменён" if replaced else "Фильм предложен"
+        title = normalize_film_title(film.title)
         await interaction.followup.send(
-            embed=success_embed(text, f"**{normalize_film_title(film.title)}**"),
+            embed=success_embed(text, f"**{title}**{format_age_tag(film.age_rating)}"),
             ephemeral=True,
         )
 

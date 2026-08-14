@@ -309,6 +309,7 @@ class FestivalFilm:
     user_id: int
     title: str
     image_url: str | None = None
+    age_rating: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> FestivalFilm:
@@ -318,6 +319,7 @@ class FestivalFilm:
             user_id=row["user_id"],
             title=row["title"],
             image_url=row["image_url"] if "image_url" in keys else None,
+            age_rating=row["age_rating"] if "age_rating" in keys else None,
         )
 
 

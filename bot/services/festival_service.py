@@ -33,12 +33,56 @@ OG_IMAGE_RE_ALT = re.compile(
 
 
 _TITLE_JUNK_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+_RATING_TOKEN_RE = re.compile(
+    r"(?i)(?<![^\s,;|/_\-()\[\]{}])(nsfw|нсфв|18\+|16\+|12\+|6\+|0\+)(?![^\s,;|/_\-()\[\]{}])"
+)
+_ITUNES_AGE = {
+    "G": "0+",
+    "TVG": "0+",
+    "0+": "0+",
+    "PG": "6+",
+    "TVPG": "6+",
+    "6+": "6+",
+    "PG13": "12+",
+    "TV14": "12+",
+    "12+": "12+",
+    "R": "16+",
+    "16+": "16+",
+    "NC17": "18+",
+    "TVMA": "18+",
+    "18+": "18+",
+}
+
+
+def split_title_and_age(title: str) -> tuple[str, str | None]:
+    tokens: list[str] = []
+
+    def collect(match: re.Match[str]) -> str:
+        tokens.append(match.group(1).casefold())
+        return " "
+
+    cleaned = _RATING_TOKEN_RE.sub(collect, title)
+    cleaned = re.sub(r"[\(\[\{]\s*[\)\]\}]", " ", cleaned)
+    cleaned = re.sub(r"^[\s,;|/_\-]+|[\s,;|/_\-]+$", " ", cleaned)
+    cleaned = " ".join(cleaned.split())
+    rating = None
+    if any(token in {"nsfw", "нсфв"} for token in tokens):
+        rating = "NSFW"
+    else:
+        for age in ("18+", "16+", "12+", "6+", "0+"):
+            if age in tokens:
+                rating = age
+                break
+    return cleaned, rating
 
 
 def normalize_film_title(title: str) -> str:
-    cleaned = " ".join(title.split())
+    cleaned, _ = split_title_and_age(title)
+    cleaned = " ".join(cleaned.split())
     words: list[str] = []
     for word in cleaned.split(" "):
+        if not word:
+            continue
         bits = word.split("-")
         words.append("-".join(bit[:1].upper() + bit[1:] if bit else bit for bit in bits))
     return " ".join(words)
@@ -48,6 +92,14 @@ def film_title_key(title: str) -> str:
     text = normalize_film_title(title).casefold().replace("ё", "е")
     text = _TITLE_JUNK_RE.sub(" ", text)
     return " ".join(text.split())
+
+
+def format_age_tag(rating: str | None) -> str:
+    if not rating:
+        return ""
+    if rating in {"NSFW", "18+"}:
+        return f" · 🔞 **{rating}**"
+    return f" · **{rating}**"
 
 
 def _http_json(url: str, timeout: int = 8) -> dict | None:
@@ -142,24 +194,46 @@ def _wikipedia_poster(title: str) -> str | None:
     return None
 
 
-def _itunes_poster(title: str) -> str | None:
+def _itunes_lookup(title: str, country: str = "ru") -> tuple[str | None, str | None]:
     url = "https://itunes.apple.com/search?" + urllib.parse.urlencode(
         {
             "term": title,
             "entity": "movie",
-            "country": "ru",
+            "country": country,
             "limit": 3,
         }
     )
     data = _http_json(url)
+    poster = None
+    rating = None
     for item in (data or {}).get("results") or []:
-        art = item.get("artworkUrl100") or item.get("artworkUrl60")
-        if not isinstance(art, str) or not art.startswith("https://"):
-            continue
-        return (
-            art.replace("100x100bb", "600x600bb")
-            .replace("60x60bb", "600x600bb")
-        )
+        if poster is None:
+            art = item.get("artworkUrl100") or item.get("artworkUrl60")
+            if isinstance(art, str) and art.startswith("https://"):
+                poster = (
+                    art.replace("100x100bb", "600x600bb")
+                    .replace("60x60bb", "600x600bb")
+                )
+        if rating is None:
+            raw = item.get("contentAdvisoryRating")
+            if isinstance(raw, str):
+                key = raw.strip().upper().replace(" ", "").replace("-", "")
+                rating = _ITUNES_AGE.get(key)
+        if poster and rating:
+            break
+    return poster, rating
+
+
+def _itunes_poster(title: str) -> str | None:
+    poster, _rating = _itunes_lookup(title)
+    return poster
+
+
+def fetch_film_age(title: str) -> str | None:
+    for country in ("ru", "us"):
+        _poster, rating = _itunes_lookup(title, country)
+        if rating:
+            return rating
     return None
 
 
@@ -285,6 +359,7 @@ class FestivalService:
 
     async def add_film(self, guild_id: int, user_id: int, title: str) -> tuple[Festival, FestivalFilm, bool]:
         festival = await self.require_open(guild_id)
+        _ignored, rating = split_title_and_age(title)
         cleaned = normalize_film_title(title)
         if not cleaned:
             raise ValueError("Название фильма пустое")
@@ -296,7 +371,16 @@ class FestivalService:
                 "Ты победил в прошлом кинофестивале. Предложить фильм можно со следующего"
             )
         existing = await self.db.get_festival_film(festival.id, user_id)
-        film = await self.db.upsert_festival_film(festival.id, user_id, cleaned, None)
+        if rating is None:
+            rating = await asyncio.to_thread(fetch_film_age, cleaned)
+        film = await self.db.upsert_festival_film(
+            festival.id,
+            user_id,
+            cleaned,
+            None,
+            rating or "",
+            overwrite_age=True,
+        )
         return festival, film, existing is not None
 
     async def ensure_posters(
@@ -319,6 +403,44 @@ class FestivalService:
                 film = await self.db.upsert_festival_film(
                     festival_id, film.user_id, film.title, image_url
                 )
+            result.append(film)
+        return result
+
+    async def ensure_age_ratings(
+        self,
+        festival_id: int,
+        *,
+        user_id: int | None = None,
+        fetch: bool = True,
+    ) -> list[FestivalFilm]:
+        films = await self.films(festival_id)
+        result: list[FestivalFilm] = []
+        for film in films:
+            if user_id is not None and film.user_id != user_id:
+                result.append(film)
+                continue
+            cleaned, parsed = split_title_and_age(film.title)
+            cleaned = normalize_film_title(cleaned or film.title)
+            if not cleaned:
+                result.append(film)
+                continue
+            title_changed = cleaned != film.title
+            if film.age_rating is not None and not title_changed:
+                result.append(film)
+                continue
+            rating = parsed or (film.age_rating or None)
+            if rating is None and fetch:
+                rating = await asyncio.to_thread(fetch_film_age, cleaned)
+            if rating is None:
+                rating = ""
+            film = await self.db.upsert_festival_film(
+                festival_id,
+                film.user_id,
+                cleaned,
+                film.image_url,
+                rating,
+                overwrite_age=True,
+            )
             result.append(film)
         return result
 
@@ -424,7 +546,10 @@ class FestivalService:
         shown = films[:40]
         if shown:
             lines = [
-                f"**{self._display_name(film.user_id, guild)}** — {normalize_film_title(film.title)}"
+                (
+                    f"**{self._display_name(film.user_id, guild)}** — "
+                    f"{normalize_film_title(film.title)}{format_age_tag(film.age_rating)}"
+                )
                 for film in shown
             ]
             extra = len(films) - len(shown)
@@ -434,8 +559,14 @@ class FestivalService:
         else:
             parts.append("_Пока никто не предложил._")
         if has_winner:
+            winner_film = next(
+                (film for film in films if film.user_id == festival.winner_user_id),
+                None,
+            )
+            winner_rating = winner_film.age_rating if winner_film is not None else None
             parts.append(
                 f"### {winner_emoji} {normalize_film_title(festival.winner_film or '')}"
+                f"{format_age_tag(winner_rating)}"
             )
         else:
             parts.append("Победитель: ещё не выбран")
