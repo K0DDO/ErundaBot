@@ -11,7 +11,11 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Quote
-from bot.utils.birthday_emojis import ensure_guild_emojis, expand_guild_shortcodes
+from bot.utils.birthday_emojis import (
+    ensure_guild_emojis,
+    expand_guild_shortcodes,
+    format_text_with_guild_emojis,
+)
 from bot.utils.permissions import is_guild_admin
 
 log = logging.getLogger(__name__)
@@ -122,17 +126,14 @@ class QuoteService:
         return ids
 
     def _quote_card_kwargs(self, quote: Quote, guild: discord.Guild | None = None) -> dict:
-        author = self.author_label(quote, guild)
+        author = format_text_with_guild_emojis(guild, self.author_label(quote, guild))
         date_part = self.format_quote_date(quote.created_at)
-        content = expand_guild_shortcodes(
-            guild,
-            discord.utils.escape_markdown(quote.content),
-        )
+        content = format_text_with_guild_emojis(guild, quote.content)
         avatar_url = self.author_avatar_url(quote, guild)
         return {
             "number_text": f"-# *#{quote.number}*",
-            "quote_text": "\n".join(f"## {line}" for line in f"«{content}»".split("\n")),
-            "author_text": f"**{discord.utils.escape_markdown(author)}**",
+            "quote_text": "\n".join(f"## {line}" if line else "##" for line in f"«{content}»".split("\n")),
+            "author_text": f"**{author}**",
             "date_text": f"-# *{date_part}*" if date_part else None,
             "reactions_text": self.format_reactions(quote.reactions_snapshot),
             "avatar_url": avatar_url,
@@ -361,6 +362,7 @@ class QuoteService:
         quote: Quote,
         channel: discord.TextChannel,
     ) -> Quote:
+        await ensure_guild_emojis(guild)
         message = await channel.send(view=self.build_quote_card(quote, guild))
         await self.db.set_quote_posted_message(quote.id, channel.id, message.id)
         quote.posted_channel_id = channel.id
@@ -379,6 +381,7 @@ class QuoteService:
         channel = guild.get_channel(quote.posted_channel_id)
         if not isinstance(channel, discord.TextChannel):
             return False
+        await ensure_guild_emojis(guild)
         try:
             message = await channel.fetch_message(quote.posted_message_id)
         except discord.NotFound:
@@ -504,8 +507,27 @@ class QuoteService:
 
         return removed
 
-    async def migrate_legacy_cards(self, guild: discord.Guild) -> int:
+    async def rewrite_stored_emojis(self, guild: discord.Guild) -> int:
         await ensure_guild_emojis(guild)
+        updated = 0
+        quotes = await self.db.list_quotes(guild.id, limit=10_000)
+        for quote in quotes:
+            new_content = expand_guild_shortcodes(guild, quote.content)
+            new_display = (
+                expand_guild_shortcodes(guild, quote.author_display)
+                if quote.author_display
+                else quote.author_display
+            )
+            if new_content == quote.content and new_display == quote.author_display:
+                continue
+            quote.content = new_content
+            quote.author_display = new_display
+            await self.db.save_quote(quote)
+            updated += 1
+        return updated
+
+    async def migrate_legacy_cards(self, guild: discord.Guild) -> int:
+        await self.rewrite_stored_emojis(guild)
         quotes = await self.db.list_quotes(guild.id, limit=10_000)
         migrated = 0
         for quote in quotes:

@@ -99,14 +99,32 @@ async def ensure_guild_emojis(guild: discord.Guild) -> None:
 
 
 def expand_guild_shortcodes(guild: discord.Guild | None, text: str) -> str:
-    if guild is None or not text:
+    if not text:
         return text
+    cleaned = text.replace("\\_", "_")
+    if guild is None:
+        return cleaned
 
     def replace(match: re.Match[str]) -> str:
         emoji = _find_guild_emoji(guild, name=match.group("name"))
         return str(emoji) if emoji is not None else match.group(0)
 
-    return SHORTCODE_SEARCH_RE.sub(replace, text)
+    return SHORTCODE_SEARCH_RE.sub(replace, cleaned)
+
+
+def format_text_with_guild_emojis(guild: discord.Guild | None, text: str) -> str:
+    """Expand :name: then escape markdown without breaking <:name:id>."""
+    if not text:
+        return text
+    expanded = expand_guild_shortcodes(guild, text)
+    chunks: list[str] = []
+    last = 0
+    for match in CUSTOM_EMOJI_SEARCH_RE.finditer(expanded):
+        chunks.append(escape_markdown_inline(expanded[last:match.start()]))
+        chunks.append(match.group(0))
+        last = match.end()
+    chunks.append(escape_markdown_inline(expanded[last:]))
+    return "".join(chunks)
 
 
 def render_birthday_emoji(
