@@ -90,22 +90,6 @@ class FestivalCog(commands.Cog):
         await refresh_festival_message(self.bot, festival)
         await interaction.response.send_message(embed=success_embed("Фильм убран"), ephemeral=True)
 
-    @fest.command(name="role", description="Взять / снять роль Кино (дебаг)")
-    @app_commands.guild_only()
-    async def fest_role(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        try:
-            added = await self.bot.festival_service.toggle_staff_role(
-                interaction.guild,
-                interaction.user,
-            )
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        text = "Роль «Кино» выдана" if added else "Роль «Кино» снята"
-        await interaction.response.send_message(embed=success_embed(text), ephemeral=True)
-
     @fest.command(name="new", description="Открыть новый кинофестиваль")
     @app_commands.guild_only()
     async def fest_new(self, interaction: discord.Interaction) -> None:

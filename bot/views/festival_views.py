@@ -318,6 +318,31 @@ class FestivalAddButton(ui.Button):
         )
 
 
+class FestivalRemoveButton(ui.Button):
+    def __init__(self, bot: ErundaBot, festival_id: int) -> None:
+        super().__init__(
+            label="Убрать фильм",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"fest:remove:{festival_id}",
+        )
+        self.bot = bot
+        self.festival_id = festival_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            return
+        try:
+            festival = await self.bot.festival_service.remove_film(
+                interaction.guild.id,
+                interaction.user.id,
+            )
+        except ValueError as extra:
+            await interaction.response.send_message(embed=error_embed(str(extra)), ephemeral=True)
+            return
+        await refresh_festival_message(self.bot, festival)
+        await interaction.response.send_message(embed=success_embed("Фильм убран"), ephemeral=True)
+
+
 class FestivalCardView(ui.LayoutView):
     def __init__(
         self,
@@ -363,6 +388,7 @@ class FestivalCardView(ui.LayoutView):
         elif festival.status == "open":
             row = ui.ActionRow()
             row.add_item(FestivalAddButton(bot, festival.id))
+            row.add_item(FestivalRemoveButton(bot, festival.id))
             container.add_item(row)
         self.add_item(container)
 
@@ -373,6 +399,7 @@ class FestivalView(discord.ui.View):
         self.bot = bot
         self.festival_id = festival_id
         self.add_item(FestivalAddButton(bot, festival_id))
+        self.add_item(FestivalRemoveButton(bot, festival_id))
 
 
 def register_festival_views(bot: ErundaBot, festivals: list[Festival]) -> None:
