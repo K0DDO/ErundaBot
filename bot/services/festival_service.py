@@ -147,7 +147,8 @@ _CERT_TO_AGE = {
     "18+": "18+",
     "18": "18+",
 }
-_TMDB_AGE_CACHE: dict[str, str] = {}
+_TMDB_SEARCH_CACHE: dict[str, str] = {}
+_TMDB_META_CACHE: dict[str, tuple[str, str]] = {}
 _TMDB_MOVIE_HREF_RE = re.compile(
     r'href="/movie/(\d+)(?:-([^"?]*))?',
     re.IGNORECASE,
@@ -522,14 +523,16 @@ def _wikidata_is_film(entity_id: str) -> bool:
     return False
 
 
-def _tmdb_age(tmdb_id: str) -> str | None:
-    cached = _TMDB_AGE_CACHE.get(tmdb_id)
+def _tmdb_meta(tmdb_id: str) -> tuple[str | None, str | None]:
+    cached = _TMDB_META_CACHE.get(tmdb_id)
     if cached is not None:
-        return cached or None
+        rating, poster = cached
+        return rating or None, poster or None
     html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}?language=ru")
     if not html:
         html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}")
     rating = None
+    poster = None
     if html:
         match = _TMDB_CERT_RE.search(html)
         raw = " ".join(match.group(1).split()) if match else ""
@@ -538,11 +541,22 @@ def _tmdb_age(tmdb_id: str) -> str | None:
             if rating is None:
                 token = re.search(r"\b(18\+|16\+|12\+|6\+|0\+)\b", raw)
                 rating = token.group(1) if token else None
-    _TMDB_AGE_CACHE[tmdb_id] = rating or ""
-    return rating
+        poster = _og_image_from_html(html)
+        if poster:
+            poster = poster.replace("/t/p/w500/", "/t/p/w780/")
+    _TMDB_META_CACHE[tmdb_id] = (rating or "", poster or "")
+    return rating, poster
+
+
+def _tmdb_age(tmdb_id: str) -> str | None:
+    return _tmdb_meta(tmdb_id)[0]
 
 
 def _tmdb_search_id(title: str) -> str | None:
+    key = film_title_key(title)
+    cached = _TMDB_SEARCH_CACHE.get(key)
+    if cached is not None:
+        return cached or None
     best_id: str | None = None
     best_score = 0.0
     fallback: str | None = None
@@ -572,9 +586,9 @@ def _tmdb_search_id(title: str) -> str | None:
             if score > best_score:
                 best_score = score
                 best_id = tmdb_id
-    if best_score >= 0.4:
-        return best_id
-    return fallback
+    found = best_id if best_score >= 0.4 else fallback
+    _TMDB_SEARCH_CACHE[key] = found or ""
+    return found
 
 
 def _wikidata_age(entity_id: str) -> str | None:
@@ -641,7 +655,12 @@ def fetch_film_age(title: str) -> str | None:
 
 
 def fetch_film_poster(title: str) -> str | None:
-    return _kinopoisk_poster(title) or _wikipedia_poster(title) or _itunes_poster(title)
+    tmdb_id = _tmdb_search_id(title)
+    if tmdb_id:
+        poster = _tmdb_meta(tmdb_id)[1]
+        if poster:
+            return poster
+    return _wikipedia_poster(title) or _itunes_poster(title) or _kinopoisk_poster(title)
 
 
 def pick_guild_emoji(guild: discord.Guild | None, seed: int) -> str:
