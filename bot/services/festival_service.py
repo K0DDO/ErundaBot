@@ -20,6 +20,7 @@ from bot.utils.permissions import fetch_bot_member
 from bot.utils.timezones import format_countdown, format_datetime_local, parse_event_datetime
 
 FEST_ROLE_NAME = "Кино"
+MSK_TIMEZONE = "Europe/Moscow"
 POSTER_USER_AGENT = "ErundaBot/1.0 (https://github.com/K0DDO/ErundaBot)"
 OG_IMAGE_RE = re.compile(
     r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
@@ -289,6 +290,11 @@ class FestivalService:
             raise ValueError("Название фильма пустое")
         if await self.db.is_film_blocked(guild_id, film_title_key(cleaned)):
             raise ValueError("Этот фильм уже нельзя предлагать")
+        previous = await self.db.get_previous_festival(guild_id, festival.number)
+        if previous is not None and previous.winner_user_id == user_id:
+            raise ValueError(
+                "Ты победил в прошлом кинофестивале. Предложить фильм можно со следующего"
+            )
         existing = await self.db.get_festival_film(festival.id, user_id)
         film = await self.db.upsert_festival_film(festival.id, user_id, cleaned, None)
         return festival, film, existing is not None
@@ -362,6 +368,23 @@ class FestivalService:
         dt = datetime.fromisoformat(festival.starts_at)
         return format_datetime_local(dt, tz_name)
 
+    def _starts_at(self, festival: Festival) -> datetime:
+        dt = datetime.fromisoformat(festival.starts_at)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    def session_text(self, festival: Festival) -> str:
+        if festival.status != "open":
+            return "Сеанс: **закончился**"
+        dt = self._starts_at(festival)
+        date_label, time_label = format_datetime_local(dt, MSK_TIMEZONE)
+        unix = int(dt.timestamp())
+        return (
+            f"Сеанс: **{date_label} {time_label} МСК**\n"
+            f"-# местное время: <t:{unix}:f>"
+        )
+
     def starts_input(self, festival: Festival, tz_name: str) -> tuple[str, str]:
         dt = datetime.fromisoformat(festival.starts_at)
         if dt.tzinfo is None:
@@ -393,12 +416,11 @@ class FestivalService:
         winner_emoji: str = "🎬",
         ping_role: discord.Role | None = None,
     ) -> str:
-        date_label, time_label = self.format_starts(festival, tz_name)
         has_winner = bool(festival.winner_user_id and festival.winner_film)
         parts: list[str] = []
         if has_winner and ping_role is not None:
             parts.append(ping_role.mention)
-        parts.append(f"Сеанс: **{date_label} {time_label}**")
+        parts.append(self.session_text(festival))
         shown = films[:40]
         if shown:
             lines = [

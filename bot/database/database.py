@@ -1710,6 +1710,14 @@ class Database:
         row = await cursor.fetchone()
         return Festival.from_row(row) if row else None
 
+    async def get_previous_festival(self, guild_id: int, number: int) -> Festival | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM festivals WHERE guild_id = ? AND number < ? ORDER BY number DESC LIMIT 1",
+            (guild_id, number),
+        )
+        row = await cursor.fetchone()
+        return Festival.from_row(row) if row else None
+
     async def list_guild_festivals(self, guild_id: int) -> list[Festival]:
         cursor = await self.connection.execute(
             "SELECT * FROM festivals WHERE guild_id = ? ORDER BY number DESC",
