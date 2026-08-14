@@ -155,8 +155,8 @@ class ChannelFieldSelect(discord.ui.Select):
 class ChannelPicker(discord.ui.ChannelSelect):
     def __init__(self, parent: "ChannelConfigView") -> None:
         super().__init__(
-            placeholder="Выбери текстовый канал",
-            channel_types=[discord.ChannelType.text],
+            placeholder="Выбери текстовый канал или объявления",
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
             min_values=1,
             max_values=1,
         )
