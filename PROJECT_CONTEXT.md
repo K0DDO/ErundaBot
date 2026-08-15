@@ -24,14 +24,14 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 
 - Python 3.12+, `discord.py>=2.6`, aiosqlite, Docker + GitHub Actions deploy (`DEPLOY.md`)
 - Intents: members, message content, `emojis_and_stickers`
-- Env: `DISCORD_TOKEN`, `DATABASE_PATH`, `DEFAULT_TIMEZONE`, `GROQ_API_KEY`, `GROQ_MODEL` (дефолт `openai/gpt-oss-20b`; `llama-3.1-8b-instant` снимают 16.08.2026). Groq: `User-Agent: ErundaBot/1.0` (без него Cloudflare 1010/403), для gpt-oss — `max_completion_tokens` + `reasoning_effort=low`.
+- Env: `DISCORD_TOKEN`, `DATABASE_PATH`, `DEFAULT_TIMEZONE`, `GROQ_API_KEY`, `GROQ_MODEL` (дефолт `openai/gpt-oss-20b`; `llama-3.1-8b-instant` снимают 16.08.2026). Groq: `User-Agent: ErundaBot/1.0` (без него Cloudflare 1010/403), для gpt-oss — `max_completion_tokens` + `reasoning_effort=low`, таймаут поздравления 120с.
 - Slash-группы в Discord визуально не группируются в пикере; группы уже есть (`quote`, `birthday`, `myrole`, `event`, `proposal`, `fest`, `tgk`)
 
 ## Команды (актуально)
 
 ```text
 /config
-/birthday set|remove|test-announce
+/birthday set|remove|preview|test-announce
 /profile [user]          # ephemeral
 /top
 /event create|list|cancel
@@ -43,7 +43,7 @@ Apps → Add quote
 /proposal create|list|info|cancel
 ```
 
-Удалены и не возвращать без запроса: `/birthday list|next|preview` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`; `/fest list|block|preview|test-ping|role`. Вернули по запросу: `/birthday test-announce` (ephemeral ИИ-поздравление).
+Удалены и не возвращать без запроса: `/birthday list|next` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`; `/fest list|block|preview|test-ping|role`. Вернули по запросу: `/birthday test-announce` (ephemeral ИИ-поздравление), `/birthday preview` (ближайшие даты).
 
 ## Модули
 
@@ -65,7 +65,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Дни рождения (заморожено)
 
-Команды: `set`, `remove`, дебаг `/birthday test-announce` (ephemeral, любой участник; если даты нет — генерит как будто сегодня). Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (только русский текст), пинг только в день ДР. Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
+Команды: `set`, `remove`, `/birthday preview` (ephemeral ближайшие даты), дебаг `/birthday test-announce` (ephemeral, любой участник; если даты нет — генерит как будто сегодня). Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (голос из чата, случайный тон, можно зацепить роль/цитаты/кино/войс; ждёт ответ до 2 мин). Пинг только в день ДР. Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
 
 ### Роли (заморожено)
 
@@ -115,6 +115,6 @@ bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timez
 - Groq: дефолт `openai/gpt-oss-20b` вместо снятой `llama-3.1-8b-instant`
 - Убраны `/event join|info|leave` — функционал кнопок на карточке
 - Цитаты: карточки V2, номера, author_ids, эмодзи сервера, confirm delete, без list/import
-- ДР: AI Groq, RGB именинник, без list/next/preview/debug
+- ДР: AI Groq, RGB именинник, preview ближайших дат, без list/next/debug
 - `/profile` ephemeral
 - `discord.py>=2.6`, `intents.emojis_and_stickers`

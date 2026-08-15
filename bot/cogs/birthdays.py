@@ -13,7 +13,7 @@ from discord.ext import commands
 
 from bot.database.models import Birthday
 from bot.services.birthday_service import occurrence_on_year
-from bot.utils.embeds import error_embed, success_embed
+from bot.utils.embeds import error_embed, success_embed, base_embed
 from bot.views.birthday_views import BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
@@ -72,6 +72,31 @@ class BirthdaysCog(commands.Cog):
         )
         await refresh_birthday_board(self.bot, interaction.guild)
 
+    @birthday.command(name="preview", description="Ближайшие дни рождения")
+    @app_commands.guild_only()
+    async def birthday_preview(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        entries = await self.bot.birthday_service.list_sorted(
+            interaction.guild.id,
+            config.timezone,
+        )
+        if not entries:
+            await interaction.response.send_message(
+                embed=base_embed(
+                    title="Дни рождения",
+                    description="Пока никто не указал день рождения.",
+                ),
+                ephemeral=True,
+            )
+            return
+        text = self.bot.birthday_service.format_preview_lines(interaction.guild, entries)
+        await interaction.response.send_message(
+            embed=base_embed(title="Ближайшие дни рождения", description=text),
+            ephemeral=True,
+        )
+
     @birthday.command(name="test-announce", description="Дебаг: ИИ-поздравление только тебе")
     @app_commands.describe(member="Кому сгенерировать, по умолчанию ты")
     @app_commands.guild_only()
@@ -113,7 +138,7 @@ class BirthdaysCog(commands.Cog):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         await interaction.followup.send(
-            content="ИИ не сработал — запасной текст",
+            content="ИИ не ответил за 2 минуты — запасной текст",
             embed=embed,
             ephemeral=True,
         )

@@ -108,6 +108,7 @@ class BirthdayService:
         "**Как добавить свой день рождения:**\n"
         "• `/birthday set` — указать / изменить дату\n"
         "• `/birthday remove` — удалить дату\n"
+        "• `/birthday preview` — ближайшие даты\n"
         "• эмодзи: обычный или серверный (`:name:` / вставь с сервера)"
     )
     MAX_BOARD_ENTRIES = 30
@@ -371,6 +372,38 @@ class BirthdayService:
             color=BRAND_COLOR,
         ).set_footer(text="Ерунда")
 
+    async def collect_congrats_facts(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+    ) -> tuple[list[str], list[str]]:
+        facts: list[str] = []
+        allowed: list[str] = []
+        record = await self.db.get_personal_role(guild.id, user_id)
+        if record is not None:
+            role = guild.get_role(record.role_id)
+            if role is not None:
+                facts.append(f"персональная роль называется «{role.name}»")
+                allowed.append(role.name)
+        quotes = await self.db.count_quotes(guild.id, user_id)
+        if quotes:
+            facts.append(f"цитат на сервере: {quotes}")
+        wins = sum(
+            1
+            for festival in await self.db.list_guild_festivals(guild.id)
+            if festival.winner_user_id == user_id
+        )
+        if wins:
+            facts.append(f"побед в кинофестивале: {wins}")
+        config = await self.db.get_guild(guild.id)
+        tz_name = config.timezone if config is not None else "Europe/Moscow"
+        now_iso = datetime.now(ZoneInfo(tz_name)).isoformat()
+        voice = await self.db.sum_voice_seconds(guild.id, user_id, None, None, now_iso)
+        if isinstance(voice, int) and voice >= 3600:
+            hours = voice // 3600
+            facts.append(f"в войсе всего около {hours} ч")
+        return facts, allowed
+
     async def announce_embed(
         self,
         guild: discord.Guild,
@@ -380,11 +413,14 @@ class BirthdayService:
         *,
         mention: bool = True,
     ) -> tuple[discord.Embed, bool]:
+        facts, extra_allowed = await self.collect_congrats_facts(guild, birthday.user_id)
         description, used_ai = await ai_service.build_announce_embed_description(
             guild,
             birthday,
             today,
             mention=mention,
+            facts=facts,
+            extra_allowed=extra_allowed,
         )
         embed = discord.Embed(
             title="День рождения",
