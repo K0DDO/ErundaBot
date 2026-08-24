@@ -26,6 +26,7 @@ class BirthdaysCog(commands.Cog):
     def __init__(self, bot: ErundaBot) -> None:
         self.bot = bot
         self._board_synced = False
+        self._old_greetings_cleaned = False
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -39,6 +40,25 @@ class BirthdaysCog(commands.Cog):
                     await self.bot.birthday_service.sync_board(guild, self.bot)
                 except Exception:
                     log.exception("Failed to sync birthday board for guild %s", guild.id)
+                try:
+                    local_today = datetime.now(ZoneInfo(config.timezone)).date()
+                    removed = await self.bot.birthday_service.cleanup_past_messages(
+                        guild,
+                        local_today,
+                        history_limit=500,
+                    )
+                    if removed:
+                        log.info(
+                            "Removed %s old birthday greetings in guild %s",
+                            removed,
+                            guild.id,
+                        )
+                except Exception:
+                    log.exception(
+                        "Failed to cleanup old birthday greetings for guild %s",
+                        guild.id,
+                    )
+        self._old_greetings_cleaned = True
 
     birthday = app_commands.Group(name="birthday", description="Дни рождения")
 

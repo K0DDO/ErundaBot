@@ -5,7 +5,7 @@ from __future__ import annotations
 import calendar
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -362,13 +362,19 @@ class BirthdayService:
         self,
         guild: discord.Guild,
         today: date,
+        *,
+        history_limit: int = 300,
     ) -> int:
-        """Delete reminder + announce messages after the birthday day has passed."""
+        """Delete reminder + announce messages after the birthday day has passed.
+
+        Also sweeps the birthday channel for older greetings that were sent
+        before message ids were stored.
+        """
+        removed = 0
         rows = await self.db.list_birthday_notification_messages(
             guild.id,
             before_date=today.isoformat(),
         )
-        removed = 0
         for user_id, channel_id, message_id, event_date, kind in rows:
             channel = guild.get_channel(channel_id)
             if channel is not None and hasattr(channel, "fetch_message"):
@@ -383,6 +389,44 @@ class BirthdayService:
                 user_id,
                 event_date,
                 kind,
+            )
+
+        config = await self.db.get_guild(guild.id)
+        if config is None or config.birthday_channel_id is None or guild.me is None:
+            return removed
+        channel = guild.get_channel(config.birthday_channel_id)
+        if channel is None or not isinstance(channel, discord.TextChannel):
+            return removed
+
+        board_id = config.birthday_board_message_id
+        stale_titles = {"День рождения", "Скоро день рождения"}
+        try:
+            tz = ZoneInfo(config.timezone)
+        except Exception:
+            tz = ZoneInfo("Europe/Moscow")
+        try:
+            async for message in channel.history(limit=history_limit):
+                if board_id is not None and message.id == board_id:
+                    continue
+                if message.author.id != guild.me.id or not message.embeds:
+                    continue
+                title = message.embeds[0].title or ""
+                if title not in stale_titles:
+                    continue
+                created = message.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if created.astimezone(tz).date() >= today:
+                    continue
+                try:
+                    await message.delete()
+                    removed += 1
+                except discord.HTTPException:
+                    pass
+        except discord.HTTPException:
+            log.warning(
+                "Failed to sweep old birthday greetings in guild %s",
+                guild.id,
             )
         return removed
 
