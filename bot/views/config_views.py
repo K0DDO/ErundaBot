@@ -78,7 +78,6 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
             f"Timezone: `{config.timezone}`\n"
             f"Поздравления: `{config.birthday_announce_time}`\n"
             f"Напоминание ДР (дней): `{config.birthday_reminder_days}`\n"
-            f"Напоминание ивента (мин): `{config.event_reminder_minutes}`\n"
             f"Напоминание кино (мин): `{config.fest_reminder_minutes}`\n"
             f"Длительность голосования (ч): `{config.proposal_duration_hours}`\n"
             f"Кворум: `{config.proposal_quorum}`\n"
@@ -389,12 +388,6 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
         required=True,
         max_length=2,
     )
-    event_minutes = discord.ui.TextInput(
-        label="Напоминание ивента (минут)",
-        placeholder="60",
-        required=True,
-        max_length=5,
-    )
     fest_minutes = discord.ui.TextInput(
         label="Напоминание кино (минут, 0 = выкл)",
         placeholder="60",
@@ -418,11 +411,6 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
                 "birthday_reminder_days",
                 int(str(self.reminder_days.value).strip()),
             )
-            await self.bot.config_service.set_int(
-                self.guild_id,
-                "event_reminder_minutes",
-                int(str(self.event_minutes.value).strip()),
-            )
             config = await self.bot.config_service.set_int(
                 self.guild_id,
                 "fest_reminder_minutes",
@@ -441,7 +429,6 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
                 (
                     f"Поздравления: `{config.birthday_announce_time}`\n"
                     f"ДР заранее: `{config.birthday_reminder_days}` дн.\n"
-                    f"Ивент: `{config.event_reminder_minutes}` мин.\n"
                     f"Кино: `{config.fest_reminder_minutes}` мин."
                 ),
             ),

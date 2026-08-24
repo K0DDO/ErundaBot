@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS events (
     organizer_id INTEGER NOT NULL,
     message_id INTEGER,
     number INTEGER NOT NULL DEFAULT 0,
+    ping_role_id INTEGER,
     status TEXT NOT NULL DEFAULT 'scheduled'
         CHECK (status IN ('scheduled', 'cancelled', 'completed')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -654,6 +655,14 @@ class Database:
                 except Exception:
                     pass
             await self._db.execute("PRAGMA user_version = 18")
+        if version < 19:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE events ADD COLUMN ping_role_id INTEGER"
+                )
+            except Exception:
+                pass
+            await self._db.execute("PRAGMA user_version = 19")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -1147,7 +1156,7 @@ class Database:
         description: str,
         starts_at: str,
         organizer_id: int,
-        max_participants: int | None,
+        ping_role_id: int,
         channel_id: int | None,
     ) -> Event:
         await self.ensure_guild(guild_id)
@@ -1156,10 +1165,19 @@ class Database:
             """
             INSERT INTO events (
                 guild_id, title, description, starts_at,
-                max_participants, channel_id, organizer_id, number
+                channel_id, organizer_id, number, ping_role_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, title, description, starts_at, max_participants, channel_id, organizer_id, number),
+            (
+                guild_id,
+                title,
+                description,
+                starts_at,
+                channel_id,
+                organizer_id,
+                number,
+                ping_role_id,
+            ),
         )
         await self.connection.commit()
         event = await self.get_event(cursor.lastrowid)
@@ -1183,7 +1201,17 @@ class Database:
         return Event.from_row(row) if row else None
 
     async def update_event(self, event_id: int, **fields: Any) -> Event:
-        allowed = {"title", "description", "starts_at", "max_participants", "channel_id", "message_id", "status", "number"}
+        allowed = {
+            "title",
+            "description",
+            "starts_at",
+            "max_participants",
+            "channel_id",
+            "message_id",
+            "status",
+            "number",
+            "ping_role_id",
+        }
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"Unknown event fields: {sorted(unknown)}")

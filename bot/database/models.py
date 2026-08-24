@@ -121,11 +121,13 @@ class Event:
     message_id: int | None
     status: str
     number: int = 0
+    ping_role_id: int | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> Event:
         keys = row.keys()
         number = row["number"] if "number" in keys else None
+        ping_role = row["ping_role_id"] if "ping_role_id" in keys else None
         return cls(
             id=row["id"],
             guild_id=row["guild_id"],
@@ -138,6 +140,7 @@ class Event:
             message_id=row["message_id"],
             status=row["status"],
             number=int(number) if number else 0,
+            ping_role_id=int(ping_role) if ping_role else None,
         )
 
 

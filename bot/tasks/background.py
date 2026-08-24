@@ -160,54 +160,6 @@ class BackgroundTasks:
         await self.bot.wait_until_ready()
         now = datetime.now(timezone.utc)
         try:
-            guilds = await self.bot.db.list_guilds()
-        except Exception:
-            log.exception("Failed to load guilds for event loop")
-            return
-
-        for config in guilds:
-            guild = self.bot.get_guild(config.guild_id)
-            if guild is None:
-                continue
-            channel_id = config.events_channel_id
-            if channel_id is None:
-                continue
-            channel = guild.get_channel(channel_id)
-            if channel is None or not hasattr(channel, "send"):
-                continue
-
-            try:
-                reminders = await self.bot.event_service.due_reminders(config, now)
-                for event in reminders:
-                    date_label, time_label = self.bot.event_service.format_starts_at(
-                        event, config.timezone
-                    )
-                    participants = await self.bot.event_service.participants_for_display(event)
-                    mentions = " ".join(f"<@{uid}>" for uid in participants[:20])
-                    embed = base_embed(
-                        title="Напоминание об ивенте",
-                        description=(
-                            f"**{event.title}** начнётся {date_label} в {time_label}."
-                            + (f"\n{mentions}" if mentions else "")
-                        ),
-                    )
-                    await channel.send(embed=embed)
-                    await self.bot.event_service.mark_notified(event.id, "reminder")
-
-                starts = await self.bot.event_service.due_starts(config, now)
-                for event in starts:
-                    participants = await self.bot.event_service.participants_for_display(event)
-                    mentions = " ".join(f"<@{uid}>" for uid in participants[:20])
-                    embed = base_embed(
-                        title="Ивент начинается",
-                        description=f"**{event.title}** сейчас!\n{mentions}".strip(),
-                    )
-                    await channel.send(embed=embed)
-                    await self.bot.event_service.mark_notified(event.id, "start")
-            except Exception:
-                log.exception("Event loop failed for guild %s", config.guild_id)
-
-        try:
             for event in await self.bot.event_service.overdue_events(now):
                 await retire_event(self.bot, event, status="completed")
         except Exception:

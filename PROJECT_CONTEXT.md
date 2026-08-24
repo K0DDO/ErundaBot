@@ -34,7 +34,7 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 /birthday set|remove
 /profile [user]          # ephemeral
 /top
-/event create|list|cancel
+/event create|list|cancel|ping
 /fest add|remove|new|edit|delete|export|winner|ping
 /tgk add|remove|list
 /quote add|edit|delete|cleanup|random|user
@@ -43,13 +43,13 @@ Apps → Add quote
 /proposal create|list|info|cancel
 ```
 
-Удалены и не возвращать без запроса: `/birthday list|next|preview|test-announce` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`; `/fest list|block|preview|test-ping|role`.
+Удалены и не возвращать без запроса: `/birthday list|next|preview|test-announce` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave` и кнопки участия; `/fest list|block|preview|test-ping|role`.
 
 ## Модули
 
 ### Ивенты
 
-Slash только create / list / cancel. Кнопки на карточке: «Участвовать» и «Не участвовать». Описание курсивом, создатель первый в «Участники». `/event cancel` показывает карточку и спрашивает «Удалить этот ивент?» (как цитаты). После отмены в оригинале жирно **Ивент отменён**, кнопки снимаются, запись удаляется, номера сдвигаются. `/event list` — ephemeral, только ещё не начавшиеся, ссылка на оригинал. Через 2 часа после старта карточка завершается и запись удаляется.
+Slash: `create` (с ролью для пинга) / `list` / `cancel` / `ping`. Без списка участников и без кнопок «Участвовать». На карточке: описание курсивом, дата/время, роль пинга. `/event cancel` показывает карточку и спрашивает «Удалить этот ивент?». После отмены в оригинале жирно **Ивент отменён**, запись удаляется, номера сдвигаются. `/event list` — ephemeral, все scheduled (включая уже начавшиеся), ссылка на оригинал. `/event ping номер` — пингует роль ивента: если уже начался — «идёт», иначе сколько осталось. Автонапоминаний нет. Через 2 часа после старта карточка завершается и запись удаляется.
 
 ### Кинофестиваль
 
@@ -88,18 +88,18 @@ bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v18)
+## БД (миграции до v19)
 
 Таблицы: … `festivals` (номера с 29), `festival_films` (`image_url` постер, `age_rating` вроде `12+` / `NSFW`, `runtime_minutes`), `festival_ratings` (оценка 1–10), `festival_blocked_films` (прошлые победители и ручной блок), `tg_channels`. `birthday_notifications` хранит `channel_id`/`message_id` напоминания и поздравления.
 
-Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `config_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
+Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `config_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled), `ping_role_id` (роль для `/event ping`).
 
 `Database.close()` должен оставаться отдельным методом — не вшивать его в `_migrate` (уже ломалось).
 
 ## Background
 
 - `birthday_loop` — поздравления и напоминания
-- `event_loop` — напоминания, старт, auto-complete
+- `event_loop` — auto-complete через 2ч после старта
 - `fest_loop` — напоминание о сеансе по `fest_reminder_minutes`
 - `proposal_loop` — закрытие голосований, auto-actions
 
@@ -110,10 +110,11 @@ bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timez
 ## Recent changes (2026-08)
 
 - Кинофестиваль и ТГК: сбор фильмов, победитель по имени, доска каналов
+- Ивенты: роль пинга на карточке, `/event ping`, без участников/кнопок/автонапоминаний
 - Ивенты: гильдийные номера, удаление после завершения
-- Карточка ивента: курсивное описание, участники списком, создатель первый
+- Карточка ивента: курсивное описание, роль вместо списка людей
+- Убраны `/event join|info|leave` — раньше были кнопки, теперь только пинг по роли
 - Groq: дефолт `openai/gpt-oss-20b` вместо снятой `llama-3.1-8b-instant`
-- Убраны `/event join|info|leave` — функционал кнопок на карточке
 - Цитаты: карточки V2, номера, author_ids, эмодзи сервера, confirm delete, без list/import
 - ДР: AI Groq, RGB именинник, без list/next/preview/test-announce/debug
 - `/profile` ephemeral
