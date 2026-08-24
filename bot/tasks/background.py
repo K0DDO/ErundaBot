@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from discord.ext import tasks
+import discord
 
 from bot.utils.embeds import base_embed
 from bot.views.event_views import retire_event
@@ -95,6 +96,14 @@ class BackgroundTasks:
                 if channel is None or not hasattr(channel, "send"):
                     continue
 
+                try:
+                    await self.bot.birthday_service.cleanup_past_messages(guild, local_today)
+                except Exception:
+                    log.exception(
+                        "Failed to cleanup birthday messages for guild %s",
+                        config.guild_id,
+                    )
+
                 announcements = await self.bot.birthday_service.due_announcements(config, now)
                 for birthday in announcements:
                     member = guild.get_member(birthday.user_id)
@@ -105,19 +114,26 @@ class BackgroundTasks:
                             )
                         except Exception:
                             log.exception("Failed to grant birthday star to %s", birthday.user_id)
+                    # Mention only in message content — embeds show raw IDs on mobile.
                     embed, _used_ai = await self.bot.birthday_service.announce_embed(
                         guild,
                         birthday,
                         local_today,
                         self.bot.ai_service,
-                        mention=True,
+                        mention=False,
                     )
-                    await channel.send(embed=embed)
+                    message = await channel.send(
+                        content=f"<@{birthday.user_id}>",
+                        embed=embed,
+                        allowed_mentions=discord.AllowedMentions(users=True),
+                    )
                     await self.bot.birthday_service.mark_notified(
                         config.guild_id,
                         birthday.user_id,
                         local_today,
                         "announce",
+                        channel_id=channel.id,
+                        message_id=message.id,
                     )
 
                 reminders = await self.bot.birthday_service.due_reminders(config, now)
@@ -127,12 +143,14 @@ class BackgroundTasks:
                         birthday,
                         days=config.birthday_reminder_days,
                     )
-                    await channel.send(embed=embed)
+                    message = await channel.send(embed=embed)
                     await self.bot.birthday_service.mark_notified(
                         config.guild_id,
                         birthday.user_id,
                         event_date,
                         "reminder",
+                        channel_id=channel.id,
+                        message_id=message.id,
                     )
             except Exception:
                 log.exception("Birthday loop failed for guild %s", config.guild_id)

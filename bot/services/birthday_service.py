@@ -345,13 +345,46 @@ class BirthdayService:
         user_id: int,
         event_date: date,
         kind: str,
+        *,
+        channel_id: int | None = None,
+        message_id: int | None = None,
     ) -> None:
         await self.db.mark_birthday_notified(
             guild_id,
             user_id,
             event_date.isoformat(),
             kind,
+            channel_id=channel_id,
+            message_id=message_id,
         )
+
+    async def cleanup_past_messages(
+        self,
+        guild: discord.Guild,
+        today: date,
+    ) -> int:
+        """Delete reminder + announce messages after the birthday day has passed."""
+        rows = await self.db.list_birthday_notification_messages(
+            guild.id,
+            before_date=today.isoformat(),
+        )
+        removed = 0
+        for user_id, channel_id, message_id, event_date, kind in rows:
+            channel = guild.get_channel(channel_id)
+            if channel is not None and hasattr(channel, "fetch_message"):
+                try:
+                    message = await channel.fetch_message(message_id)
+                    await message.delete()
+                    removed += 1
+                except discord.HTTPException:
+                    pass
+            await self.db.clear_birthday_notification_message(
+                guild.id,
+                user_id,
+                event_date,
+                kind,
+            )
+        return removed
 
     def reminder_embed(
         self,

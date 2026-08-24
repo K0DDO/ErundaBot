@@ -65,7 +65,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Дни рождения (заморожено)
 
-Команды: `set`, `remove`, `/birthday preview` (ephemeral ближайшие даты), дебаг `/birthday test-announce` (ephemeral, любой участник; если даты нет — генерит как будто сегодня). Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (голос из чата, случайный тон, можно зацепить роль/цитаты/кино/войс; ждёт ответ до 2 мин). Пинг только в день ДР. Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
+Команды: `set`, `remove`, `/birthday preview` (ephemeral ближайшие даты), дебаг `/birthday test-announce` (ephemeral, любой участник; если даты нет — генерит как будто сегодня). Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (голос из чата, случайный тон, можно зацепить роль/цитаты/кино/войс; ждёт ответ до 2 мин). Пинг в день ДР — отдельной строкой сообщения (не в embed: на мобиле иначе сырой id). После полуночи следующего дня удаляются оба сообщения: напоминание и поздравление. Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
 
 ### Роли (заморожено)
 
@@ -88,9 +88,9 @@ bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v17)
+## БД (миграции до v18)
 
-Таблицы: … `festivals` (номера с 29), `festival_films` (`image_url` постер, `age_rating` вроде `12+` / `NSFW`, `runtime_minutes`), `festival_ratings` (оценка 1–10), `festival_blocked_films` (прошлые победители и ручной блок), `tg_channels`.
+Таблицы: … `festivals` (номера с 29), `festival_films` (`image_url` постер, `age_rating` вроде `12+` / `NSFW`, `runtime_minutes`), `festival_ratings` (оценка 1–10), `festival_blocked_films` (прошлые победители и ручной блок), `tg_channels`. `birthday_notifications` хранит `channel_id`/`message_id` напоминания и поздравления.
 
 Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `config_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled).
 

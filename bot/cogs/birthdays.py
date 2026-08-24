@@ -132,15 +132,14 @@ class BirthdaysCog(commands.Cog):
             birthday,
             announce_on,
             self.bot.ai_service,
-            mention=True,
+            mention=False,
         )
-        if used_ai:
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
+        note = None if used_ai else "ИИ не ответил за 2 минуты — запасной текст"
         await interaction.followup.send(
-            content="ИИ не ответил за 2 минуты — запасной текст",
+            content=f"{target.mention}" + (f"\n{note}" if note else ""),
             embed=embed,
             ephemeral=True,
+            allowed_mentions=discord.AllowedMentions(users=True),
         )
 
 

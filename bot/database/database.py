@@ -220,6 +220,8 @@ CREATE TABLE IF NOT EXISTS birthday_notifications (
     user_id INTEGER NOT NULL,
     event_date TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('announce', 'reminder')),
+    channel_id INTEGER,
+    message_id INTEGER,
     sent_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (guild_id, user_id, event_date, kind),
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
@@ -642,6 +644,16 @@ class Database:
                 except Exception:
                     pass
             await self._db.execute("PRAGMA user_version = 17")
+        if version < 18:
+            for sql in (
+                "ALTER TABLE birthday_notifications ADD COLUMN channel_id INTEGER",
+                "ALTER TABLE birthday_notifications ADD COLUMN message_id INTEGER",
+            ):
+                try:
+                    await self._db.execute(sql)
+                except Exception:
+                    pass
+            await self._db.execute("PRAGMA user_version = 18")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -811,12 +823,81 @@ class Database:
         user_id: int,
         event_date: str,
         kind: str,
+        *,
+        channel_id: int | None = None,
+        message_id: int | None = None,
     ) -> None:
         await self.connection.execute(
             """
-            INSERT OR IGNORE INTO birthday_notifications
-                (guild_id, user_id, event_date, kind)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO birthday_notifications
+                (guild_id, user_id, event_date, kind, channel_id, message_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, event_date, kind) DO UPDATE SET
+                channel_id = COALESCE(excluded.channel_id, birthday_notifications.channel_id),
+                message_id = COALESCE(excluded.message_id, birthday_notifications.message_id),
+                sent_at = birthday_notifications.sent_at
+            """,
+            (guild_id, user_id, event_date, kind, channel_id, message_id),
+        )
+        await self.connection.commit()
+
+    async def list_birthday_notification_messages(
+        self,
+        guild_id: int,
+        *,
+        before_date: str | None = None,
+        user_id: int | None = None,
+        event_date: str | None = None,
+    ) -> list[tuple[int, int, int, str, str]]:
+        """Return (user_id, channel_id, message_id, event_date, kind) with saved messages."""
+        clauses = [
+            "guild_id = ?",
+            "channel_id IS NOT NULL",
+            "message_id IS NOT NULL",
+        ]
+        params: list[object] = [guild_id]
+        if before_date is not None:
+            clauses.append("event_date < ?")
+            params.append(before_date)
+        if user_id is not None:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if event_date is not None:
+            clauses.append("event_date = ?")
+            params.append(event_date)
+        where = " AND ".join(clauses)
+        cursor = await self.connection.execute(
+            f"""
+            SELECT user_id, channel_id, message_id, event_date, kind
+            FROM birthday_notifications
+            WHERE {where}
+            """,
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [
+            (
+                int(row["user_id"]),
+                int(row["channel_id"]),
+                int(row["message_id"]),
+                str(row["event_date"]),
+                str(row["kind"]),
+            )
+            for row in rows
+        ]
+
+    async def clear_birthday_notification_message(
+        self,
+        guild_id: int,
+        user_id: int,
+        event_date: str,
+        kind: str,
+    ) -> None:
+        await self.connection.execute(
+            """
+            UPDATE birthday_notifications
+            SET channel_id = NULL, message_id = NULL
+            WHERE guild_id = ? AND user_id = ? AND event_date = ? AND kind = ?
             """,
             (guild_id, user_id, event_date, kind),
         )
