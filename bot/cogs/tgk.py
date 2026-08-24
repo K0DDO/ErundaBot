@@ -61,7 +61,15 @@ class TgkCog(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True)
-        messages = await self.bot.tgk_service.sync_board(interaction.guild, self.bot)
+        try:
+            messages = await self.bot.tgk_service.sync_board(interaction.guild, self.bot)
+        except Exception:
+            log.exception("tgk list sync failed for guild %s", interaction.guild.id)
+            await interaction.followup.send(
+                embed=error_embed("Не удалось обновить доску ТГК"),
+                ephemeral=True,
+            )
+            return
         if not messages:
             await interaction.followup.send(
                 embed=error_embed("Канал ТГК недоступен"),

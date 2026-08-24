@@ -55,7 +55,6 @@ class TgChannelMeta:
 
 class TgkService:
     DISCORD_COMPONENT_LIMIT = 40
-    COMPONENT_BUDGET = 34
     MAX_BOARD_CHANNELS = 10
     OWNER_SEPARATOR_WIDTH = 52
 
@@ -273,18 +272,35 @@ class TgkService:
 
     @classmethod
     def estimate_page_components(cls, channels: list[TgChannel], *, with_header: bool = True) -> int:
+        """Rough hint only; use can_build_page for splitting."""
         if not channels:
             return 2 if with_header else 0
         cost = 2 if with_header else 0
         for _user_id, user_channels in cls._groups_in_order(channels):
             cost += 3
             for entry in user_channels:
-                cost += 3 if entry.image_url else 1
+                cost += 4 if entry.image_url else 2
         return cost
 
-    @classmethod
-    def _page_fits(cls, channels: list[TgChannel]) -> bool:
-        return cls.estimate_page_components(channels) <= cls.COMPONENT_BUDGET
+    def can_build_page(
+        self,
+        guild: discord.Guild,
+        channels: list[TgChannel],
+        *,
+        page_index: int = 0,
+    ) -> bool:
+        if not channels:
+            return True
+        try:
+            self.build_board_page(
+                guild,
+                channels,
+                page_index=page_index,
+                page_count=max(page_index + 1, 2),
+            )
+        except ValueError:
+            return False
+        return True
 
     @classmethod
     def board_capacity_hint(cls) -> str:
@@ -349,7 +365,7 @@ class TgkService:
             view.add_item(block)
         return view
 
-    def split_into_pages(self, channels: list[TgChannel]) -> list[list[TgChannel]]:
+    def split_into_pages(self, guild: discord.Guild, channels: list[TgChannel]) -> list[list[TgChannel]]:
         ordered = self.board_display_order(channels)
         if not ordered:
             return [[]]
@@ -357,23 +373,29 @@ class TgkService:
         pages: list[list[TgChannel]] = []
         current: list[TgChannel] = []
 
-        for group_user_id, group_channels in self._groups_in_order(ordered):
+        for _group_user_id, group_channels in self._groups_in_order(ordered):
             group = list(group_channels)
             while group:
                 trial = current + group
-                if current and not self._page_fits(trial):
+                if current and not self.can_build_page(guild, trial):
                     pages.append(current)
                     current = []
                     continue
-                if self._page_fits(trial):
+                if self.can_build_page(guild, trial):
                     current = trial
                     group = []
                     continue
                 if not current:
                     take = len(group)
-                    while take > 1 and not self._page_fits(group[:take]):
+                    while take > 1 and not self.can_build_page(guild, group[:take]):
                         take -= 1
                     chunk = group[:take]
+                    if not self.can_build_page(guild, chunk):
+                        log.error(
+                            "TGK page chunk does not fit Discord limit (%s channels)",
+                            len(chunk),
+                        )
+                        break
                     pages.append(chunk)
                     group = group[take:]
                     continue
@@ -420,7 +442,7 @@ class TgkService:
             )
             ordered = self.board_display_order(await self.list_all(guild.id))
 
-        pages = self.split_into_pages(ordered)
+        pages = self.split_into_pages(guild, ordered)
         if sum(len(page) for page in pages) != len(ordered):
             log.error("TGK sync aborted: page split mismatch for guild %s", guild.id)
             return []
@@ -430,20 +452,28 @@ class TgkService:
         display_offset = 0
 
         for page_index, page_channels in enumerate(pages):
-            view = self.build_board_page(
-                guild,
-                page_channels,
-                start_display_number=display_offset + 1,
-                page_index=page_index,
-                page_count=len(pages),
-            )
+            try:
+                view = self.build_board_page(
+                    guild,
+                    page_channels,
+                    start_display_number=display_offset + 1,
+                    page_index=page_index,
+                    page_count=len(pages),
+                )
+            except ValueError:
+                log.exception(
+                    "TGK board page %s exceeds Discord component limit in guild %s",
+                    page_index + 1,
+                    guild.id,
+                )
+                continue
             display_offset += len(page_channels)
             message: discord.Message | None = None
             if official and page_index < len(stored_ids):
                 try:
                     message = await post_channel.fetch_message(stored_ids[page_index])
                     await message.edit(content=None, embeds=[], view=view)
-                except discord.HTTPException:
+                except discord.DiscordException:
                     log.warning(
                         "Failed to edit TGK board page %s in guild %s",
                         page_index + 1,
@@ -453,7 +483,7 @@ class TgkService:
             if message is None:
                 try:
                     message = await post_channel.send(view=view)
-                except discord.HTTPException:
+                except discord.DiscordException:
                     log.exception(
                         "Failed to send TGK board page %s in guild %s",
                         page_index + 1,
@@ -467,7 +497,7 @@ class TgkService:
                 try:
                     stale = await post_channel.fetch_message(stale_id)
                     await stale.delete()
-                except discord.HTTPException:
+                except discord.DiscordException:
                     pass
             await self.db.set_tgk_board_message_ids(guild.id, [message.id for message in messages])
             log.info(
