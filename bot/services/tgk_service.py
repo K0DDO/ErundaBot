@@ -55,6 +55,7 @@ class TgChannelMeta:
 
 class TgkService:
     DISCORD_COMPONENT_LIMIT = 40
+    COMPONENT_BUDGET = 34
     MAX_BOARD_CHANNELS = 10
     OWNER_SEPARATOR_WIDTH = 52
 
@@ -283,14 +284,11 @@ class TgkService:
 
     @classmethod
     def _page_fits(cls, channels: list[TgChannel]) -> bool:
-        return cls.estimate_page_components(channels) <= cls.DISCORD_COMPONENT_LIMIT
+        return cls.estimate_page_components(channels) <= cls.COMPONENT_BUDGET
 
     @classmethod
     def board_capacity_hint(cls) -> str:
-        return (
-            f"В одно сообщение ~{cls.MAX_BOARD_CHANNELS} ТГК (до ~12 у одного владельца). "
-            f"Если больше — доска разбивается на несколько сообщений подряд."
-        )
+        return "В одно сообщение ~8 ТГК с превью; если больше — несколько сообщений подряд."
 
     async def list_all(self, guild_id: int) -> list[TgChannel]:
         return await self.db.list_tg_channels(guild_id)
@@ -305,7 +303,7 @@ class TgkService:
         page_count: int = 1,
     ) -> ui.LayoutView:
         view = ui.LayoutView(timeout=None)
-        ordered = self.board_display_order(channels)
+        ordered = list(channels)
 
         header = ui.Container(accent_color=BRAND_COLOR)
         if page_index == 0:
@@ -356,11 +354,10 @@ class TgkService:
         if not ordered:
             return [[]]
 
-        groups = self._groups_in_order(ordered)
         pages: list[list[TgChannel]] = []
         current: list[TgChannel] = []
 
-        for _user_id, group_channels in groups:
+        for group_user_id, group_channels in self._groups_in_order(ordered):
             group = list(group_channels)
             while group:
                 trial = current + group
@@ -376,16 +373,23 @@ class TgkService:
                     take = len(group)
                     while take > 1 and not self._page_fits(group[:take]):
                         take -= 1
-                    current = group[:take]
+                    chunk = group[:take]
+                    pages.append(chunk)
                     group = group[take:]
-                    pages.append(current)
-                    current = []
                     continue
                 pages.append(current)
                 current = []
 
         if current:
             pages.append(current)
+
+        packed = sum(len(page) for page in pages)
+        if packed != len(ordered):
+            log.error(
+                "TGK page split lost entries: %s packed of %s",
+                packed,
+                len(ordered),
+            )
         return pages
 
     async def sync_board(
@@ -417,6 +421,10 @@ class TgkService:
             ordered = self.board_display_order(await self.list_all(guild.id))
 
         pages = self.split_into_pages(ordered)
+        if sum(len(page) for page in pages) != len(ordered):
+            log.error("TGK sync aborted: page split mismatch for guild %s", guild.id)
+            return []
+
         stored_ids = await self.db.get_tgk_board_message_ids(guild.id) if official else []
         messages: list[discord.Message] = []
         display_offset = 0
@@ -436,18 +444,37 @@ class TgkService:
                     message = await post_channel.fetch_message(stored_ids[page_index])
                     await message.edit(content=None, embeds=[], view=view)
                 except discord.HTTPException:
+                    log.warning(
+                        "Failed to edit TGK board page %s in guild %s",
+                        page_index + 1,
+                        guild.id,
+                    )
                     message = None
             if message is None:
-                message = await post_channel.send(view=view)
+                try:
+                    message = await post_channel.send(view=view)
+                except discord.HTTPException:
+                    log.exception(
+                        "Failed to send TGK board page %s in guild %s",
+                        page_index + 1,
+                        guild.id,
+                    )
+                    continue
             messages.append(message)
 
-        if official:
-            for stale_id in stored_ids[len(pages) :]:
+        if official and messages:
+            for stale_id in stored_ids[len(messages) :]:
                 try:
                     stale = await post_channel.fetch_message(stale_id)
                     await stale.delete()
                 except discord.HTTPException:
                     pass
             await self.db.set_tgk_board_message_ids(guild.id, [message.id for message in messages])
+            log.info(
+                "Synced TGK board in guild %s: %s channels, %s messages",
+                guild.id,
+                len(ordered),
+                len(messages),
+            )
 
         return messages

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import discord
@@ -11,6 +12,8 @@ from bot.utils.embeds import error_embed, success_embed
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
 
+log = logging.getLogger(__name__)
+
 
 async def refresh_tgk_board(bot: ErundaBot, guild: discord.Guild | None) -> None:
     if guild is None:
@@ -18,7 +21,7 @@ async def refresh_tgk_board(bot: ErundaBot, guild: discord.Guild | None) -> None
     try:
         await bot.tgk_service.sync_board(guild, bot)
     except Exception:
-        pass
+        log.exception("Failed to sync TGK board for guild %s", guild.id)
 
 
 class TgkAddModal(discord.ui.Modal, title="Добавить ТГК"):
