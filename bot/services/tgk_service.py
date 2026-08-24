@@ -15,10 +15,12 @@ from discord import ui
 
 from bot.database.database import Database
 from bot.database.models import TgChannel
-from bot.utils.birthday_emojis import render_birthday_emoji
+from bot.utils.birthday_emojis import CUSTOM_EMOJI_SEARCH_RE, render_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR
 
 log = logging.getLogger(__name__)
+
+OWNER_SEPARATOR_WIDTH = 44
 
 TG_HOST_RE = re.compile(
     r"^(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/@?([A-Za-z0-9_]{3,})/?$",
@@ -190,11 +192,48 @@ class TgkService:
         return "/+" in lowered or "/joinchat/" in lowered
 
     @staticmethod
+    def _visual_len(text: str) -> int:
+        """Approximate monospace width for centering (emoji ≈ 2, custom emoji = 1)."""
+        normalized = CUSTOM_EMOJI_SEARCH_RE.sub("E", text)
+        size = 0
+        idx = 0
+        while idx < len(normalized):
+            ch = normalized[idx]
+            code = ord(ch)
+            if code == 0xFE0F:
+                idx += 1
+                continue
+            if code > 0xFFFF:
+                size += 2
+                idx += 2
+                continue
+            if 0x1F300 <= code <= 0x1FAFF or 0x2600 <= code <= 0x27BF:
+                size += 2
+                idx += 1
+                if idx < len(normalized) and ord(normalized[idx]) == 0xFE0F:
+                    idx += 1
+                continue
+            size += 1
+            idx += 1
+        return size
+
+    @classmethod
+    def _centered_dashes(cls, center: str, width: int = OWNER_SEPARATOR_WIDTH) -> str:
+        center_len = cls._visual_len(center)
+        if center_len >= width:
+            return center
+        pad = width - center_len
+        left = pad // 2
+        right = pad - left
+        return f"{'-' * left}{center}{'-' * right}"
+
+    @staticmethod
     def _owner_separator(guild: discord.Guild, user_id: int) -> str:
         member = guild.get_member(user_id)
         username = member.name if member is not None else f"user{user_id}"
         emoji = render_birthday_emoji(guild, None, user_id=user_id)
-        return f"---------------- {emoji} {username} ----------------"
+        center = f" {emoji} {username} "
+        return TgkService._centered_dashes(center)
 
     @staticmethod
     def _channel_title(item: TgChannel) -> str:
