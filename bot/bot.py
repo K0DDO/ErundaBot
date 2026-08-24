@@ -63,7 +63,7 @@ class ErundaBot(commands.Bot):
         self.ai_service = AIService()
         self.statistics_service = StatisticsService(self.db)
         self.event_service = EventService(self.db)
-        self.festival_service = FestivalService(self.db)
+        self.festival_service = FestivalService(self.db, self.ai_service)
         self.tgk_service = TgkService(self.db)
         self.quote_service = QuoteService(self.db)
         self.role_service = RoleService(self.db)

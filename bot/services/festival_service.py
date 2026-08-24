@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import urllib.error
 import urllib.parse
@@ -20,6 +21,8 @@ from bot.utils.formatting import format_duration
 from bot.utils.permissions import fetch_bot_member, is_guild_admin
 from bot.utils.timezones import format_countdown, format_datetime_local, parse_event_datetime
 
+log = logging.getLogger(__name__)
+
 FEST_ROLE_NAME = "Кино"
 MSK_TIMEZONE = "Europe/Moscow"
 DEFAULT_RUNTIME_MINUTES = 120
@@ -30,6 +33,14 @@ OG_IMAGE_RE = re.compile(
 )
 OG_IMAGE_RE_ALT = re.compile(
     r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']',
+    re.IGNORECASE,
+)
+OG_TITLE_RE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+OG_TITLE_RE_ALT = re.compile(
+    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:title["\']',
     re.IGNORECASE,
 )
 
@@ -150,7 +161,9 @@ _CERT_TO_AGE = {
     "18": "18+",
 }
 _TMDB_SEARCH_CACHE: dict[str, str] = {}
-_TMDB_META_CACHE: dict[str, tuple[str, str, int]] = {}
+_TMDB_META_CACHE: dict[str, tuple[str, str, int, str]] = {}
+_TITLE_ALIAS_CACHE: dict[str, list[str]] = {}
+_TMDB_HOST = "themoviedb.org"
 _TMDB_MOVIE_HREF_RE = re.compile(
     r'href="/movie/(\d+)(?:-([^"?]*))?',
     re.IGNORECASE,
@@ -206,6 +219,19 @@ def _http_html(url: str, timeout: int = 8) -> str | None:
             return response.read().decode("utf-8", errors="ignore")
     except (urllib.error.URLError, TimeoutError, OSError):
         return None
+
+
+def _og_title_from_html(html: str) -> str | None:
+    match = OG_TITLE_RE.search(html) or OG_TITLE_RE_ALT.search(html)
+    if match is None:
+        return None
+    title = " ".join(match.group(1).split()).strip()
+    title = re.sub(r"\s*\(\d{4}\)\s*$", "", title).strip()
+    return title or None
+
+
+def _is_tmdb_poster(url: str | None) -> bool:
+    return bool(url and _TMDB_HOST in url)
 
 
 def _og_image_from_html(html: str) -> str | None:
@@ -553,17 +579,18 @@ def _label_duration_minutes(text: str) -> int | None:
     return total or None
 
 
-def _tmdb_meta(tmdb_id: str) -> tuple[str | None, str | None, int | None]:
+def _tmdb_meta(tmdb_id: str) -> tuple[str | None, str | None, int | None, str | None]:
     cached = _TMDB_META_CACHE.get(tmdb_id)
     if cached is not None:
-        rating, poster, runtime = cached
-        return rating or None, poster or None, runtime or None
+        rating, poster, runtime, title = cached
+        return rating or None, poster or None, runtime or None, title or None
     html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}?language=ru")
     if not html:
         html = _http_html(f"https://www.themoviedb.org/movie/{tmdb_id}")
     rating = None
     poster = None
     runtime = None
+    title = None
     if html:
         match = _TMDB_CERT_RE.search(html)
         raw = " ".join(match.group(1).split()) if match else ""
@@ -582,29 +609,37 @@ def _tmdb_meta(tmdb_id: str) -> tuple[str | None, str | None, int | None]:
             label = _TMDB_RUNTIME_RE.search(html)
             if label:
                 runtime = _label_duration_minutes(" ".join(label.group(1).split()))
-    _TMDB_META_CACHE[tmdb_id] = (rating or "", poster or "", runtime or 0)
-    return rating, poster, runtime
+        title = _og_title_from_html(html)
+    _TMDB_META_CACHE[tmdb_id] = (rating or "", poster or "", runtime or 0, title or "")
+    return rating, poster, runtime, title
 
 
 def _tmdb_age(tmdb_id: str) -> str | None:
     return _tmdb_meta(tmdb_id)[0]
 
 
-def _tmdb_search_id(title: str) -> str | None:
+def _tmdb_search_id(title: str, extra_terms: list[str] | None = None) -> str | None:
     key = film_title_key(title)
-    cached = _TMDB_SEARCH_CACHE.get(key)
-    if cached is not None:
-        return cached or None
-    best_id: str | None = None
-    best_score = 0.0
-    fallback: str | None = None
-    for term in _search_terms(title):
+    if not extra_terms:
+        cached = _TMDB_SEARCH_CACHE.get(key)
+        if cached is not None:
+            return cached or None
+    terms: list[str] = []
+    for term in [*_search_terms(title), *(extra_terms or [])]:
+        cleaned = " ".join(term.split())
+        if cleaned and cleaned not in terms:
+            terms.append(cleaned)
+    first_fallback: str | None = None
+    for term in terms:
         url = "https://www.themoviedb.org/search/movie?" + urllib.parse.urlencode(
             {"query": term, "language": "ru"}
         )
         html = _http_html(url)
         if not html:
             continue
+        best_id: str | None = None
+        best_score = 0.0
+        term_fallback: str | None = None
         seen: set[str] = set()
         for match in _TMDB_MOVIE_HREF_RE.finditer(html):
             tmdb_id = match.group(1)
@@ -612,21 +647,44 @@ def _tmdb_search_id(title: str) -> str | None:
                 continue
             seen.add(tmdb_id)
             slug = (match.group(2) or "").replace("-", " ")
-            if fallback is None:
-                fallback = tmdb_id
-            score = _title_score(title, slug)
+            if term_fallback is None:
+                term_fallback = tmdb_id
+            if first_fallback is None:
+                first_fallback = tmdb_id
+            score = max(_title_score(title, slug), _title_score(term, slug))
             if score == 0 and slug:
-                score = 0.5
-                if _sequel_mark(title) == _sequel_mark(slug):
+                score = 0.45
+                if _sequel_mark(title) == _sequel_mark(slug) or _sequel_mark(term) == _sequel_mark(
+                    slug
+                ):
                     score += 0.25
                 else:
                     score -= 0.35
             if score > best_score:
                 best_score = score
                 best_id = tmdb_id
-    found = best_id if best_score >= 0.4 else fallback
+        # Prefer a solid hit for this term before trying English/other aliases.
+        if best_score >= 0.4 and best_id:
+            _TMDB_SEARCH_CACHE[key] = best_id
+            return best_id
+        if term_fallback and _title_score(term, term) >= 0:
+            # Cyrillic query with a TMDB hit: take first result for this term.
+            if re.search(r"[а-яё]", term, re.IGNORECASE):
+                _TMDB_SEARCH_CACHE[key] = term_fallback
+                return term_fallback
+    found = first_fallback
     _TMDB_SEARCH_CACHE[key] = found or ""
     return found
+
+
+def _lookup_film(
+    title: str,
+    extra_terms: list[str] | None = None,
+) -> tuple[str | None, str | None, int | None, str | None]:
+    tmdb_id = _tmdb_search_id(title, extra_terms)
+    if not tmdb_id:
+        return None, None, None, None
+    return _tmdb_meta(tmdb_id)
 
 
 def _wikidata_age(entity_id: str) -> str | None:
@@ -676,36 +734,45 @@ def _wikidata_age(entity_id: str) -> str | None:
     return max(ages, key=lambda item: _AGE_RANK[item])
 
 
-def fetch_film_age(title: str) -> str | None:
+def fetch_film_age(title: str, extra_terms: list[str] | None = None) -> str | None:
     key = film_title_key(title)
-    if key in _AGE_CACHE:
+    if key in _AGE_CACHE and not extra_terms:
         return _AGE_CACHE[key] or None
-    rating = None
-    tmdb_id = _tmdb_search_id(title)
-    if tmdb_id:
-        rating = _tmdb_age(tmdb_id)
+    rating, _poster, _runtime, _official = _lookup_film(title, extra_terms)
     if rating is None:
-        entity = _find_film_entity(title)
-        if entity:
-            rating = _wikidata_age(entity)
+        for term in extra_terms or []:
+            entity = _find_film_entity(term)
+            if entity:
+                rating = _wikidata_age(entity)
+                if rating:
+                    break
+        if rating is None:
+            entity = _find_film_entity(title)
+            if entity:
+                rating = _wikidata_age(entity)
     _AGE_CACHE[key] = rating or ""
     return rating
 
 
-def fetch_film_poster(title: str) -> str | None:
-    tmdb_id = _tmdb_search_id(title)
-    if tmdb_id:
-        poster = _tmdb_meta(tmdb_id)[1]
-        if poster:
-            return poster
-    return _wikipedia_poster(title) or _itunes_poster(title) or _kinopoisk_poster(title)
+def fetch_film_poster(title: str, extra_terms: list[str] | None = None) -> str | None:
+    _rating, poster, _runtime, _official = _lookup_film(title, extra_terms)
+    return poster
 
 
-def fetch_film_runtime(title: str) -> int | None:
-    tmdb_id = _tmdb_search_id(title)
-    if not tmdb_id:
-        return None
-    return _tmdb_meta(tmdb_id)[2]
+def fetch_film_runtime(title: str, extra_terms: list[str] | None = None) -> int | None:
+    _rating, _poster, runtime, _official = _lookup_film(title, extra_terms)
+    return runtime
+
+
+def fetch_film_bundle(
+    title: str,
+    extra_terms: list[str] | None = None,
+) -> tuple[str | None, str | None, int | None, str | None]:
+    """Return age, poster, runtime, official TMDB title."""
+    rating, poster, runtime, official = _lookup_film(title, extra_terms)
+    if rating is None:
+        rating = fetch_film_age(title, extra_terms)
+    return rating, poster, runtime, official
 
 
 def pick_guild_emoji(guild: discord.Guild | None, seed: int) -> str:
@@ -718,8 +785,40 @@ def pick_guild_emoji(guild: discord.Guild | None, seed: int) -> str:
 
 
 class FestivalService:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, ai_service=None) -> None:
         self.db = db
+        self.ai = ai_service
+
+    async def lookup_terms(self, title: str) -> list[str]:
+        cleaned = normalize_film_title(title)
+        key = film_title_key(cleaned)
+        cached = _TITLE_ALIAS_CACHE.get(key)
+        if cached is not None:
+            return [cleaned, *[item for item in cached if item]]
+        aliases: list[str] = []
+        if self.ai is not None:
+            try:
+                aliases = await self.ai.canonicalize_film_title(cleaned)
+            except Exception:
+                log.exception("Film title canonicalize failed for %r", cleaned)
+                aliases = []
+        _TITLE_ALIAS_CACHE[key] = aliases
+        terms = [cleaned, *aliases]
+        return list(dict.fromkeys(item for item in terms if item))
+
+    async def resolve_film_meta(self, title: str) -> tuple[str, str | None, str | None, int | None]:
+        cleaned = normalize_film_title(title)
+        terms = await self.lookup_terms(cleaned)
+        extras = terms[1:]
+        rating, poster, runtime, official = await asyncio.to_thread(
+            fetch_film_bundle,
+            cleaned,
+            extras,
+        )
+        display = cleaned
+        if official and _tmdb_search_id(cleaned, extras):
+            display = normalize_film_title(official)
+        return display, rating, poster, runtime
 
     async def get_open(self, guild_id: int) -> Festival | None:
         return await self.db.get_open_festival(guild_id)
@@ -832,8 +931,12 @@ class FestivalService:
         cleaned = normalize_film_title(title)
         if not cleaned:
             raise ValueError("Название фильма пустое")
-        if await self.db.is_film_blocked(guild_id, film_title_key(cleaned)):
+        display, fetched_rating, poster, runtime = await self.resolve_film_meta(cleaned)
+        if await self.db.is_film_blocked(guild_id, film_title_key(display)):
             raise ValueError("Этот фильм уже нельзя предлагать")
+        if film_title_key(display) != film_title_key(cleaned):
+            if await self.db.is_film_blocked(guild_id, film_title_key(cleaned)):
+                raise ValueError("Этот фильм уже нельзя предлагать")
         previous = await self.db.get_previous_festival(guild_id, festival.number)
         if previous is not None and previous.winner_user_id == user_id:
             raise ValueError(
@@ -841,14 +944,12 @@ class FestivalService:
             )
         existing = await self.db.get_festival_film(festival.id, user_id)
         if rating is None:
-            _AGE_CACHE.pop(film_title_key(cleaned), None)
-            rating = await asyncio.to_thread(fetch_film_age, cleaned)
-        runtime = await asyncio.to_thread(fetch_film_runtime, cleaned)
+            rating = fetched_rating
         film = await self.db.upsert_festival_film(
             festival.id,
             user_id,
-            cleaned,
-            None,
+            display,
+            poster,
             rating or "",
             runtime,
             overwrite_age=True,
@@ -867,21 +968,23 @@ class FestivalService:
             if user_id is not None and film.user_id != user_id:
                 result.append(film)
                 continue
-            if film.image_url:
+            needs_poster = not _is_tmdb_poster(film.image_url)
+            needs_runtime = not film.runtime_minutes
+            if not needs_poster and not needs_runtime:
                 result.append(film)
                 continue
-            image_url = await asyncio.to_thread(fetch_film_poster, film.title)
-            runtime = film.runtime_minutes or await asyncio.to_thread(
-                fetch_film_runtime, film.title
-            )
-            if image_url or runtime:
+            display, _rating, poster, runtime = await self.resolve_film_meta(film.title)
+            image_url = poster if needs_poster else film.image_url
+            new_runtime = runtime if needs_runtime else film.runtime_minutes
+            new_title = display if film_title_key(display) != film_title_key(film.title) else film.title
+            if image_url != film.image_url or new_runtime != film.runtime_minutes or new_title != film.title:
                 film = await self.db.upsert_festival_film(
                     festival_id,
                     film.user_id,
-                    film.title,
+                    new_title,
                     image_url,
                     film.age_rating,
-                    runtime,
+                    new_runtime,
                 )
             result.append(film)
         return result
@@ -911,7 +1014,10 @@ class FestivalService:
                 continue
             rating = parsed
             if rating is None and fetch and not known:
-                rating = await asyncio.to_thread(fetch_film_age, cleaned)
+                _display, fetched, _poster, _runtime = await self.resolve_film_meta(cleaned)
+                rating = fetched
+                if _display and film_title_key(_display) != film_title_key(cleaned):
+                    cleaned = _display
             if rating is None and known and not title_changed:
                 rating = film.age_rating
             if rating is None:
@@ -958,7 +1064,7 @@ class FestivalService:
     async def ensure_runtime(self, film: FestivalFilm) -> FestivalFilm:
         if film.runtime_minutes:
             return film
-        runtime = await asyncio.to_thread(fetch_film_runtime, film.title)
+        _display, _rating, _poster, runtime = await self.resolve_film_meta(film.title)
         if not runtime:
             return film
         return await self.db.upsert_festival_film(

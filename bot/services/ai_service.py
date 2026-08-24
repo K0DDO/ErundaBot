@@ -20,9 +20,23 @@ DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 DEPRECATED_GROQ_MODELS = {"llama-3.1-8b-instant"}
 USER_AGENT = "ErundaBot/1.0"
 GROQ_TIMEOUT_SECONDS = 120
+FILM_TITLE_TIMEOUT_SECONDS = 20
 LATIN_WORD_RE = re.compile(r"\b[A-Za-z]{2,}\b")
 SIGN_OFF_RE = re.compile(
     r"(?im)^\s*(sincerely|с уважением|с любовью|your friends|друзья сервера).*$"
+)
+FILM_TITLE_PROMPT = (
+    "Ты помогаешь найти реальный фильм по кривому пользовательскому названию.\n"
+    "Верни ТОЛЬКО JSON одной строкой: "
+    '{"ru":"официальное русское название","en":"official English title"} '
+    "или {\"ru\":null,\"en\":null} если это не фильм / не знаешь.\n"
+    "Исправь опечатки и порядок слов. Не выдумывай несуществующие фильмы.\n"
+    "Примеры:\n"
+    'Александр Сергеевич Пушкин Пророк -> '
+    '{"ru":"Пророк. История Александра Пушкина","en":"The Prophet"}\n'
+    'дедпул 1 -> {"ru":"Дэдпул","en":"Deadpool"}\n'
+    'человек паук новый день -> '
+    '{"ru":"Человек-паук: Новый день","en":"Spider-Man: Brand New Day"}'
 )
 VIBES = (
     "нежное, без слащавости",
@@ -129,7 +143,70 @@ class AIService:
             log.warning("Groq birthday generation gave up after wait: %s", last_error)
         return None
 
-    def _request_groq(self, payload: bytes) -> str:
+    async def canonicalize_film_title(self, title: str) -> list[str]:
+        """Return RU/EN aliases for TMDB search. Empty if AI unavailable."""
+        cleaned = " ".join((title or "").split())
+        if not cleaned or not self.enabled:
+            return []
+        body: dict = {
+            "model": self.model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": FILM_TITLE_PROMPT},
+                {"role": "user", "content": cleaned},
+            ],
+        }
+        if self._is_reasoning_model:
+            body["max_completion_tokens"] = 512
+            body["reasoning_effort"] = "low"
+        else:
+            body["max_tokens"] = 120
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        try:
+            text = await asyncio.to_thread(
+                self._request_groq,
+                payload,
+                FILM_TITLE_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            log.exception("Groq film title canonicalize failed for %r", cleaned)
+            return []
+        return self._parse_film_titles(text, original=cleaned)
+
+    @staticmethod
+    def _parse_film_titles(text: str | None, *, original: str) -> list[str]:
+        if not text:
+            return []
+        raw = text.strip()
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match is None:
+            return []
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, dict):
+            return []
+        found: list[str] = []
+        original_key = original.casefold().replace("ё", "е")
+        ordered: list[str] = []
+        for key in ("ru", "en"):
+            value = data.get(key)
+            if not isinstance(value, str):
+                continue
+            title = " ".join(value.split()).strip(" \"'")
+            if not title:
+                continue
+            if title.casefold().replace("ё", "е") == original_key:
+                continue
+            if title not in ordered:
+                ordered.append(title)
+        # RU first so TMDB search prefers Russian hits over ambiguous English titles.
+        cyrillic = [item for item in ordered if re.search(r"[а-яё]", item, re.IGNORECASE)]
+        latin = [item for item in ordered if item not in cyrillic]
+        return [*cyrillic, *latin]
+
+    def _request_groq(self, payload: bytes, timeout: int = GROQ_TIMEOUT_SECONDS) -> str:
         request = urllib.request.Request(
             GROQ_URL,
             data=payload,
@@ -141,7 +218,7 @@ class AIService:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=GROQ_TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")[:400]
