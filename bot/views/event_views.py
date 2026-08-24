@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import discord
@@ -12,6 +13,10 @@ from bot.utils.formatting import role_mention
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
     from bot.database.models import Event
+
+log = logging.getLogger(__name__)
+
+_OLD_PING_EMBED_TITLES = frozenset({"Напоминание об ивенте", "Ивент начинается"})
 
 
 def _italic_description(raw: str) -> str | None:
@@ -91,10 +96,127 @@ async def resync_event_cards(bot: ErundaBot, events: list[Event]) -> None:
             pass
 
 
+def _is_bot_event_mention(
+    message: discord.Message,
+    bot_user_id: int,
+    *,
+    title: str | None = None,
+    keep_ids: set[int] | None = None,
+) -> bool:
+    if keep_ids and message.id in keep_ids:
+        return False
+    if message.author.id != bot_user_id:
+        return False
+    if message.embeds:
+        embed = message.embeds[0]
+        if (embed.title or "") in _OLD_PING_EMBED_TITLES:
+            if title is None or title in (embed.description or ""):
+                return True
+    content = message.content or ""
+    if not content:
+        return False
+    lowered = content.lower()
+    if "ивент" not in lowered:
+        return False
+    has_mention = bool(message.role_mentions or message.mentions) or "<@" in content
+    if not has_mention:
+        return False
+    if title is not None and title not in content:
+        return False
+    return "идёт" in lowered or "осталось" in lowered or "сейчас" in lowered
+
+
+async def cleanup_event_mentions(
+    bot: ErundaBot,
+    guild: discord.Guild,
+    *,
+    channel_id: int | None,
+    title: str | None = None,
+    keep_message_ids: set[int] | None = None,
+    history_limit: int = 200,
+) -> int:
+    """Delete bot ping/reminder messages in the events channel."""
+    if channel_id is None or guild.me is None:
+        return 0
+    channel = guild.get_channel(channel_id)
+    if channel is None or not isinstance(channel, discord.TextChannel):
+        return 0
+    removed = 0
+    try:
+        async for message in channel.history(limit=history_limit):
+            if not _is_bot_event_mention(
+                message,
+                guild.me.id,
+                title=title,
+                keep_ids=keep_message_ids,
+            ):
+                continue
+            try:
+                await message.delete()
+                removed += 1
+            except discord.HTTPException:
+                pass
+    except discord.HTTPException:
+        log.warning("Failed to sweep event mentions in guild %s", guild.id)
+    return removed
+
+
+async def sweep_orphan_event_mentions(bot: ErundaBot) -> None:
+    """Remove leftover event pings/reminders; keep pings for live events."""
+    for config in await bot.db.list_guilds():
+        guild = bot.get_guild(config.guild_id)
+        if guild is None or guild.me is None:
+            continue
+        live = await bot.event_service.list_scheduled(config.guild_id)
+        keep = {ev.message_id for ev in live if ev.message_id}
+        live_titles = {ev.title for ev in live}
+        channel_ids = {config.events_channel_id}
+        channel_ids.update(ev.channel_id for ev in live if ev.channel_id)
+        for channel_id in channel_ids:
+            if channel_id is None:
+                continue
+            channel = guild.get_channel(channel_id)
+            if channel is None or not isinstance(channel, discord.TextChannel):
+                continue
+            try:
+                async for message in channel.history(limit=200):
+                    if keep and message.id in keep:
+                        continue
+                    if message.author.id != guild.me.id:
+                        continue
+                    if message.embeds and (message.embeds[0].title or "") in _OLD_PING_EMBED_TITLES:
+                        try:
+                            await message.delete()
+                        except discord.HTTPException:
+                            pass
+                        continue
+                    if not _is_bot_event_mention(message, guild.me.id, keep_ids=keep):
+                        continue
+                    if any(title in (message.content or "") for title in live_titles):
+                        continue
+                    try:
+                        await message.delete()
+                    except discord.HTTPException:
+                        pass
+            except discord.HTTPException:
+                log.warning("Failed to sweep orphan event mentions in guild %s", guild.id)
+
+
 async def retire_event(bot: ErundaBot, event: Event, *, status: str) -> None:
     event.status = status
     config = await bot.config_service.get(event.guild_id)
+    guild = bot.get_guild(event.guild_id)
+    channel_id = event.channel_id or config.events_channel_id
     await close_event_card(bot, event, config.timezone)
+    if guild is not None:
+        keep = {event.message_id} if event.message_id else set()
+        await cleanup_event_mentions(
+            bot,
+            guild,
+            channel_id=channel_id,
+            title=event.title,
+            keep_message_ids=keep,
+        )
     remaining = await bot.event_service.delete_and_renumber(event)
     await resync_event_cards(bot, remaining)
 

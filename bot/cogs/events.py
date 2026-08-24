@@ -16,6 +16,7 @@ from bot.views.event_views import (
     EventCreateModal,
     event_embed,
     resync_event_cards,
+    sweep_orphan_event_mentions,
 )
 
 if TYPE_CHECKING:
@@ -37,6 +38,7 @@ class EventsCog(commands.Cog):
         try:
             events = await self.bot.db.list_scheduled_events()
             await resync_event_cards(self.bot, events)
+            await sweep_orphan_event_mentions(self.bot)
             log.info("Resynced %s event cards", len(events))
         except Exception:
             log.exception("Failed to resync event cards")
