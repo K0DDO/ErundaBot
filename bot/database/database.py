@@ -2189,19 +2189,23 @@ class Database:
         channels = await self.list_tg_channels(guild_id)
         if not channels:
             return []
-        for index, channel in enumerate(channels, start=1):
+        return await self.renumber_tg_channels_ordered(guild_id, [channel.id for channel in channels])
+
+    async def renumber_tg_channels_ordered(self, guild_id: int, ordered_ids: list[int]) -> list[TgChannel]:
+        if not ordered_ids:
+            return []
+        for index, channel_id in enumerate(ordered_ids, start=1):
             await self.connection.execute(
-                "UPDATE tg_channels SET number = ? WHERE id = ?",
-                (-index, channel.id),
+                "UPDATE tg_channels SET number = ? WHERE id = ? AND guild_id = ?",
+                (-index, channel_id, guild_id),
             )
-        for index, channel in enumerate(channels, start=1):
+        for index, channel_id in enumerate(ordered_ids, start=1):
             await self.connection.execute(
-                "UPDATE tg_channels SET number = ? WHERE id = ?",
-                (index, channel.id),
+                "UPDATE tg_channels SET number = ? WHERE id = ? AND guild_id = ?",
+                (index, channel_id, guild_id),
             )
-            channel.number = index
         await self.connection.commit()
-        return channels
+        return await self.list_tg_channels(guild_id)
 
     async def set_tgk_board_message_id(self, guild_id: int, message_id: int | None) -> None:
         await self.ensure_guild(guild_id)
