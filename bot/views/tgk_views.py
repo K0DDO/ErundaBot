@@ -24,7 +24,7 @@ async def refresh_tgk_board(bot: ErundaBot, guild: discord.Guild | None) -> None
 class TgkAddModal(discord.ui.Modal, title="Добавить ТГК"):
     link = discord.ui.TextInput(
         label="Ссылка",
-        placeholder="https://t.me/channel или @channel",
+        placeholder="https://t.me/channel, @channel или https://t.me/+invite",
         max_length=120,
         required=True,
     )

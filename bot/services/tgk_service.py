@@ -23,6 +23,14 @@ TG_HOST_RE = re.compile(
     r"^(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/@?([A-Za-z0-9_]{3,})/?$",
     re.IGNORECASE,
 )
+TG_INVITE_RE = re.compile(
+    r"^(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/(\+[A-Za-z0-9_-]+)/?$",
+    re.IGNORECASE,
+)
+TG_JOINCHAT_RE = re.compile(
+    r"^(?:https?://)?(?:t(?:elegram)?\.me|telegram\.dog)/joinchat/([A-Za-z0-9_-]+)/?$",
+    re.IGNORECASE,
+)
 TG_AT_RE = re.compile(r"^@([A-Za-z0-9_]{3,})$")
 OG_META_RE = re.compile(
     r'<meta[^>]+(?:property|name)=["\'](?P<key>og:(?:title|image))["\'][^>]+content=["\'](?P<content>[^"\']+)["\']',
@@ -58,27 +66,42 @@ class TgkService:
         at_match = TG_AT_RE.match(value)
         if at_match:
             return f"https://t.me/{at_match.group(1)}"
+        invite_match = TG_INVITE_RE.match(value)
+        if invite_match:
+            return f"https://t.me/{invite_match.group(1)}"
+        joinchat_match = TG_JOINCHAT_RE.match(value)
+        if joinchat_match:
+            return f"https://t.me/joinchat/{joinchat_match.group(1)}"
         host_match = TG_HOST_RE.match(value)
         if host_match:
             return f"https://t.me/{host_match.group(1)}"
         if value.startswith("https://t.me/"):
             return value.split("?")[0].rstrip("/")
-        raise ValueError("Нужна ссылка вида https://t.me/channel или @channel")
+        raise ValueError(
+            "Нужна ссылка вида https://t.me/channel, @channel или https://t.me/+invite"
+        )
 
     @staticmethod
-    def _username(url: str) -> str | None:
+    def _public_username(url: str) -> str | None:
         match = TG_HOST_RE.match(url)
         if match is None:
             return None
         name = match.group(1)
         if name.lower() in {"joinchat", "addstickers", "proxy", "socks", "s"}:
             return None
-        if name.startswith("+"):
-            return None
         return name
 
     @staticmethod
-    def _clean_title(raw: str, username: str) -> str:
+    def _page_label(url: str) -> str:
+        username = TgkService._public_username(url)
+        if username is not None:
+            return f"@{username}"
+        if TG_INVITE_RE.match(url) or TG_JOINCHAT_RE.match(url):
+            return "Telegram-канал"
+        return "канал"
+
+    @staticmethod
+    def _clean_title(raw: str, fallback: str) -> str:
         title = html.unescape(re.sub(r"\s+", " ", raw).strip())
         for prefix in ("Telegram: ", "Telegram – ", "Telegram - "):
             if title.startswith(prefix):
@@ -86,7 +109,7 @@ class TgkService:
         if title.lower().startswith("view @"):
             title = title[6:].strip()
         if not title or title.lower() in {"telegram", "telegram messenger"}:
-            return f"@{username}"
+            return fallback[:80]
         return title[:80]
 
     @staticmethod
@@ -99,7 +122,7 @@ class TgkService:
         return None
 
     @classmethod
-    def _parse_page_meta(cls, html_text: str, username: str) -> TgChannelMeta:
+    def _parse_page_meta(cls, html_text: str, fallback: str) -> TgChannelMeta:
         og_title: str | None = None
         og_image: str | None = None
         for pattern in (OG_META_RE, OG_META_RE_ALT):
@@ -116,15 +139,14 @@ class TgkService:
             page_match = PAGE_TITLE_RE.search(html_text)
             if page_match:
                 title = re.sub(r"<[^>]+>", "", page_match.group("title"))
-        cleaned = cls._clean_title(title or f"@{username}", username)
+        cleaned = cls._clean_title(title or fallback, fallback)
         return TgChannelMeta(title=cleaned, image_url=og_image)
 
     def fetch_channel_meta(self, url: str) -> TgChannelMeta:
-        username = self._username(url)
-        if username is None:
-            raise ValueError("Нужна публичная ссылка вида https://t.me/channel или @channel")
+        normalized = self.normalize_url(url)
+        fallback = self._page_label(normalized)
         request = urllib.request.Request(
-            f"https://t.me/{username}",
+            normalized,
             headers={"User-Agent": "Mozilla/5.0 ErundaBot"},
             method="GET",
         )
@@ -133,9 +155,9 @@ class TgkService:
                 page = response.read().decode("utf-8", errors="ignore")
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise ValueError("Не удалось открыть страницу канала в Telegram") from exc
-        meta = self._parse_page_meta(page, username)
-        if meta.title == f"@{username}" and meta.image_url is None:
-            raise ValueError("Канал не найден или ссылка ведёт не на публичный ТГК")
+        meta = self._parse_page_meta(page, fallback)
+        if meta.title == fallback and meta.image_url is None:
+            raise ValueError("Канал не найден или ссылка ведёт не на Telegram-канал")
         return meta
 
     async def add(self, guild_id: int, user_id: int, raw_url: str) -> TgChannel:
