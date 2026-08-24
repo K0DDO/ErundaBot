@@ -34,6 +34,7 @@ FLAG_OPTIONS = (
 ROLE_OPTIONS = (
     ("config_role_id", "Доступ к /config"),
     ("fest_ping_role_id", "Пинг кинофестиваля"),
+    ("tgk_list_role_id", "Отладка /tgk list"),
 )
 
 
@@ -59,7 +60,8 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
         name="Роли",
         value=(
             f"Доступ к /config: {role_mention(config.config_role_id)}\n"
-            f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}"
+            f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}\n"
+            f"Отладка /tgk list: {role_mention(config.tgk_list_role_id)}"
         ),
         inline=False,
     )

@@ -43,7 +43,7 @@ class ConfigService:
         return await self.db.update_guild(guild_id, **{field: int(enabled)})
 
     async def set_role(self, guild_id: int, field: str, role_id: int | None) -> GuildConfig:
-        allowed = {"fest_ping_role_id", "config_role_id"}
+        allowed = {"fest_ping_role_id", "config_role_id", "tgk_list_role_id"}
         if field not in allowed:
             raise ValueError(f"Invalid role field: {field}")
         return await self.db.update_guild(guild_id, **{field: role_id})

@@ -15,6 +15,7 @@ from discord import ui
 
 from bot.database.database import Database
 from bot.database.models import TgChannel
+from bot.utils.birthday_emojis import render_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR
 
 log = logging.getLogger(__name__)
@@ -181,6 +182,29 @@ class TgkService:
         await self.db.renumber_tg_channels(guild_id)
         return channel
 
+    @staticmethod
+    def is_private_url(url: str) -> bool:
+        if TG_INVITE_RE.match(url) or TG_JOINCHAT_RE.match(url):
+            return True
+        lowered = url.lower()
+        return "/+" in lowered or "/joinchat/" in lowered
+
+    @staticmethod
+    def _owner_separator(guild: discord.Guild, user_id: int) -> str:
+        member = guild.get_member(user_id)
+        username = member.name if member is not None else f"user{user_id}"
+        emoji = render_birthday_emoji(guild, None, user_id=user_id)
+        return f"---------------- {emoji} {username} ----------------"
+
+    @staticmethod
+    def _channel_title(item: TgChannel) -> str:
+        return f"# {item.number}.  {item.title}"
+
+    @staticmethod
+    def _channel_link(item: TgChannel) -> str:
+        kind = "приватка" if TgkService.is_private_url(item.url) else "открытый"
+        return f"[открыть]({item.url})\n-# {kind}"
+
     async def list_all(self, guild_id: int) -> list[TgChannel]:
         return await self.db.list_tg_channels(guild_id)
 
@@ -197,12 +221,10 @@ class TgkService:
         for channel in channels[:20]:
             grouped.setdefault(channel.user_id, []).append(channel)
         for user_id, items in grouped.items():
-            member = guild.get_member(user_id)
-            owner = member.display_name if member is not None else f"участник {user_id}"
-            container.add_item(ui.TextDisplay(f"**{owner}**"))
+            container.add_item(ui.TextDisplay(self._owner_separator(guild, user_id)))
             for item in items:
-                title = f"# {item.number}  {item.title}"
-                link = f"[открыть]({item.url})"
+                title = self._channel_title(item)
+                link = self._channel_link(item)
                 if item.image_url:
                     container.add_item(
                         ui.Section(

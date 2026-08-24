@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.utils.embeds import error_embed, success_embed
-from bot.utils.permissions import is_guild_admin
+from bot.utils.permissions import can_use_tgk_list, is_guild_admin, tgk_list_denied_reason
 from bot.views.tgk_views import TgkAddModal, refresh_tgk_board
 
 if TYPE_CHECKING:
@@ -42,29 +42,36 @@ class TgkCog(commands.Cog):
     async def tgk_add(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(TgkAddModal(self.bot))
 
-    @tgk.command(name="list", description="Список ТГК участников")
+    @tgk.command(name="list", description="Обновить доску ТГК (отладка)")
     @app_commands.guild_only()
     async def tgk_list(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
         config = await self.bot.config_service.get(interaction.guild.id)
-        if config.tgk_channel_id:
-            await interaction.response.defer(ephemeral=True)
-            message = await self.bot.tgk_service.sync_board(interaction.guild, self.bot)
-            if message is None:
-                await interaction.followup.send(
-                    embed=error_embed("Канал ТГК недоступен"),
-                    ephemeral=True,
-                )
-                return
-            await interaction.followup.send(
-                embed=success_embed("Доска ТГК", f"[Открыть]({message.jump_url})"),
+        if not can_use_tgk_list(interaction.user, config.tgk_list_role_id):
+            await interaction.response.send_message(
+                embed=error_embed("Недостаточно прав", tgk_list_denied_reason(config.tgk_list_role_id)),
                 ephemeral=True,
             )
             return
-        channels = await self.bot.tgk_service.list_all(interaction.guild.id)
-        view = self.bot.tgk_service.build_board(interaction.guild, channels)
-        await interaction.response.send_message(view=view)
+        if config.tgk_channel_id is None:
+            await interaction.response.send_message(
+                embed=error_embed("Канал ТГК не настроен. Укажи его в /config."),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        message = await self.bot.tgk_service.sync_board(interaction.guild, self.bot)
+        if message is None:
+            await interaction.followup.send(
+                embed=error_embed("Канал ТГК недоступен"),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=success_embed("Доска ТГК обновлена", f"[Открыть]({message.jump_url})"),
+            ephemeral=True,
+        )
 
     @tgk.command(name="remove", description="Удалить ТГК по номеру")
     @app_commands.describe(number="Номер с доски")

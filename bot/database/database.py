@@ -663,6 +663,14 @@ class Database:
             except Exception:
                 pass
             await self._db.execute("PRAGMA user_version = 19")
+        if version < 20:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE guilds ADD COLUMN tgk_list_role_id INTEGER"
+                )
+            except Exception:
+                pass
+            await self._db.execute("PRAGMA user_version = 20")
 
     async def close(self) -> None:
         if self._db is not None:

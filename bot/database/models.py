@@ -35,6 +35,7 @@ class GuildConfig:
     config_role_id: int | None = None
     fest_reminder_minutes: int = 60
     tgk_board_message_id: int | None = None
+    tgk_list_role_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
 
@@ -80,6 +81,9 @@ class GuildConfig:
             else 60,
             tgk_board_message_id=row["tgk_board_message_id"]
             if "tgk_board_message_id" in row.keys()
+            else None,
+            tgk_list_role_id=row["tgk_list_role_id"]
+            if "tgk_list_role_id" in row.keys()
             else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -384,5 +388,6 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "config_role_id",
         "fest_reminder_minutes",
         "tgk_board_message_id",
+        "tgk_list_role_id",
     }
 )

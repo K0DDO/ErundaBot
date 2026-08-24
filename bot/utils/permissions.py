@@ -24,6 +24,18 @@ def config_denied_reason(config_role_id: int | None) -> str:
     return "Нужна роль доступа к /config или права администратора."
 
 
+def can_use_tgk_list(member: discord.Member, list_role_id: int | None) -> bool:
+    if list_role_id is not None and any(role.id == list_role_id for role in member.roles):
+        return True
+    return is_guild_admin(member)
+
+
+def tgk_list_denied_reason(list_role_id: int | None) -> str:
+    if list_role_id is None:
+        return "Настрой роль для /tgk list в /config → Роли."
+    return f"Нужна <@&{list_role_id}> или права администратора."
+
+
 def bot_cannot_send_reason(guild: discord.Guild, channel: discord.abc.Snowflake) -> str | None:
     bot_member = guild.me
     if bot_member is None:
