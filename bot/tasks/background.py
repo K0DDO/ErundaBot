@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -27,6 +27,7 @@ class BackgroundTasks:
         self.bot = bot
         self._started = False
         self._fest_phase: dict[int, str] = {}
+        self._tgk_meta_date: dict[int, date] = {}
 
     @property
     def started(self) -> bool:
@@ -47,6 +48,8 @@ class BackgroundTasks:
             self.fest_loop.start()
         if not self.birthday_rgb_loop.is_running():
             self.birthday_rgb_loop.start()
+        if not self.tgk_meta_loop.is_running():
+            self.tgk_meta_loop.start()
         log.info("Background tasks started")
 
     async def stop(self) -> None:
@@ -59,6 +62,7 @@ class BackgroundTasks:
             self.proposal_loop,
             self.fest_loop,
             self.birthday_rgb_loop,
+            self.tgk_meta_loop,
         ):
             if loop.is_running():
                 loop.cancel()
@@ -253,6 +257,35 @@ class BackgroundTasks:
             except Exception:
                 log.exception("Proposal close failed for %s", proposal.id)
 
+    @tasks.loop(minutes=1)
+    async def tgk_meta_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        try:
+            guilds = await self.bot.db.list_guilds()
+        except Exception:
+            log.exception("Failed to load guilds for TGK meta loop")
+            return
+
+        for config in guilds:
+            if config.tgk_channel_id is None:
+                continue
+            guild = self.bot.get_guild(config.guild_id)
+            if guild is None:
+                continue
+            try:
+                local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(config.timezone))
+                local_today = local_now.date()
+                if local_now.hour != 4 or local_now.minute != 0:
+                    continue
+                if self._tgk_meta_date.get(config.guild_id) == local_today:
+                    continue
+                updated = await self.bot.tgk_service.refresh_guild_meta(config.guild_id)
+                if updated:
+                    await self.bot.tgk_service.sync_board(guild, self.bot)
+                self._tgk_meta_date[config.guild_id] = local_today
+            except Exception:
+                log.exception("TGK meta loop failed for guild %s", config.guild_id)
+
     @birthday_loop.before_loop
     async def before_birthday_loop(self) -> None:
         await self.bot.wait_until_ready()
@@ -276,4 +309,8 @@ class BackgroundTasks:
 
     @birthday_rgb_loop.before_loop
     async def before_birthday_rgb_loop(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @tgk_meta_loop.before_loop
+    async def before_tgk_meta_loop(self) -> None:
         await self.bot.wait_until_ready()

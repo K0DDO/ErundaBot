@@ -2203,6 +2203,23 @@ class Database:
         await self.connection.commit()
         return cursor.rowcount > 0
 
+    async def update_tg_channel_meta(
+        self,
+        channel_id: int,
+        guild_id: int,
+        title: str,
+        image_url: str | None,
+    ) -> None:
+        await self.connection.execute(
+            """
+            UPDATE tg_channels
+            SET title = ?, image_url = ?
+            WHERE id = ? AND guild_id = ?
+            """,
+            (title, image_url, channel_id, guild_id),
+        )
+        await self.connection.commit()
+
     async def renumber_tg_channels(self, guild_id: int) -> list[TgChannel]:
         channels = await self.list_tg_channels(guild_id)
         if not channels:

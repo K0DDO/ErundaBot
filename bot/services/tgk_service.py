@@ -320,6 +320,33 @@ class TgkService:
     async def list_for_user(self, guild_id: int, user_id: int) -> list[TgChannel]:
         return [entry for entry in await self.list_all(guild_id) if entry.user_id == user_id]
 
+    async def refresh_guild_meta(self, guild_id: int) -> int:
+        channels = await self.list_all(guild_id)
+        updated = 0
+        for channel in channels:
+            try:
+                meta = await asyncio.to_thread(self.fetch_channel_meta, channel.url)
+            except ValueError:
+                log.warning(
+                    "TGK meta refresh failed for channel %s in guild %s",
+                    channel.id,
+                    guild_id,
+                )
+                continue
+            if meta.title == channel.title and meta.image_url == channel.image_url:
+                continue
+            await self.db.update_tg_channel_meta(
+                channel.id,
+                guild_id,
+                meta.title,
+                meta.image_url,
+            )
+            updated += 1
+            await asyncio.sleep(0.35)
+        if updated:
+            log.info("Refreshed TGK meta for %s channels in guild %s", updated, guild_id)
+        return updated
+
     def build_board_page(
         self,
         guild: discord.Guild,
