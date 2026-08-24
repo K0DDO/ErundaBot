@@ -31,7 +31,7 @@ Discord-бот **Ерунда** для сервера «Ерундульки». 
 
 ```text
 /config
-/birthday set|remove|preview|test-announce
+/birthday set|remove
 /profile [user]          # ephemeral
 /top
 /event create|list|cancel
@@ -43,7 +43,7 @@ Apps → Add quote
 /proposal create|list|info|cancel
 ```
 
-Удалены и не возвращать без запроса: `/birthday list|next` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`; `/fest list|block|preview|test-ping|role`. Вернули по запросу: `/birthday test-announce` (ephemeral ИИ-поздравление), `/birthday preview` (ближайшие даты).
+Удалены и не возвращать без запроса: `/birthday list|next|preview|test-announce` и debug `test-reminder`/`test-rgb-*`; `/quote list|import` и context «Import quote»; `/event join|info|leave`; `/fest list|block|preview|test-ping|role`.
 
 ## Модули
 
@@ -65,7 +65,7 @@ Slash только create / list / cancel. Кнопки на карточке: �
 
 ### Дни рождения (заморожено)
 
-Команды: `set`, `remove`, `/birthday preview` (ephemeral ближайшие даты), дебаг `/birthday test-announce` (ephemeral, любой участник; если даты нет — генерит как будто сегодня). Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (голос из чата, случайный тон, можно зацепить роль/цитаты/кино/войс; ждёт ответ до 2 мин). Пинг в день ДР — отдельной строкой сообщения (не в embed: на мобиле иначе сырой id). После полуночи следующего дня удаляются оба сообщения: напоминание и поздравление. При старте и в цикле бот ещё проходит канал ДР и сносит старые карточки «День рождения» / «Скоро день рождения» (до того как id начали сохранять). Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
+Команды: `set`, `remove`. Доска в канале ДР, sync при set/remove/config и на ready. RGB-роль «Именинник», Groq-поздравления (голос из чата, случайный тон, можно зацепить роль/цитаты/кино/войс; ждёт ответ до 2 мин). Пинг в день ДР — отдельной строкой сообщения (не в embed: на мобиле иначе сырой id). После полуночи следующего дня удаляются оба сообщения: напоминание и поздравление. При старте и в цикле бот ещё проходит канал ДР и сносит старые карточки «День рождения» / «Скоро день рождения» (до того как id начали сохранять). Серверные эмодзи через `guild.fetch_emojis()`, в БД `<:name:id>`.
 
 ### Роли (заморожено)
 
@@ -115,6 +115,6 @@ bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timez
 - Groq: дефолт `openai/gpt-oss-20b` вместо снятой `llama-3.1-8b-instant`
 - Убраны `/event join|info|leave` — функционал кнопок на карточке
 - Цитаты: карточки V2, номера, author_ids, эмодзи сервера, confirm delete, без list/import
-- ДР: AI Groq, RGB именинник, preview ближайших дат, без list/next/debug
+- ДР: AI Groq, RGB именинник, без list/next/preview/test-announce/debug
 - `/profile` ephemeral
 - `discord.py>=2.6`, `intents.emojis_and_stickers`

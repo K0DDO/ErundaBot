@@ -108,7 +108,6 @@ class BirthdayService:
         "**Как добавить свой день рождения:**\n"
         "• `/birthday set` — указать / изменить дату\n"
         "• `/birthday remove` — удалить дату\n"
-        "• `/birthday preview` — ближайшие даты\n"
         "• эмодзи: обычный или серверный (`:name:` / вставь с сервера)"
     )
     MAX_BOARD_ENTRIES = 30

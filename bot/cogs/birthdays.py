@@ -11,9 +11,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.database.models import Birthday
-from bot.services.birthday_service import occurrence_on_year
-from bot.utils.embeds import error_embed, success_embed, base_embed
+from bot.utils.embeds import error_embed, success_embed
 from bot.views.birthday_views import BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
@@ -91,76 +89,6 @@ class BirthdaysCog(commands.Cog):
             ephemeral=True,
         )
         await refresh_birthday_board(self.bot, interaction.guild)
-
-    @birthday.command(name="preview", description="Ближайшие дни рождения")
-    @app_commands.guild_only()
-    async def birthday_preview(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        entries = await self.bot.birthday_service.list_sorted(
-            interaction.guild.id,
-            config.timezone,
-        )
-        if not entries:
-            await interaction.response.send_message(
-                embed=base_embed(
-                    title="Дни рождения",
-                    description="Пока никто не указал день рождения.",
-                ),
-                ephemeral=True,
-            )
-            return
-        text = self.bot.birthday_service.format_preview_lines(interaction.guild, entries)
-        await interaction.response.send_message(
-            embed=base_embed(title="Ближайшие дни рождения", description=text),
-            ephemeral=True,
-        )
-
-    @birthday.command(name="test-announce", description="Дебаг: ИИ-поздравление только тебе")
-    @app_commands.describe(member="Кому сгенерировать, по умолчанию ты")
-    @app_commands.guild_only()
-    async def birthday_test_announce(
-        self,
-        interaction: discord.Interaction,
-        member: discord.Member | None = None,
-    ) -> None:
-        if interaction.guild is None:
-            return
-        target = member or interaction.user
-        if not isinstance(target, discord.Member):
-            return
-        await interaction.response.defer(ephemeral=True)
-        config = await self.bot.config_service.get(interaction.guild.id)
-        local_today = datetime.now(ZoneInfo(config.timezone)).date()
-        birthday = await self.bot.birthday_service.get_birthday(
-            interaction.guild.id,
-            target.id,
-        )
-        if birthday is None:
-            birthday = Birthday(
-                guild_id=interaction.guild.id,
-                user_id=target.id,
-                day=local_today.day,
-                month=local_today.month,
-            )
-            announce_on = local_today
-        else:
-            announce_on = occurrence_on_year(birthday.day, birthday.month, local_today.year)
-        embed, used_ai = await self.bot.birthday_service.announce_embed(
-            interaction.guild,
-            birthday,
-            announce_on,
-            self.bot.ai_service,
-            mention=False,
-        )
-        note = None if used_ai else "ИИ не ответил за 2 минуты — запасной текст"
-        await interaction.followup.send(
-            content=f"{target.mention}" + (f"\n{note}" if note else ""),
-            embed=embed,
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions(users=True),
-        )
 
 
 async def setup(bot: ErundaBot) -> None:
