@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 import discord
 from discord import ui
@@ -22,14 +24,24 @@ TG_HOST_RE = re.compile(
     re.IGNORECASE,
 )
 TG_AT_RE = re.compile(r"^@([A-Za-z0-9_]{3,})$")
-OG_IMAGE_RE = re.compile(
-    r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+OG_META_RE = re.compile(
+    r'<meta[^>]+(?:property|name)=["\'](?P<key>og:(?:title|image))["\'][^>]+content=["\'](?P<content>[^"\']+)["\']',
     re.IGNORECASE,
 )
-OG_IMAGE_RE_ALT = re.compile(
-    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image["\']',
+OG_META_RE_ALT = re.compile(
+    r'<meta[^>]+content=["\'](?P<content>[^"\']+)["\'][^>]+(?:property|name)=["\'](?P<key>og:(?:title|image))["\']',
     re.IGNORECASE,
 )
+PAGE_TITLE_RE = re.compile(
+    r'<div[^>]+class=["\']tgme_page_title["\'][^>]*>\s*<span[^>]*>(?P<title>.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+@dataclass(slots=True)
+class TgChannelMeta:
+    title: str
+    image_url: str | None = None
 
 
 class TgkService:
@@ -65,10 +77,52 @@ class TgkService:
             return None
         return name
 
-    def fetch_preview_image(self, url: str) -> str | None:
+    @staticmethod
+    def _clean_title(raw: str, username: str) -> str:
+        title = html.unescape(re.sub(r"\s+", " ", raw).strip())
+        for prefix in ("Telegram: ", "Telegram – ", "Telegram - "):
+            if title.startswith(prefix):
+                title = title[len(prefix) :].strip()
+        if title.lower().startswith("view @"):
+            title = title[6:].strip()
+        if not title or title.lower() in {"telegram", "telegram messenger"}:
+            return f"@{username}"
+        return title[:80]
+
+    @staticmethod
+    def _normalize_image_url(raw: str) -> str | None:
+        image = raw.strip()
+        if image.startswith("//"):
+            image = "https:" + image
+        if image.startswith("https://"):
+            return image
+        return None
+
+    @classmethod
+    def _parse_page_meta(cls, html_text: str, username: str) -> TgChannelMeta:
+        og_title: str | None = None
+        og_image: str | None = None
+        for pattern in (OG_META_RE, OG_META_RE_ALT):
+            for match in pattern.finditer(html_text):
+                key = match.group("key").lower()
+                content = html.unescape(match.group("content").strip())
+                if key == "og:title" and og_title is None:
+                    og_title = content
+                elif key == "og:image" and og_image is None:
+                    og_image = cls._normalize_image_url(content)
+
+        title = og_title
+        if not title:
+            page_match = PAGE_TITLE_RE.search(html_text)
+            if page_match:
+                title = re.sub(r"<[^>]+>", "", page_match.group("title"))
+        cleaned = cls._clean_title(title or f"@{username}", username)
+        return TgChannelMeta(title=cleaned, image_url=og_image)
+
+    def fetch_channel_meta(self, url: str) -> TgChannelMeta:
         username = self._username(url)
         if username is None:
-            return None
+            raise ValueError("Нужна публичная ссылка вида https://t.me/channel или @channel")
         request = urllib.request.Request(
             f"https://t.me/{username}",
             headers={"User-Agent": "Mozilla/5.0 ErundaBot"},
@@ -76,26 +130,24 @@ class TgkService:
         )
         try:
             with urllib.request.urlopen(request, timeout=8) as response:
-                html = response.read().decode("utf-8", errors="ignore")
-        except (urllib.error.URLError, TimeoutError, OSError):
-            return None
-        match = OG_IMAGE_RE.search(html) or OG_IMAGE_RE_ALT.search(html)
-        if match is None:
-            return None
-        image = match.group(1).strip()
-        if image.startswith("//"):
-            image = "https:" + image
-        if not image.startswith("https://"):
-            return None
-        return image
+                page = response.read().decode("utf-8", errors="ignore")
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise ValueError("Не удалось открыть страницу канала в Telegram") from exc
+        meta = self._parse_page_meta(page, username)
+        if meta.title == f"@{username}" and meta.image_url is None:
+            raise ValueError("Канал не найден или ссылка ведёт не на публичный ТГК")
+        return meta
 
-    async def add(self, guild_id: int, user_id: int, title: str, raw_url: str) -> TgChannel:
-        cleaned_title = title.strip()
-        if not cleaned_title:
-            raise ValueError("Название пустое")
+    async def add(self, guild_id: int, user_id: int, raw_url: str) -> TgChannel:
         url = self.normalize_url(raw_url)
-        image_url = await asyncio.to_thread(self.fetch_preview_image, url)
-        return await self.db.add_tg_channel(guild_id, user_id, cleaned_title, url, image_url)
+        meta = await asyncio.to_thread(self.fetch_channel_meta, url)
+        return await self.db.add_tg_channel(
+            guild_id,
+            user_id,
+            meta.title,
+            url,
+            meta.image_url,
+        )
 
     async def remove(self, guild_id: int, number: int, user_id: int, *, is_admin: bool) -> TgChannel:
         channel = await self.db.get_tg_channel_by_number(guild_id, number)

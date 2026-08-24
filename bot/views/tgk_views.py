@@ -22,7 +22,6 @@ async def refresh_tgk_board(bot: ErundaBot, guild: discord.Guild | None) -> None
 
 
 class TgkAddModal(discord.ui.Modal, title="Добавить ТГК"):
-    title_input = discord.ui.TextInput(label="Название", max_length=80, required=True)
     link = discord.ui.TextInput(
         label="Ссылка",
         placeholder="https://t.me/channel или @channel",
@@ -37,19 +36,23 @@ class TgkAddModal(discord.ui.Modal, title="Добавить ТГК"):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             return
+        await interaction.response.defer(ephemeral=True)
         try:
             channel = await self.bot.tgk_service.add(
                 interaction.guild.id,
                 interaction.user.id,
-                str(self.title_input.value),
                 str(self.link.value),
             )
         except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
         await refresh_tgk_board(self.bot, interaction.guild)
-        extra = "Картинка подтянулась." if channel.image_url else "Картинку взять не удалось — оставил без неё."
-        await interaction.response.send_message(
-            embed=success_embed(f"ТГК #{channel.number} добавлен", extra),
+        parts = [f"**{channel.title}**"]
+        if channel.image_url:
+            parts.append("Картинка подтянулась.")
+        else:
+            parts.append("Название взял с t.me, картинку получить не удалось.")
+        await interaction.followup.send(
+            embed=success_embed(f"ТГК #{channel.number} добавлен", "\n".join(parts)),
             ephemeral=True,
         )
