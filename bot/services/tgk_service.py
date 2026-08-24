@@ -248,23 +248,42 @@ class TgkService:
         return f"[открыть]({item.url})\n-# {kind}"
 
     @staticmethod
-    def board_order(channels: list[TgChannel]) -> list[TgChannel]:
-        return sorted(channels, key=lambda c: (c.number, c.id))
+    def board_display_order(channels: list[TgChannel]) -> list[TgChannel]:
+        grouped: dict[int, list[TgChannel]] = {}
+        for entry in channels:
+            grouped.setdefault(entry.user_id, []).append(entry)
+        for user_id in grouped:
+            grouped[user_id].sort(key=lambda c: (c.number, c.id))
+        user_ids = sorted(grouped.keys(), key=lambda uid: grouped[uid][0].number)
+        ordered: list[TgChannel] = []
+        for user_id in user_ids:
+            ordered.extend(grouped[user_id])
+        return ordered
 
     @staticmethod
-    def estimate_component_count(channel_count: int, owner_count: int) -> int:
-        if channel_count <= 0:
-            return 2
-        return 2 + owner_count * 3 + channel_count * 3
+    def _groups_in_order(channels: list[TgChannel]) -> list[tuple[int, list[TgChannel]]]:
+        groups: list[tuple[int, list[TgChannel]]] = []
+        for entry in channels:
+            if groups and groups[-1][0] == entry.user_id:
+                groups[-1][1].append(entry)
+            else:
+                groups.append((entry.user_id, [entry]))
+        return groups
 
     @classmethod
-    def max_channels_for_owners(cls, owner_count: int) -> int:
-        if owner_count <= 0:
-            return cls.MAX_BOARD_CHANNELS
-        budget = cls.DISCORD_COMPONENT_LIMIT - 2 - owner_count * 3
-        if budget < 3:
-            return 0
-        return min(cls.MAX_BOARD_CHANNELS, budget // 3)
+    def estimate_page_components(cls, channels: list[TgChannel], *, with_header: bool = True) -> int:
+        if not channels:
+            return 2 if with_header else 0
+        cost = 2 if with_header else 0
+        for _user_id, user_channels in cls._groups_in_order(channels):
+            cost += 3
+            for entry in user_channels:
+                cost += 2 if entry.image_url else 1
+        return cost
+
+    @classmethod
+    def _page_fits(cls, channels: list[TgChannel]) -> bool:
+        return cls.estimate_page_components(channels) <= cls.DISCORD_COMPONENT_LIMIT
 
     @classmethod
     def board_capacity_hint(cls) -> str:
@@ -286,7 +305,7 @@ class TgkService:
         page_count: int = 1,
     ) -> ui.LayoutView:
         view = ui.LayoutView(timeout=None)
-        ordered = self.board_order(channels)
+        ordered = self.board_display_order(channels)
 
         header = ui.Container(accent_color=BRAND_COLOR)
         if page_index == 0:
@@ -305,61 +324,65 @@ class TgkService:
             view.add_item(empty)
             return view
 
-        last_user: int | None = None
-        items_container: ui.Container | None = None
+        display_number = start_display_number
+        for user_id, user_channels in self._groups_in_order(ordered):
+            sep = ui.Container(accent_color=BRAND_COLOR)
+            sep.add_item(ui.TextDisplay(self._owner_separator(guild, user_id)))
+            view.add_item(sep)
 
-        for offset, channel in enumerate(ordered):
-            display_number = start_display_number + offset
-            if channel.user_id != last_user:
-                if items_container is not None:
-                    view.add_item(items_container)
-                    items_container = None
-                sep = ui.Container(accent_color=BRAND_COLOR)
-                sep.add_item(ui.TextDisplay(self._owner_separator(guild, channel.user_id)))
-                view.add_item(sep)
-                last_user = channel.user_id
-                items_container = ui.Container(accent_color=BRAND_COLOR)
-
-            title = self._channel_title(display_number, channel)
-            link = self._channel_link(channel)
-            if items_container is None:
-                items_container = ui.Container(accent_color=BRAND_COLOR)
-            if channel.image_url:
-                items_container.add_item(
-                    ui.Section(
-                        ui.TextDisplay(title),
-                        ui.TextDisplay(link),
-                        accessory=ui.Thumbnail(
-                            media=channel.image_url,
-                            description=channel.title[:256],
-                        ),
+            block = ui.Container(accent_color=BRAND_COLOR)
+            for entry in user_channels:
+                title = self._channel_title(display_number, entry)
+                link = self._channel_link(entry)
+                block.add_item(ui.TextDisplay(f"{title}\n{link}"))
+                if entry.image_url:
+                    block.add_item(
+                        ui.MediaGallery(
+                            discord.MediaGalleryItem(
+                                entry.image_url,
+                                description=entry.title[:256],
+                            )
+                        )
                     )
-                )
-            else:
-                items_container.add_item(ui.TextDisplay(f"{title}\n{link}"))
-
-        if items_container is not None:
-            view.add_item(items_container)
+                display_number += 1
+            view.add_item(block)
         return view
 
     def split_into_pages(self, channels: list[TgChannel]) -> list[list[TgChannel]]:
-        ordered = self.board_order(channels)
+        ordered = self.board_display_order(channels)
         if not ordered:
             return [[]]
+
+        groups = self._groups_in_order(ordered)
         pages: list[list[TgChannel]] = []
-        start = 0
-        while start < len(ordered):
-            take = min(self.MAX_BOARD_CHANNELS, len(ordered) - start)
-            while take > 0:
-                chunk = ordered[start : start + take]
-                owners = len({entry.user_id for entry in chunk})
-                if self.estimate_component_count(len(chunk), owners) <= self.DISCORD_COMPONENT_LIMIT:
-                    break
-                take -= 1
-            if take <= 0:
-                take = 1
-            pages.append(chunk)
-            start += take
+        current: list[TgChannel] = []
+
+        for _user_id, group_channels in groups:
+            group = list(group_channels)
+            while group:
+                trial = current + group
+                if current and not self._page_fits(trial):
+                    pages.append(current)
+                    current = []
+                    continue
+                if self._page_fits(trial):
+                    current = trial
+                    group = []
+                    continue
+                if not current:
+                    take = len(group)
+                    while take > 1 and not self._page_fits(group[:take]):
+                        take -= 1
+                    current = group[:take]
+                    group = group[take:]
+                    pages.append(current)
+                    current = []
+                    continue
+                pages.append(current)
+                current = []
+
+        if current:
+            pages.append(current)
         return pages
 
     async def sync_board(
@@ -382,13 +405,13 @@ class TgkService:
             return []
 
         all_channels = await self.list_all(guild.id)
-        ordered = self.board_order(all_channels)
+        ordered = self.board_display_order(all_channels)
         if ordered:
             await self.db.renumber_tg_channels_ordered(
                 guild.id,
                 [entry.id for entry in ordered],
             )
-            ordered = self.board_order(await self.list_all(guild.id))
+            ordered = self.board_display_order(await self.list_all(guild.id))
 
         pages = self.split_into_pages(ordered)
         stored_ids = await self.db.get_tgk_board_message_ids(guild.id) if official else []
