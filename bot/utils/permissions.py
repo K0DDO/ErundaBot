@@ -24,16 +24,66 @@ def config_denied_reason(config_role_id: int | None) -> str:
     return "Нужна роль доступа к /config или права администратора."
 
 
-def can_use_tgk_list(member: discord.Member, list_role_id: int | None) -> bool:
-    if list_role_id is not None and any(role.id == list_role_id for role in member.roles):
+def can_use_tgk_debug(member: discord.Member, debug_role_id: int | None) -> bool:
+    if debug_role_id is not None and any(role.id == debug_role_id for role in member.roles):
         return True
     return is_guild_admin(member)
 
 
+def tgk_debug_denied_reason(debug_role_id: int | None) -> str:
+    if debug_role_id is None:
+        return "Настрой роль для /tgk debug-add в /config → Роли."
+    return f"Нужна <@&{debug_role_id}> или права администратора."
+
+
+def can_use_tgk_list(member: discord.Member, list_role_id: int | None) -> bool:
+    return can_use_tgk_debug(member, list_role_id)
+
+
 def tgk_list_denied_reason(list_role_id: int | None) -> str:
-    if list_role_id is None:
-        return "Настрой роль для /tgk list в /config → Роли."
-    return f"Нужна <@&{list_role_id}> или права администратора."
+    return tgk_debug_denied_reason(list_role_id)
+
+
+def find_member_by_nickname(guild: discord.Guild, nickname: str) -> discord.Member:
+    query = nickname.strip()
+    if not query:
+        raise ValueError("Укажи ник участника")
+    lowered = query.casefold()
+    matches: list[discord.Member] = []
+    for member in guild.members:
+        names = {member.display_name.casefold(), member.name.casefold()}
+        if member.global_name:
+            names.add(member.global_name.casefold())
+        if lowered in names:
+            matches.append(member)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError("Несколько участников с таким ником — уточни")
+    raise ValueError(f"Участник «{query}» не найден на сервере")
+
+
+async def find_member_by_nickname_async(guild: discord.Guild, nickname: str) -> discord.Member:
+    try:
+        return find_member_by_nickname(guild, nickname)
+    except ValueError as exc:
+        if "не найден" not in str(exc):
+            raise
+    query = nickname.strip()
+    queried = await guild.query_members(query=query, limit=25)
+    lowered = query.casefold()
+    matches: list[discord.Member] = []
+    for member in queried:
+        names = {member.display_name.casefold(), member.name.casefold()}
+        if member.global_name:
+            names.add(member.global_name.casefold())
+        if lowered in names:
+            matches.append(member)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError("Несколько участников с таким ником — уточни")
+    raise ValueError(f"Участник «{query}» не найден на сервере")
 
 
 def bot_cannot_send_reason(guild: discord.Guild, channel: discord.abc.Snowflake) -> str | None:

@@ -10,7 +10,12 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.utils.embeds import error_embed, success_embed
-from bot.utils.permissions import can_use_tgk_list, is_guild_admin, tgk_list_denied_reason
+from bot.utils.permissions import (
+    can_use_tgk_debug,
+    find_member_by_nickname_async,
+    is_guild_admin,
+    tgk_debug_denied_reason,
+)
 from bot.views.tgk_views import TgkAddModal, refresh_tgk_board
 
 if TYPE_CHECKING:
@@ -42,50 +47,43 @@ class TgkCog(commands.Cog):
     async def tgk_add(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(TgkAddModal(self.bot))
 
-    @tgk.command(name="list", description="Обновить доску ТГК (отладка)")
+    @tgk.command(name="debug-add", description="Добавить ТГК участнику по нику (отладка)")
+    @app_commands.describe(nickname="Ник на сервере", link="Ссылка на канал")
     @app_commands.guild_only()
-    async def tgk_list(self, interaction: discord.Interaction) -> None:
+    async def tgk_debug_add(
+        self,
+        interaction: discord.Interaction,
+        nickname: str,
+        link: str,
+    ) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
         config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_use_tgk_list(interaction.user, config.tgk_list_role_id):
+        if not can_use_tgk_debug(interaction.user, config.tgk_list_role_id):
             await interaction.response.send_message(
-                embed=error_embed("Недостаточно прав", tgk_list_denied_reason(config.tgk_list_role_id)),
-                ephemeral=True,
-            )
-            return
-        if config.tgk_channel_id is None:
-            await interaction.response.send_message(
-                embed=error_embed("Канал ТГК не настроен. Укажи его в /config."),
+                embed=error_embed("Недостаточно прав", tgk_debug_denied_reason(config.tgk_list_role_id)),
                 ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True)
         try:
-            messages = await self.bot.tgk_service.sync_board(interaction.guild, self.bot)
-        except Exception:
-            log.exception("tgk list sync failed for guild %s", interaction.guild.id)
-            await interaction.followup.send(
-                embed=error_embed("Не удалось обновить доску ТГК"),
-                ephemeral=True,
+            target = await find_member_by_nickname_async(interaction.guild, nickname)
+            channel = await self.bot.tgk_service.add(
+                interaction.guild.id,
+                target.id,
+                link,
             )
+        except ValueError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
-        if not messages:
-            await interaction.followup.send(
-                embed=error_embed("Канал ТГК недоступен"),
-                ephemeral=True,
-            )
-            return
-        if len(messages) == 1:
-            body = f"[Открыть]({messages[0].jump_url})"
+        await refresh_tgk_board(self.bot, interaction.guild)
+        parts = [f"**{channel.title}**", f"Владелец: {target.display_name}"]
+        if channel.image_url:
+            parts.append("Картинка подтянулась.")
         else:
-            links = "\n".join(
-                f"[Часть {index}]({message.jump_url})"
-                for index, message in enumerate(messages, start=1)
-            )
-            body = f"Сообщений: {len(messages)}\n{links}"
+            parts.append("Название взял с t.me, картинку получить не удалось.")
         await interaction.followup.send(
-            embed=success_embed("Доска ТГК обновлена", body),
+            embed=success_embed(f"ТГК #{channel.number} добавлен", "\n".join(parts)),
             ephemeral=True,
         )
 

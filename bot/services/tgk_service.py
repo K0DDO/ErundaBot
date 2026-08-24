@@ -245,7 +245,7 @@ class TgkService:
     @staticmethod
     def _channel_link(item: TgChannel) -> str:
         kind = "приватка" if TgkService.is_private_url(item.url) else "открытый"
-        return f"[открыть]({item.url})\n-# {kind}"
+        return f"[открыть]({item.url})\n-# ({kind})"
 
     @staticmethod
     def board_display_order(channels: list[TgChannel]) -> list[TgChannel]:
