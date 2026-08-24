@@ -671,6 +671,24 @@ class Database:
             except Exception:
                 pass
             await self._db.execute("PRAGMA user_version = 20")
+        if version < 21:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE guilds ADD COLUMN tgk_board_message_ids TEXT NOT NULL DEFAULT '[]'"
+                )
+            except Exception:
+                pass
+            cursor = await self._db.execute(
+                "SELECT guild_id, tgk_board_message_id FROM guilds "
+                "WHERE tgk_board_message_id IS NOT NULL"
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                await self._db.execute(
+                    "UPDATE guilds SET tgk_board_message_ids = ? WHERE guild_id = ?",
+                    (json.dumps([int(row["tgk_board_message_id"])]), int(row["guild_id"])),
+                )
+            await self._db.execute("PRAGMA user_version = 21")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2208,9 +2226,31 @@ class Database:
         return await self.list_tg_channels(guild_id)
 
     async def set_tgk_board_message_id(self, guild_id: int, message_id: int | None) -> None:
+        ids = [message_id] if message_id is not None else []
+        await self.set_tgk_board_message_ids(guild_id, ids)
+
+    async def get_tgk_board_message_ids(self, guild_id: int) -> list[int]:
+        config = await self.get_guild(guild_id)
+        if config is None:
+            return []
+        if config.tgk_board_message_ids:
+            return list(config.tgk_board_message_ids)
+        if config.tgk_board_message_id is not None:
+            return [config.tgk_board_message_id]
+        return []
+
+    async def set_tgk_board_message_ids(self, guild_id: int, message_ids: list[int]) -> None:
         await self.ensure_guild(guild_id)
+        cleaned = [int(message_id) for message_id in message_ids if message_id]
+        primary = cleaned[0] if cleaned else None
         await self.connection.execute(
-            "UPDATE guilds SET tgk_board_message_id = ?, updated_at = datetime('now') WHERE guild_id = ?",
-            (message_id, guild_id),
+            """
+            UPDATE guilds
+            SET tgk_board_message_ids = ?,
+                tgk_board_message_id = ?,
+                updated_at = datetime('now')
+            WHERE guild_id = ?
+            """,
+            (json.dumps(cleaned), primary, guild_id),
         )
         await self.connection.commit()

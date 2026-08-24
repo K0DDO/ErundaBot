@@ -61,15 +61,23 @@ class TgkCog(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True)
-        message = await self.bot.tgk_service.sync_board(interaction.guild, self.bot)
-        if message is None:
+        messages = await self.bot.tgk_service.sync_board(interaction.guild, self.bot)
+        if not messages:
             await interaction.followup.send(
                 embed=error_embed("Канал ТГК недоступен"),
                 ephemeral=True,
             )
             return
+        if len(messages) == 1:
+            body = f"[Открыть]({messages[0].jump_url})"
+        else:
+            links = "\n".join(
+                f"[Часть {index}]({message.jump_url})"
+                for index, message in enumerate(messages, start=1)
+            )
+            body = f"Сообщений: {len(messages)}\n{links}"
         await interaction.followup.send(
-            embed=success_embed("Доска ТГК обновлена", f"[Открыть]({message.jump_url})"),
+            embed=success_embed("Доска ТГК обновлена", body),
             ephemeral=True,
         )
 

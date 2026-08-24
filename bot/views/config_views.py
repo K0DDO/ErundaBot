@@ -234,8 +234,8 @@ class ChannelPicker(discord.ui.ChannelSelect):
 
             await refresh_birthday_board(self.parent_view.bot, interaction.guild)
         if field == "tgk_channel_id" and interaction.guild is not None:
-            await self.parent_view.bot.db.set_tgk_board_message_id(
-                self.parent_view.guild_id, None
+            await self.parent_view.bot.db.set_tgk_board_message_ids(
+                self.parent_view.guild_id, []
             )
             from bot.views.tgk_views import refresh_tgk_board
 

@@ -57,7 +57,7 @@ Slash: `create` (с ролью для пинга) / `list` / `cancel` / `ping`. 
 
 ### ТГК
 
-Несколько каналов на человека: ссылка `https://t.me/...`, `@channel` или invite `https://t.me/+...`. Название и картинка с t.me. На доске владельцы отделены строкой `--- {emoji} username ---` (emoji как у ДР, по центру, на всю ширину — отдельный блок без превью). Номера `#N.` идут по порядку чтения (1, 2, 3…), не по группам владельцев. Под «открыть» мелко `приватка` / `открытый`. В одно сообщение ~**10** ТГК (до ~12 у одного владельца; лимит Discord — 40 компонентов). Доска живёт в канале из `/config` и сама обновляется при add/remove/ready. `/tgk list` — отладка: только роль из `/config` → Роли → «Отладка /tgk list» (или админ).
+Несколько каналов на человека: ссылка `https://t.me/...`, `@channel` или invite `https://t.me/+...`. Название и картинка с t.me. На доске владельцы отделены строкой `--- {emoji} username ---` (emoji как у ДР, по центру, на всю ширину — отдельный блок без превью). Номера `#N.` идут по порядку чтения (1, 2, 3…). Под «открыть» мелко `приватка` / `открытый`. В одно сообщение ~10 ТГК; если больше — несколько сообщений подряд в канале (`часть 1 из N`). ID сообщений в `tgk_board_message_ids`. Доска живёт в канале из `/config` и сама обновляется при add/remove/ready. `/tgk list` — отладка: только роль из `/config` → Роли → «Отладка /tgk list» (или админ).
 
 ### Цитаты (заморожено)
 
@@ -88,11 +88,11 @@ bot/tasks/background.py
 bot/utils/       embeds, formatting, birthday_emojis, colors, permissions, timezones
 ```
 
-## БД (миграции до v20)
+## БД (миграции до v21)
 
 Таблицы: … `festivals` (номера с 29), `festival_films` (`image_url` постер, `age_rating` вроде `12+` / `NSFW`, `runtime_minutes`), `festival_ratings` (оценка 1–10), `festival_blocked_films` (прошлые победители и ручной блок), `tg_channels`. `birthday_notifications` хранит `channel_id`/`message_id` напоминания и поздравления.
 
-Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `config_role_id`, `tgk_list_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled), `ping_role_id` (роль для `/event ping`).
+Важное у гильдии: `birthday_board_message_id`, `birthday_star_role_id`, `fest_channel_id`, `tgk_channel_id`, `fest_staff_role_id`, `fest_ping_role_id`, `config_role_id`, `tgk_list_role_id`, `fest_reminder_minutes`, `tgk_board_message_id`, `tgk_board_message_ids`. У цитат: `author_display`, `posted_*`, `number`, `author_ids`. У ивентов: `number` (гильдия, только живые scheduled), `ping_role_id` (роль для `/event ping`).
 
 `Database.close()` должен оставаться отдельным методом — не вшивать его в `_migrate` (уже ломалось).
 

@@ -269,29 +269,33 @@ class TgkService:
     @classmethod
     def board_capacity_hint(cls) -> str:
         return (
-            f"В одно сообщение помещается примерно {cls.MAX_BOARD_CHANNELS} ТГК "
-            f"(до ~12, если каналы у одного человека). "
-            f"Лимит Discord — {cls.DISCORD_COMPONENT_LIMIT} компонентов."
+            f"В одно сообщение ~{cls.MAX_BOARD_CHANNELS} ТГК (до ~12 у одного владельца). "
+            f"Если больше — доска разбивается на несколько сообщений подряд."
         )
 
     async def list_all(self, guild_id: int) -> list[TgChannel]:
         return await self.db.list_tg_channels(guild_id)
 
-    def build_board(
+    def build_board_page(
         self,
         guild: discord.Guild,
         channels: list[TgChannel],
         *,
-        total_count: int | None = None,
+        start_display_number: int = 1,
+        page_index: int = 0,
+        page_count: int = 1,
     ) -> ui.LayoutView:
         view = ui.LayoutView(timeout=None)
         ordered = self.board_order(channels)
 
         header = ui.Container(accent_color=BRAND_COLOR)
-        header_lines = ["## ТГК участников"]
-        if total_count is not None and total_count > len(ordered):
-            extra = total_count - len(ordered)
-            header_lines.append(f"-# на доске {len(ordered)} из {total_count} · ещё {extra} не влезли")
+        if page_index == 0:
+            title = "## ТГК участников"
+            if page_count > 1:
+                title += f"\n-# часть 1 из {page_count}"
+            header_lines = [title]
+        else:
+            header_lines = [f"## ТГК участников\n-# часть {page_index + 1} из {page_count}"]
         header.add_item(ui.TextDisplay("\n".join(header_lines)))
         view.add_item(header)
 
@@ -304,7 +308,8 @@ class TgkService:
         last_user: int | None = None
         items_container: ui.Container | None = None
 
-        for display_number, channel in enumerate(ordered, start=1):
+        for offset, channel in enumerate(ordered):
+            display_number = start_display_number + offset
             if channel.user_id != last_user:
                 if items_container is not None:
                     view.add_item(items_container)
@@ -337,57 +342,86 @@ class TgkService:
             view.add_item(items_container)
         return view
 
-    def _select_board_channels(self, channels: list[TgChannel]) -> tuple[list[TgChannel], int]:
+    def split_into_pages(self, channels: list[TgChannel]) -> list[list[TgChannel]]:
         ordered = self.board_order(channels)
-        total = len(ordered)
         if not ordered:
-            return [], 0
-        owner_count = len({channel.user_id for channel in ordered})
-        limit = self.max_channels_for_owners(owner_count)
-        limit = min(limit, self.MAX_BOARD_CHANNELS)
-        while limit > 0:
-            shown = ordered[:limit]
-            owners = len({channel.user_id for channel in shown})
-            if self.estimate_component_count(len(shown), owners) <= self.DISCORD_COMPONENT_LIMIT:
-                return shown, total
-            limit -= 1
-        return ordered[:1], total
+            return [[]]
+        pages: list[list[TgChannel]] = []
+        start = 0
+        while start < len(ordered):
+            take = min(self.MAX_BOARD_CHANNELS, len(ordered) - start)
+            while take > 0:
+                chunk = ordered[start : start + take]
+                owners = len({entry.user_id for entry in chunk})
+                if self.estimate_component_count(len(chunk), owners) <= self.DISCORD_COMPONENT_LIMIT:
+                    break
+                take -= 1
+            if take <= 0:
+                take = 1
+            pages.append(chunk)
+            start += take
+        return pages
 
     async def sync_board(
         self,
         guild: discord.Guild,
         bot,
         fallback_channel: discord.abc.Messageable | None = None,
-    ) -> discord.Message | None:
+    ) -> list[discord.Message]:
         config = await self.db.get_guild(guild.id)
-        channel = None
+        post_channel = None
         official = False
         if config is not None and config.tgk_channel_id:
             found = guild.get_channel(config.tgk_channel_id)
             if found is not None and hasattr(found, "send"):
-                channel = found
+                post_channel = found
                 official = True
-        if channel is None:
-            channel = fallback_channel
-        if channel is None or not hasattr(channel, "send"):
-            return None
+        if post_channel is None:
+            post_channel = fallback_channel
+        if post_channel is None or not hasattr(post_channel, "send"):
+            return []
+
         all_channels = await self.list_all(guild.id)
         ordered = self.board_order(all_channels)
         if ordered:
-            await self.db.renumber_tg_channels_ordered(guild.id, [channel.id for channel in ordered])
-            all_channels = await self.list_all(guild.id)
-            ordered = self.board_order(all_channels)
-        shown, total = self._select_board_channels(ordered)
-        view = self.build_board(guild, shown, total_count=total if total > len(shown) else None)
-        message = None
-        if official and config is not None and config.tgk_board_message_id:
-            try:
-                message = await channel.fetch_message(config.tgk_board_message_id)
-                await message.edit(content=None, embeds=[], view=view)
-            except discord.HTTPException:
-                message = None
-        if message is None:
-            message = await channel.send(view=view)
-            if official:
-                await self.db.set_tgk_board_message_id(guild.id, message.id)
-        return message
+            await self.db.renumber_tg_channels_ordered(
+                guild.id,
+                [entry.id for entry in ordered],
+            )
+            ordered = self.board_order(await self.list_all(guild.id))
+
+        pages = self.split_into_pages(ordered)
+        stored_ids = await self.db.get_tgk_board_message_ids(guild.id) if official else []
+        messages: list[discord.Message] = []
+        display_offset = 0
+
+        for page_index, page_channels in enumerate(pages):
+            view = self.build_board_page(
+                guild,
+                page_channels,
+                start_display_number=display_offset + 1,
+                page_index=page_index,
+                page_count=len(pages),
+            )
+            display_offset += len(page_channels)
+            message: discord.Message | None = None
+            if official and page_index < len(stored_ids):
+                try:
+                    message = await post_channel.fetch_message(stored_ids[page_index])
+                    await message.edit(content=None, embeds=[], view=view)
+                except discord.HTTPException:
+                    message = None
+            if message is None:
+                message = await post_channel.send(view=view)
+            messages.append(message)
+
+        if official:
+            for stale_id in stored_ids[len(pages) :]:
+                try:
+                    stale = await post_channel.fetch_message(stale_id)
+                    await stale.delete()
+                except discord.HTTPException:
+                    pass
+            await self.db.set_tgk_board_message_ids(guild.id, [message.id for message in messages])
+
+        return messages

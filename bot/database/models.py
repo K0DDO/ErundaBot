@@ -35,9 +35,24 @@ class GuildConfig:
     config_role_id: int | None = None
     fest_reminder_minutes: int = 60
     tgk_board_message_id: int | None = None
+    tgk_board_message_ids: list[int] | None = None
     tgk_list_role_id: int | None = None
     created_at: str | None = None
     updated_at: str | None = None
+
+    @classmethod
+    def _parse_tgk_board_message_ids(cls, row: Any) -> list[int] | None:
+        keys = row.keys()
+        if "tgk_board_message_ids" in keys and row["tgk_board_message_ids"]:
+            try:
+                parsed = json.loads(row["tgk_board_message_ids"])
+            except Exception:
+                parsed = []
+            if isinstance(parsed, list):
+                ids = [int(value) for value in parsed if value]
+                return ids or None
+        legacy = row["tgk_board_message_id"] if "tgk_board_message_id" in keys else None
+        return [int(legacy)] if legacy else None
 
     @classmethod
     def from_row(cls, row: Any) -> GuildConfig:
@@ -82,6 +97,7 @@ class GuildConfig:
             tgk_board_message_id=row["tgk_board_message_id"]
             if "tgk_board_message_id" in row.keys()
             else None,
+            tgk_board_message_ids=cls._parse_tgk_board_message_ids(row),
             tgk_list_role_id=row["tgk_list_role_id"]
             if "tgk_list_role_id" in row.keys()
             else None,
@@ -388,6 +404,7 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "config_role_id",
         "fest_reminder_minutes",
         "tgk_board_message_id",
+        "tgk_board_message_ids",
         "tgk_list_role_id",
     }
 )
