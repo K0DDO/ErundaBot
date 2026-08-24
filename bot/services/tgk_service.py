@@ -278,7 +278,7 @@ class TgkService:
         for _user_id, user_channels in cls._groups_in_order(channels):
             cost += 3
             for entry in user_channels:
-                cost += 2 if entry.image_url else 1
+                cost += 3 if entry.image_url else 1
         return cost
 
     @classmethod
@@ -334,16 +334,19 @@ class TgkService:
             for entry in user_channels:
                 title = self._channel_title(display_number, entry)
                 link = self._channel_link(entry)
-                block.add_item(ui.TextDisplay(f"{title}\n{link}"))
                 if entry.image_url:
                     block.add_item(
-                        ui.MediaGallery(
-                            discord.MediaGalleryItem(
-                                entry.image_url,
+                        ui.Section(
+                            ui.TextDisplay(title),
+                            ui.TextDisplay(link),
+                            accessory=ui.Thumbnail(
+                                media=entry.image_url,
                                 description=entry.title[:256],
-                            )
+                            ),
                         )
                     )
+                else:
+                    block.add_item(ui.TextDisplay(f"{title}\n{link}"))
                 display_number += 1
             view.add_item(block)
         return view
