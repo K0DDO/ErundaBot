@@ -16,7 +16,7 @@ from bot.utils.permissions import (
     is_guild_admin,
     tgk_debug_denied_reason,
 )
-from bot.views.tgk_views import TgkAddModal, refresh_tgk_board
+from bot.views.tgk_views import TgkAddModal, refresh_tgk_board, register_tgk_board_views
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -39,6 +39,7 @@ class TgkCog(commands.Cog):
                 await self.bot.tgk_service.sync_board(guild, self.bot)
             except Exception:
                 log.exception("Failed to sync TGK board for guild %s", guild.id)
+        await register_tgk_board_views(self.bot)
 
     tgk = app_commands.Group(name="tgk", description="Телеграм-каналы участников")
 

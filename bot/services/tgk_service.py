@@ -288,7 +288,14 @@ class TgkService:
         channels: list[TgChannel],
         *,
         page_index: int = 0,
+        bot=None,
     ) -> bool:
+        if not channels and page_index == 0 and bot is not None:
+            try:
+                self.build_board_page(guild, [], page_index=0, page_count=1, bot=bot)
+            except ValueError:
+                return False
+            return True
         if not channels:
             return True
         try:
@@ -297,6 +304,7 @@ class TgkService:
                 channels,
                 page_index=page_index,
                 page_count=max(page_index + 1, 2),
+                bot=bot if page_index == 0 else None,
             )
         except ValueError:
             return False
@@ -309,6 +317,9 @@ class TgkService:
     async def list_all(self, guild_id: int) -> list[TgChannel]:
         return await self.db.list_tg_channels(guild_id)
 
+    async def list_for_user(self, guild_id: int, user_id: int) -> list[TgChannel]:
+        return [entry for entry in await self.list_all(guild_id) if entry.user_id == user_id]
+
     def build_board_page(
         self,
         guild: discord.Guild,
@@ -317,6 +328,7 @@ class TgkService:
         start_display_number: int = 1,
         page_index: int = 0,
         page_count: int = 1,
+        bot=None,
     ) -> ui.LayoutView:
         view = ui.LayoutView(timeout=None)
         ordered = list(channels)
@@ -334,8 +346,12 @@ class TgkService:
 
         if not ordered:
             empty = ui.Container(accent_color=BRAND_COLOR)
-            empty.add_item(ui.TextDisplay("Пока пусто. `/tgk add` — добавить свой канал."))
+            empty.add_item(ui.TextDisplay("Пока пусто. Жми «Добавить ТГК» ниже."))
             view.add_item(empty)
+            if page_index == 0 and bot is not None:
+                from bot.views.tgk_views import append_tgk_board_actions
+
+                append_tgk_board_actions(view, bot, guild.id)
             return view
 
         display_number = start_display_number
@@ -363,9 +379,14 @@ class TgkService:
                     block.add_item(ui.TextDisplay(f"{title}\n{link}"))
                 display_number += 1
             view.add_item(block)
+
+        if page_index == 0 and bot is not None:
+            from bot.views.tgk_views import append_tgk_board_actions
+
+            append_tgk_board_actions(view, bot, guild.id)
         return view
 
-    def split_into_pages(self, guild: discord.Guild, channels: list[TgChannel]) -> list[list[TgChannel]]:
+    def split_into_pages(self, guild: discord.Guild, channels: list[TgChannel], bot=None) -> list[list[TgChannel]]:
         ordered = self.board_display_order(channels)
         if not ordered:
             return [[]]
@@ -376,21 +397,28 @@ class TgkService:
         for _group_user_id, group_channels in self._groups_in_order(ordered):
             group = list(group_channels)
             while group:
+                page_index = len(pages) if not current else len(pages)
+                page_bot = bot if page_index == 0 else None
                 trial = current + group
-                if current and not self.can_build_page(guild, trial):
+                if current and not self.can_build_page(guild, trial, page_index=page_index, bot=page_bot):
                     pages.append(current)
                     current = []
                     continue
-                if self.can_build_page(guild, trial):
+                if self.can_build_page(guild, trial, page_index=page_index, bot=page_bot):
                     current = trial
                     group = []
                     continue
                 if not current:
                     take = len(group)
-                    while take > 1 and not self.can_build_page(guild, group[:take]):
+                    while take > 1 and not self.can_build_page(
+                        guild,
+                        group[:take],
+                        page_index=page_index,
+                        bot=page_bot,
+                    ):
                         take -= 1
                     chunk = group[:take]
-                    if not self.can_build_page(guild, chunk):
+                    if not self.can_build_page(guild, chunk, page_index=page_index, bot=page_bot):
                         log.error(
                             "TGK page chunk does not fit Discord limit (%s channels)",
                             len(chunk),
@@ -442,7 +470,7 @@ class TgkService:
             )
             ordered = self.board_display_order(await self.list_all(guild.id))
 
-        pages = self.split_into_pages(guild, ordered)
+        pages = self.split_into_pages(guild, ordered, bot)
         if sum(len(page) for page in pages) != len(ordered):
             log.error("TGK sync aborted: page split mismatch for guild %s", guild.id)
             return []
@@ -459,6 +487,7 @@ class TgkService:
                     start_display_number=display_offset + 1,
                     page_index=page_index,
                     page_count=len(pages),
+                    bot=bot if page_index == 0 else None,
                 )
             except ValueError:
                 log.exception(
@@ -491,6 +520,10 @@ class TgkService:
                     )
                     continue
             messages.append(message)
+            if official and page_index == 0:
+                from bot.views.tgk_views import bind_tgk_board_view
+
+                bind_tgk_board_view(bot, guild.id, message.id)
 
         if official and messages:
             for stale_id in stored_ids[len(messages) :]:
