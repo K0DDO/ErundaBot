@@ -362,6 +362,7 @@ class TgChannel:
     title: str
     url: str
     image_url: str | None = None
+    description: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> TgChannel:
@@ -374,6 +375,7 @@ class TgChannel:
             title=row["title"],
             url=row["url"],
             image_url=row["image_url"] if "image_url" in keys else None,
+            description=row["description"] if "description" in keys else None,
         )
 
 

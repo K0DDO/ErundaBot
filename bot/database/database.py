@@ -689,6 +689,14 @@ class Database:
                     (json.dumps([int(row["tgk_board_message_id"])]), int(row["guild_id"])),
                 )
             await self._db.execute("PRAGMA user_version = 21")
+        if version < 22:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE tg_channels ADD COLUMN description TEXT"
+                )
+            except Exception:
+                pass
+            await self._db.execute("PRAGMA user_version = 22")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2156,15 +2164,16 @@ class Database:
         title: str,
         url: str,
         image_url: str | None,
+        description: str | None = None,
     ) -> TgChannel:
         await self.ensure_guild(guild_id)
         number = await self.next_tg_channel_number(guild_id)
         cursor = await self.connection.execute(
             """
-            INSERT INTO tg_channels (guild_id, user_id, number, title, url, image_url)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO tg_channels (guild_id, user_id, number, title, url, image_url, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, user_id, number, title, url, image_url),
+            (guild_id, user_id, number, title, url, image_url, description),
         )
         await self.connection.commit()
         channel = await self.get_tg_channel(cursor.lastrowid)
@@ -2209,14 +2218,15 @@ class Database:
         guild_id: int,
         title: str,
         image_url: str | None,
+        description: str | None = None,
     ) -> None:
         await self.connection.execute(
             """
             UPDATE tg_channels
-            SET title = ?, image_url = ?
+            SET title = ?, image_url = ?, description = ?
             WHERE id = ? AND guild_id = ?
             """,
-            (title, image_url, channel_id, guild_id),
+            (title, image_url, description, channel_id, guild_id),
         )
         await self.connection.commit()
 

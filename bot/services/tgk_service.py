@@ -34,15 +34,19 @@ TG_JOINCHAT_RE = re.compile(
 )
 TG_AT_RE = re.compile(r"^@([A-Za-z0-9_]{3,})$")
 OG_META_RE = re.compile(
-    r'<meta[^>]+(?:property|name)=["\'](?P<key>og:(?:title|image))["\'][^>]+content=["\'](?P<content>[^"\']+)["\']',
+    r'<meta[^>]+(?:property|name)=["\'](?P<key>og:(?:title|image|description))["\'][^>]+content=["\'](?P<content>[^"\']+)["\']',
     re.IGNORECASE,
 )
 OG_META_RE_ALT = re.compile(
-    r'<meta[^>]+content=["\'](?P<content>[^"\']+)["\'][^>]+(?:property|name)=["\'](?P<key>og:(?:title|image))["\']',
+    r'<meta[^>]+content=["\'](?P<content>[^"\']+)["\'][^>]+(?:property|name)=["\'](?P<key>og:(?:title|image|description))["\']',
     re.IGNORECASE,
 )
 PAGE_TITLE_RE = re.compile(
     r'<div[^>]+class=["\']tgme_page_title["\'][^>]*>\s*<span[^>]*>(?P<title>.*?)</span>',
+    re.IGNORECASE | re.DOTALL,
+)
+PAGE_DESCRIPTION_RE = re.compile(
+    r'<div[^>]+class=["\']tgme_page_description[^"\']*["\'][^>]*>(?P<desc>.*?)</div>',
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -51,12 +55,15 @@ PAGE_TITLE_RE = re.compile(
 class TgChannelMeta:
     title: str
     image_url: str | None = None
+    description: str | None = None
 
 
 class TgkService:
     DISCORD_COMPONENT_LIMIT = 40
     MAX_BOARD_CHANNELS = 10
     OWNER_SEPARATOR_WIDTH = 52
+    DESCRIPTION_STORE_MAX = 512
+    DESCRIPTION_DISPLAY_MAX = 160
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -117,6 +124,21 @@ class TgkService:
             return fallback[:80]
         return title[:80]
 
+    @classmethod
+    def _clean_description(cls, raw: str) -> str:
+        text = html.unescape(re.sub(r"<[^>]+>", " ", raw))
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            return ""
+        return text[: cls.DESCRIPTION_STORE_MAX]
+
+    @classmethod
+    def _trim_display_description(cls, description: str) -> str:
+        text = re.sub(r"\s+", " ", description.strip())
+        if len(text) <= cls.DESCRIPTION_DISPLAY_MAX:
+            return text
+        return text[: cls.DESCRIPTION_DISPLAY_MAX - 1].rstrip() + "…"
+
     @staticmethod
     def _normalize_image_url(raw: str) -> str | None:
         image = raw.strip()
@@ -130,6 +152,7 @@ class TgkService:
     def _parse_page_meta(cls, html_text: str, fallback: str) -> TgChannelMeta:
         og_title: str | None = None
         og_image: str | None = None
+        og_description: str | None = None
         for pattern in (OG_META_RE, OG_META_RE_ALT):
             for match in pattern.finditer(html_text):
                 key = match.group("key").lower()
@@ -138,6 +161,8 @@ class TgkService:
                     og_title = content
                 elif key == "og:image" and og_image is None:
                     og_image = cls._normalize_image_url(content)
+                elif key == "og:description" and og_description is None:
+                    og_description = cls._clean_description(content)
 
         title = og_title
         if not title:
@@ -145,7 +170,16 @@ class TgkService:
             if page_match:
                 title = re.sub(r"<[^>]+>", "", page_match.group("title"))
         cleaned = cls._clean_title(title or fallback, fallback)
-        return TgChannelMeta(title=cleaned, image_url=og_image)
+
+        description = og_description
+        if not description:
+            page_desc = PAGE_DESCRIPTION_RE.search(html_text)
+            if page_desc:
+                description = cls._clean_description(page_desc.group("desc"))
+        if not description:
+            description = None
+
+        return TgChannelMeta(title=cleaned, image_url=og_image, description=description)
 
     def fetch_channel_meta(self, url: str) -> TgChannelMeta:
         normalized = self.normalize_url(url)
@@ -174,6 +208,7 @@ class TgkService:
             meta.title,
             url,
             meta.image_url,
+            meta.description,
         )
 
     async def remove(self, guild_id: int, number: int, user_id: int, *, is_admin: bool) -> TgChannel:
@@ -243,9 +278,15 @@ class TgkService:
         return f"# {display_number}.  {item.title}"
 
     @staticmethod
-    def _channel_link(item: TgChannel) -> str:
+    def _channel_details(item: TgChannel) -> str:
         kind = "приватка" if TgkService.is_private_url(item.url) else "открытый"
-        return f"[открыть]({item.url})\n-# ({kind})"
+        lines: list[str] = []
+        if item.description:
+            desc = TgkService._trim_display_description(item.description)
+            if desc:
+                lines.append(f"-# {desc}")
+        lines.append(f"[({kind})]({item.url})")
+        return "\n".join(lines)
 
     @staticmethod
     def board_display_order(channels: list[TgChannel]) -> list[TgChannel]:
@@ -288,11 +329,21 @@ class TgkService:
         channels: list[TgChannel],
         *,
         page_index: int = 0,
+        page_count: int | None = None,
+        show_actions: bool = False,
         bot=None,
     ) -> bool:
-        if not channels and page_index == 0 and bot is not None:
+        total_pages = page_count if page_count is not None else max(page_index + 1, 2)
+        if not channels and show_actions and bot is not None:
             try:
-                self.build_board_page(guild, [], page_index=0, page_count=1, bot=bot)
+                self.build_board_page(
+                    guild,
+                    [],
+                    page_index=page_index,
+                    page_count=total_pages,
+                    show_actions=True,
+                    bot=bot,
+                )
             except ValueError:
                 return False
             return True
@@ -303,8 +354,9 @@ class TgkService:
                 guild,
                 channels,
                 page_index=page_index,
-                page_count=max(page_index + 1, 2),
-                bot=bot if page_index == 0 else None,
+                page_count=total_pages,
+                show_actions=show_actions,
+                bot=bot if show_actions else None,
             )
         except ValueError:
             return False
@@ -333,13 +385,18 @@ class TgkService:
                     guild_id,
                 )
                 continue
-            if meta.title == channel.title and meta.image_url == channel.image_url:
+            if (
+                meta.title == channel.title
+                and meta.image_url == channel.image_url
+                and meta.description == channel.description
+            ):
                 continue
             await self.db.update_tg_channel_meta(
                 channel.id,
                 guild_id,
                 meta.title,
                 meta.image_url,
+                meta.description,
             )
             updated += 1
             await asyncio.sleep(0.35)
@@ -355,6 +412,7 @@ class TgkService:
         start_display_number: int = 1,
         page_index: int = 0,
         page_count: int = 1,
+        show_actions: bool = False,
         bot=None,
     ) -> ui.LayoutView:
         view = ui.LayoutView(timeout=None)
@@ -375,7 +433,7 @@ class TgkService:
             empty = ui.Container(accent_color=BRAND_COLOR)
             empty.add_item(ui.TextDisplay("Пока пусто. Жми «Добавить ТГК» ниже."))
             view.add_item(empty)
-            if page_index == 0 and bot is not None:
+            if show_actions and bot is not None:
                 from bot.views.tgk_views import append_tgk_board_actions
 
                 append_tgk_board_actions(view, bot, guild.id)
@@ -390,12 +448,12 @@ class TgkService:
             block = ui.Container(accent_color=BRAND_COLOR)
             for entry in user_channels:
                 title = self._channel_title(display_number, entry)
-                link = self._channel_link(entry)
+                details = self._channel_details(entry)
                 if entry.image_url:
                     block.add_item(
                         ui.Section(
                             ui.TextDisplay(title),
-                            ui.TextDisplay(link),
+                            ui.TextDisplay(details),
                             accessory=ui.Thumbnail(
                                 media=entry.image_url,
                                 description=entry.title[:256],
@@ -403,21 +461,21 @@ class TgkService:
                         )
                     )
                 else:
-                    block.add_item(ui.TextDisplay(f"{title}\n{link}"))
+                    block.add_item(ui.TextDisplay(f"{title}\n{details}"))
                 display_number += 1
             view.add_item(block)
 
-        if page_index == 0 and bot is not None:
+        if show_actions and bot is not None:
             from bot.views.tgk_views import append_tgk_board_actions
 
             append_tgk_board_actions(view, bot, guild.id)
         return view
 
-    def split_into_pages(self, guild: discord.Guild, channels: list[TgChannel], bot=None) -> list[list[TgChannel]]:
-        ordered = self.board_display_order(channels)
-        if not ordered:
-            return [[]]
-
+    def _pack_pages_without_actions(
+        self,
+        guild: discord.Guild,
+        ordered: list[TgChannel],
+    ) -> list[list[TgChannel]]:
         pages: list[list[TgChannel]] = []
         current: list[TgChannel] = []
 
@@ -425,13 +483,12 @@ class TgkService:
             group = list(group_channels)
             while group:
                 page_index = len(pages) if not current else len(pages)
-                page_bot = bot if page_index == 0 else None
                 trial = current + group
-                if current and not self.can_build_page(guild, trial, page_index=page_index, bot=page_bot):
+                if current and not self.can_build_page(guild, trial, page_index=page_index):
                     pages.append(current)
                     current = []
                     continue
-                if self.can_build_page(guild, trial, page_index=page_index, bot=page_bot):
+                if self.can_build_page(guild, trial, page_index=page_index):
                     current = trial
                     group = []
                     continue
@@ -441,11 +498,10 @@ class TgkService:
                         guild,
                         group[:take],
                         page_index=page_index,
-                        bot=page_bot,
                     ):
                         take -= 1
                     chunk = group[:take]
-                    if not self.can_build_page(guild, chunk, page_index=page_index, bot=page_bot):
+                    if not self.can_build_page(guild, chunk, page_index=page_index):
                         log.error(
                             "TGK page chunk does not fit Discord limit (%s channels)",
                             len(chunk),
@@ -459,6 +515,49 @@ class TgkService:
 
         if current:
             pages.append(current)
+        return pages
+
+    def _ensure_last_page_actions_fit(
+        self,
+        guild: discord.Guild,
+        pages: list[list[TgChannel]],
+        bot,
+    ) -> list[list[TgChannel]]:
+        if bot is None or not pages:
+            return pages
+        while pages:
+            last_idx = len(pages) - 1
+            page_count = len(pages)
+            if self.can_build_page(
+                guild,
+                pages[last_idx],
+                page_index=last_idx,
+                page_count=page_count,
+                show_actions=True,
+                bot=bot,
+            ):
+                return pages
+            last = pages[-1]
+            if len(last) <= 1:
+                log.error(
+                    "TGK last page cannot fit action buttons in guild %s",
+                    guild.id,
+                )
+                return pages
+            moved = last.pop()
+            if not last:
+                pages.pop()
+            pages.append([moved])
+        return pages
+
+    def split_into_pages(self, guild: discord.Guild, channels: list[TgChannel], bot=None) -> list[list[TgChannel]]:
+        ordered = self.board_display_order(channels)
+        if not ordered:
+            return [[]]
+
+        pages = self._pack_pages_without_actions(guild, ordered)
+        if bot is not None:
+            pages = self._ensure_last_page_actions_fit(guild, pages, bot)
 
         packed = sum(len(page) for page in pages)
         if packed != len(ordered):
@@ -507,6 +606,7 @@ class TgkService:
         display_offset = 0
 
         for page_index, page_channels in enumerate(pages):
+            is_last_page = page_index == len(pages) - 1
             try:
                 view = self.build_board_page(
                     guild,
@@ -514,7 +614,8 @@ class TgkService:
                     start_display_number=display_offset + 1,
                     page_index=page_index,
                     page_count=len(pages),
-                    bot=bot if page_index == 0 else None,
+                    show_actions=is_last_page,
+                    bot=bot if is_last_page else None,
                 )
             except ValueError:
                 log.exception(
@@ -547,7 +648,7 @@ class TgkService:
                     )
                     continue
             messages.append(message)
-            if official and page_index == 0:
+            if official and is_last_page:
                 from bot.views.tgk_views import bind_tgk_board_view
 
                 bind_tgk_board_view(bot, guild.id, message.id)

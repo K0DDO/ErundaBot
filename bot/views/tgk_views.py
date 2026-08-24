@@ -186,4 +186,4 @@ async def register_tgk_board_views(bot: ErundaBot) -> None:
             continue
         message_ids = await bot.db.get_tgk_board_message_ids(guild.id)
         if message_ids:
-            bind_tgk_board_view(bot, guild.id, message_ids[0])
+            bind_tgk_board_view(bot, guild.id, message_ids[-1])
