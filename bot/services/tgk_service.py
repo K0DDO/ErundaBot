@@ -60,7 +60,9 @@ class TgChannelMeta:
 class TgkService:
     DISCORD_COMPONENT_LIMIT = 40
     MAX_BOARD_CHANNELS = 10
-    OWNER_SEPARATOR_WIDTH = 56
+    # ASCII `-` is narrow; need enough to fill the card, but >~76 wraps on desktop.
+    OWNER_SEPARATOR_MIN = 68
+    OWNER_SEPARATOR_MAX = 74
     DESCRIPTION_STORE_MAX = 512
     DESCRIPTION_DISPLAY_MAX = 160
 
@@ -228,11 +230,8 @@ class TgkService:
         return "/+" in lowered or "/joinchat/" in lowered
 
     @classmethod
-    def _owner_separator(cls, guild: discord.Guild, user_id: int) -> str:
-        member = guild.get_member(user_id)
-        username = member.name if member is not None else f"user{user_id}"
-        center = f" {username} "
-        width = cls.OWNER_SEPARATOR_WIDTH
+    def _centered_dashes(cls, center: str, width: int) -> str:
+        width = max(cls.OWNER_SEPARATOR_MIN, min(cls.OWNER_SEPARATOR_MAX, width))
         center_len = len(center)
         if center_len >= width:
             return center.strip()
@@ -240,6 +239,23 @@ class TgkService:
         left = pad // 2
         right = pad - left
         return f"{'-' * left}{center}{'-' * right}"
+
+    @classmethod
+    def _page_separator_width(cls, guild: discord.Guild, channels: list[TgChannel]) -> int:
+        """One shared width for all owner rows on the page (fills card, no wrap)."""
+        needed = cls.OWNER_SEPARATOR_MIN
+        for user_id, _group in cls._groups_in_order(channels):
+            member = guild.get_member(user_id)
+            username = member.name if member is not None else f"user{user_id}"
+            # " name " + at least ~10 dashes each side
+            needed = max(needed, len(username) + 2 + 20)
+        return max(cls.OWNER_SEPARATOR_MIN, min(cls.OWNER_SEPARATOR_MAX, needed))
+
+    @classmethod
+    def _owner_separator(cls, guild: discord.Guild, user_id: int, *, width: int) -> str:
+        member = guild.get_member(user_id)
+        username = member.name if member is not None else f"user{user_id}"
+        return cls._centered_dashes(f" {username} ", width)
 
     @staticmethod
     def _channel_title(display_number: int, item: TgChannel) -> str:
@@ -408,9 +424,12 @@ class TgkService:
             return view
 
         display_number = start_display_number
+        sep_width = self._page_separator_width(guild, ordered)
         for user_id, user_channels in self._groups_in_order(ordered):
             sep = ui.Container(accent_color=BRAND_COLOR)
-            sep.add_item(ui.TextDisplay(self._owner_separator(guild, user_id)))
+            sep.add_item(
+                ui.TextDisplay(self._owner_separator(guild, user_id, width=sep_width))
+            )
             view.add_item(sep)
 
             block = ui.Container(accent_color=BRAND_COLOR)
