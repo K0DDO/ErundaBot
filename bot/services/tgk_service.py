@@ -61,9 +61,10 @@ class TgChannelMeta:
 class TgkService:
     DISCORD_COMPONENT_LIMIT = 40
     MAX_BOARD_CHANNELS = 10
-    OWNER_SEPARATOR_WIDTH = 52
+    OWNER_SEPARATOR_MIN = 48
+    OWNER_SEPARATOR_MAX = 96
     DESCRIPTION_STORE_MAX = 512
-    DESCRIPTION_DISPLAY_MAX = 160
+    DESCRIPTION_DISPLAY_MAX = 220
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -256,7 +257,8 @@ class TgkService:
 
     @classmethod
     def _centered_dashes(cls, center: str, width: int | None = None) -> str:
-        line_width = width if width is not None else cls.OWNER_SEPARATOR_WIDTH
+        line_width = width if width is not None else cls.OWNER_SEPARATOR_MIN
+        line_width = max(cls.OWNER_SEPARATOR_MIN, min(cls.OWNER_SEPARATOR_MAX, line_width))
         center_len = cls._visual_len(center)
         if center_len >= line_width:
             return center
@@ -265,13 +267,41 @@ class TgkService:
         right = pad - left
         return f"{'-' * left}{center}{'-' * right}"
 
-    @staticmethod
-    def _owner_separator(guild: discord.Guild, user_id: int) -> str:
+    @classmethod
+    def _separator_width_for(
+        cls,
+        guild: discord.Guild,
+        user_id: int,
+        channels: list[TgChannel],
+        *,
+        start_display_number: int,
+    ) -> int:
+        member = guild.get_member(user_id)
+        username = member.name if member is not None else f"user{user_id}"
+        widths = [cls._visual_len(f" {username} ") + 4]
+        display_number = start_display_number
+        for entry in channels:
+            widths.append(cls._visual_len(cls._channel_title(display_number, entry)))
+            if entry.description:
+                desc = cls._trim_display_description(entry.description)
+                if desc:
+                    widths.append(cls._visual_len(desc))
+            display_number += 1
+        return max(cls.OWNER_SEPARATOR_MIN, min(cls.OWNER_SEPARATOR_MAX, max(widths)))
+
+    @classmethod
+    def _owner_separator(
+        cls,
+        guild: discord.Guild,
+        user_id: int,
+        *,
+        width: int | None = None,
+    ) -> str:
         member = guild.get_member(user_id)
         username = member.name if member is not None else f"user{user_id}"
         emoji = render_birthday_emoji(guild, None, user_id=user_id)
         center = f" {emoji} {username} "
-        return TgkService._centered_dashes(center)
+        return cls._centered_dashes(center, width)
 
     @staticmethod
     def _channel_title(display_number: int, item: TgChannel) -> str:
@@ -320,7 +350,8 @@ class TgkService:
         for _user_id, user_channels in cls._groups_in_order(channels):
             cost += 3
             for entry in user_channels:
-                cost += 4 if entry.image_url else 2
+                # Section(title+thumb) + full-width details TextDisplay.
+                cost += 5 if entry.image_url else 2
         return cost
 
     def can_build_page(
@@ -441,8 +472,16 @@ class TgkService:
 
         display_number = start_display_number
         for user_id, user_channels in self._groups_in_order(ordered):
+            sep_width = self._separator_width_for(
+                guild,
+                user_id,
+                user_channels,
+                start_display_number=display_number,
+            )
             sep = ui.Container(accent_color=BRAND_COLOR)
-            sep.add_item(ui.TextDisplay(self._owner_separator(guild, user_id)))
+            sep.add_item(
+                ui.TextDisplay(self._owner_separator(guild, user_id, width=sep_width))
+            )
             view.add_item(sep)
 
             block = ui.Container(accent_color=BRAND_COLOR)
@@ -450,16 +489,17 @@ class TgkService:
                 title = self._channel_title(display_number, entry)
                 details = self._channel_details(entry)
                 if entry.image_url:
+                    # Title + thumb in Section; description/link full-width below.
                     block.add_item(
                         ui.Section(
                             ui.TextDisplay(title),
-                            ui.TextDisplay(details),
                             accessory=ui.Thumbnail(
                                 media=entry.image_url,
                                 description=entry.title[:256],
                             ),
                         )
                     )
+                    block.add_item(ui.TextDisplay(details))
                 else:
                     block.add_item(ui.TextDisplay(f"{title}\n{details}"))
                 display_number += 1
