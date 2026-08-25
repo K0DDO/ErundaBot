@@ -15,7 +15,6 @@ from discord import ui
 
 from bot.database.database import Database
 from bot.database.models import TgChannel
-from bot.utils.birthday_emojis import render_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR
 
 log = logging.getLogger(__name__)
@@ -61,8 +60,9 @@ class TgChannelMeta:
 class TgkService:
     DISCORD_COMPONENT_LIMIT = 40
     MAX_BOARD_CHANNELS = 10
+    OWNER_SEPARATOR_WIDTH = 56
     DESCRIPTION_STORE_MAX = 512
-    DESCRIPTION_DISPLAY_MAX = 220
+    DESCRIPTION_DISPLAY_MAX = 160
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -227,12 +227,19 @@ class TgkService:
         lowered = url.lower()
         return "/+" in lowered or "/joinchat/" in lowered
 
-    @staticmethod
-    def _owner_label(guild: discord.Guild, user_id: int) -> str:
+    @classmethod
+    def _owner_separator(cls, guild: discord.Guild, user_id: int) -> str:
         member = guild.get_member(user_id)
         username = member.name if member is not None else f"user{user_id}"
-        emoji = render_birthday_emoji(guild, None, user_id=user_id)
-        return f"{emoji} {username}"
+        center = f" {username} "
+        width = cls.OWNER_SEPARATOR_WIDTH
+        center_len = len(center)
+        if center_len >= width:
+            return center.strip()
+        pad = width - center_len
+        left = pad // 2
+        right = pad - left
+        return f"{'-' * left}{center}{'-' * right}"
 
     @staticmethod
     def _channel_title(display_number: int, item: TgChannel) -> str:
@@ -279,10 +286,9 @@ class TgkService:
             return 2 if with_header else 0
         cost = 2 if with_header else 0
         for _user_id, user_channels in cls._groups_in_order(channels):
-            cost += 4
+            cost += 3
             for entry in user_channels:
-                # Section(title+thumb) + full-width details TextDisplay.
-                cost += 5 if entry.image_url else 2
+                cost += 4 if entry.image_url else 2
         return cost
 
     def can_build_page(
@@ -404,10 +410,7 @@ class TgkService:
         display_number = start_display_number
         for user_id, user_channels in self._groups_in_order(ordered):
             sep = ui.Container(accent_color=BRAND_COLOR)
-            sep.add_item(ui.TextDisplay(self._owner_label(guild, user_id)))
-            sep.add_item(
-                ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small)
-            )
+            sep.add_item(ui.TextDisplay(self._owner_separator(guild, user_id)))
             view.add_item(sep)
 
             block = ui.Container(accent_color=BRAND_COLOR)
@@ -415,17 +418,16 @@ class TgkService:
                 title = self._channel_title(display_number, entry)
                 details = self._channel_details(entry)
                 if entry.image_url:
-                    # Title + thumb in Section; description/link full-width below.
                     block.add_item(
                         ui.Section(
                             ui.TextDisplay(title),
+                            ui.TextDisplay(details),
                             accessory=ui.Thumbnail(
                                 media=entry.image_url,
                                 description=entry.title[:256],
                             ),
                         )
                     )
-                    block.add_item(ui.TextDisplay(details))
                 else:
                     block.add_item(ui.TextDisplay(f"{title}\n{details}"))
                 display_number += 1
