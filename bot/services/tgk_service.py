@@ -15,7 +15,7 @@ from discord import ui
 
 from bot.database.database import Database
 from bot.database.models import TgChannel
-from bot.utils.birthday_emojis import CUSTOM_EMOJI_SEARCH_RE, render_birthday_emoji
+from bot.utils.birthday_emojis import render_birthday_emoji
 from bot.utils.embeds import BRAND_COLOR
 
 log = logging.getLogger(__name__)
@@ -61,8 +61,6 @@ class TgChannelMeta:
 class TgkService:
     DISCORD_COMPONENT_LIMIT = 40
     MAX_BOARD_CHANNELS = 10
-    OWNER_SEPARATOR_MIN = 48
-    OWNER_SEPARATOR_MAX = 96
     DESCRIPTION_STORE_MAX = 512
     DESCRIPTION_DISPLAY_MAX = 220
 
@@ -230,78 +228,11 @@ class TgkService:
         return "/+" in lowered or "/joinchat/" in lowered
 
     @staticmethod
-    def _visual_len(text: str) -> int:
-        """Approximate monospace width for centering (emoji ≈ 2, custom emoji = 1)."""
-        normalized = CUSTOM_EMOJI_SEARCH_RE.sub("E", text)
-        size = 0
-        idx = 0
-        while idx < len(normalized):
-            ch = normalized[idx]
-            code = ord(ch)
-            if code == 0xFE0F:
-                idx += 1
-                continue
-            if code > 0xFFFF:
-                size += 2
-                idx += 2
-                continue
-            if 0x1F300 <= code <= 0x1FAFF or 0x2600 <= code <= 0x27BF:
-                size += 2
-                idx += 1
-                if idx < len(normalized) and ord(normalized[idx]) == 0xFE0F:
-                    idx += 1
-                continue
-            size += 1
-            idx += 1
-        return size
-
-    @classmethod
-    def _centered_dashes(cls, center: str, width: int | None = None) -> str:
-        line_width = width if width is not None else cls.OWNER_SEPARATOR_MIN
-        line_width = max(cls.OWNER_SEPARATOR_MIN, min(cls.OWNER_SEPARATOR_MAX, line_width))
-        center_len = cls._visual_len(center)
-        if center_len >= line_width:
-            return center
-        pad = line_width - center_len
-        left = pad // 2
-        right = pad - left
-        return f"{'-' * left}{center}{'-' * right}"
-
-    @classmethod
-    def _separator_width_for(
-        cls,
-        guild: discord.Guild,
-        user_id: int,
-        channels: list[TgChannel],
-        *,
-        start_display_number: int,
-    ) -> int:
-        member = guild.get_member(user_id)
-        username = member.name if member is not None else f"user{user_id}"
-        widths = [cls._visual_len(f" {username} ") + 4]
-        display_number = start_display_number
-        for entry in channels:
-            widths.append(cls._visual_len(cls._channel_title(display_number, entry)))
-            if entry.description:
-                desc = cls._trim_display_description(entry.description)
-                if desc:
-                    widths.append(cls._visual_len(desc))
-            display_number += 1
-        return max(cls.OWNER_SEPARATOR_MIN, min(cls.OWNER_SEPARATOR_MAX, max(widths)))
-
-    @classmethod
-    def _owner_separator(
-        cls,
-        guild: discord.Guild,
-        user_id: int,
-        *,
-        width: int | None = None,
-    ) -> str:
+    def _owner_label(guild: discord.Guild, user_id: int) -> str:
         member = guild.get_member(user_id)
         username = member.name if member is not None else f"user{user_id}"
         emoji = render_birthday_emoji(guild, None, user_id=user_id)
-        center = f" {emoji} {username} "
-        return cls._centered_dashes(center, width)
+        return f"{emoji} {username}"
 
     @staticmethod
     def _channel_title(display_number: int, item: TgChannel) -> str:
@@ -348,7 +279,7 @@ class TgkService:
             return 2 if with_header else 0
         cost = 2 if with_header else 0
         for _user_id, user_channels in cls._groups_in_order(channels):
-            cost += 3
+            cost += 4
             for entry in user_channels:
                 # Section(title+thumb) + full-width details TextDisplay.
                 cost += 5 if entry.image_url else 2
@@ -472,15 +403,10 @@ class TgkService:
 
         display_number = start_display_number
         for user_id, user_channels in self._groups_in_order(ordered):
-            sep_width = self._separator_width_for(
-                guild,
-                user_id,
-                user_channels,
-                start_display_number=display_number,
-            )
             sep = ui.Container(accent_color=BRAND_COLOR)
+            sep.add_item(ui.TextDisplay(self._owner_label(guild, user_id)))
             sep.add_item(
-                ui.TextDisplay(self._owner_separator(guild, user_id, width=sep_width))
+                ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small)
             )
             view.add_item(sep)
 
