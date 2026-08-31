@@ -29,8 +29,51 @@ def _italic_description(raw: str) -> str | None:
     return "\n".join(lines)
 
 
-def event_embed(bot: ErundaBot, event: Event, tz_name: str) -> discord.Embed:
-    date_label, time_label = bot.event_service.format_starts_at(event, tz_name)
+def _participant_field(event: Event, names: list[str]) -> tuple[str, str]:
+    count = len(names)
+    if event.max_participants:
+        field_name = f"👥 Участники · {count}/{event.max_participants}"
+    else:
+        field_name = f"👥 Участники · {count}"
+    shown = names[:25]
+    lines = list(shown)
+    extra = count - len(shown)
+    if extra > 0:
+        lines.append(f"+{extra}")
+    value = "\n".join(lines) if lines else "пока никого"
+    return field_name, value[:1024]
+
+
+async def resolve_participant_names(
+    bot: ErundaBot,
+    guild: discord.Guild,
+    user_ids: list[int],
+) -> list[str]:
+    names: list[str] = []
+    for user_id in user_ids:
+        member = guild.get_member(user_id)
+        if member is not None:
+            names.append(member.display_name)
+            continue
+        cached = bot.get_user(user_id)
+        if cached is not None:
+            names.append(cached.display_name)
+            continue
+        try:
+            user = await bot.fetch_user(user_id)
+            names.append(user.display_name)
+        except discord.HTTPException:
+            names.append(f"ID {user_id}")
+    return names
+
+
+def event_embed(
+    bot: ErundaBot,
+    event: Event,
+    tz_name: str,
+    participant_names: list[str],
+) -> discord.Embed:
+    date_label, _time_label = bot.event_service.format_starts_at(event, tz_name)
     desc_parts: list[str] = []
     if event.status == "cancelled":
         desc_parts.append("**Ивент отменён**")
@@ -42,12 +85,18 @@ def event_embed(bot: ErundaBot, event: Event, tz_name: str) -> discord.Embed:
         description="\n\n".join(desc_parts) or None,
     )
     embed.add_field(name="📅 Дата", value=date_label, inline=True)
-    embed.add_field(name="🕘 Время", value=time_label, inline=True)
+    embed.add_field(
+        name="🕘 Время",
+        value=bot.event_service.time_display(event, tz_name),
+        inline=True,
+    )
     embed.add_field(
         name="🔔 Роль",
         value=role_mention(event.ping_role_id),
         inline=True,
     )
+    field_name, field_value = _participant_field(event, participant_names)
+    embed.add_field(name=field_name, value=field_value, inline=False)
     if event.status == "cancelled":
         embed.color = 0xED4245
         embed.set_footer(text="Ерунда")
@@ -57,6 +106,35 @@ def event_embed(bot: ErundaBot, event: Event, tz_name: str) -> discord.Embed:
     elif event.number:
         embed.set_footer(text=f"Ерунда · #{event.number}")
     return embed
+
+
+async def render_event_embed(bot: ErundaBot, event: Event, tz_name: str) -> discord.Embed:
+    guild = bot.get_guild(event.guild_id)
+    participant_ids = await bot.event_service.participants_for_display(event)
+    if guild is None:
+        return event_embed(bot, event, tz_name, [str(uid) for uid in participant_ids])
+    names = await resolve_participant_names(bot, guild, participant_ids)
+    return event_embed(bot, event, tz_name, names)
+
+
+async def refresh_event_card(bot: ErundaBot, event: Event) -> None:
+    if not event.message_id or event.status != "scheduled":
+        return
+    guild = bot.get_guild(event.guild_id)
+    if guild is None:
+        return
+    config = await bot.config_service.get(event.guild_id)
+    channel_id = event.channel_id or config.events_channel_id
+    channel = guild.get_channel(channel_id or 0) if channel_id else None
+    if channel is None or not hasattr(channel, "fetch_message"):
+        return
+    try:
+        msg = await channel.fetch_message(event.message_id)
+        embed = await render_event_embed(bot, event, config.timezone)
+        view = EventView(bot, event.id)
+        await msg.edit(embed=embed, view=view)
+    except discord.HTTPException:
+        pass
 
 
 async def close_event_card(bot: ErundaBot, event: Event, tz_name: str) -> None:
@@ -72,7 +150,8 @@ async def close_event_card(bot: ErundaBot, event: Event, tz_name: str) -> None:
         return
     try:
         msg = await channel.fetch_message(event.message_id)
-        await msg.edit(embed=event_embed(bot, event, tz_name), view=None)
+        embed = await render_event_embed(bot, event, tz_name)
+        await msg.edit(embed=embed, view=None)
     except discord.HTTPException:
         pass
 
@@ -91,7 +170,12 @@ async def resync_event_cards(bot: ErundaBot, events: list[Event]) -> None:
             continue
         try:
             msg = await channel.fetch_message(event.message_id)
-            await msg.edit(embed=event_embed(bot, event, config.timezone), view=None)
+            embed = await render_event_embed(bot, event, config.timezone)
+            if event.status == "scheduled":
+                view = EventView(bot, event.id)
+                await msg.edit(embed=embed, view=view)
+            else:
+                await msg.edit(embed=embed, view=None)
         except discord.HTTPException:
             pass
 
@@ -123,7 +207,7 @@ def _is_bot_event_mention(
         return False
     if title is not None and title not in content:
         return False
-    return "идёт" in lowered or "осталось" in lowered or "сейчас" in lowered
+    return "осталось" in lowered or "начинается" in lowered
 
 
 async def cleanup_event_mentions(
@@ -135,7 +219,7 @@ async def cleanup_event_mentions(
     keep_message_ids: set[int] | None = None,
     history_limit: int = 200,
 ) -> int:
-    """Delete bot ping/reminder messages in the events channel."""
+    """Delete bot ping messages in the events channel."""
     if channel_id is None or guild.me is None:
         return 0
     channel = guild.get_channel(channel_id)
@@ -162,7 +246,7 @@ async def cleanup_event_mentions(
 
 
 async def sweep_orphan_event_mentions(bot: ErundaBot) -> None:
-    """Remove leftover event pings/reminders; keep pings for live events."""
+    """Remove leftover event pings; keep pings for live events."""
     for config in await bot.db.list_guilds():
         guild = bot.get_guild(config.guild_id)
         if guild is None or guild.me is None:
@@ -266,9 +350,11 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
             )
             return
 
+        if interaction.guild is None:
+            return
         config = await self.bot.config_service.get(self.guild_id)
         channel_id = config.events_channel_id or interaction.channel_id
-        channel = interaction.guild.get_channel(channel_id) if interaction.guild else None
+        channel = interaction.guild.get_channel(channel_id) if channel_id else None
         if channel is None or not hasattr(channel, "send"):
             await interaction.response.send_message(
                 embed=error_embed("Канал ивентов не найден. Настрой /config."),
@@ -276,10 +362,14 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
             )
             return
 
-        embed = event_embed(self.bot, event, self.tz_name)
-        message = await channel.send(embed=embed)
+        role = interaction.guild.get_role(self.ping_role_id)
+        content = role.mention if role is not None else None
+        embed = await render_event_embed(self.bot, event, self.tz_name)
+        view = EventView(self.bot, event.id)
+        message = await channel.send(content=content, embed=embed, view=view)
         await self.bot.event_service.set_message(event.id, message.id)
         await self.bot.db.update_event(event.id, channel_id=channel.id)
+        self.bot.add_view(view, message_id=message.id)
 
         await interaction.response.send_message(
             embed=success_embed("Ивент создан", f"[Открыть]({message.jump_url})"),
@@ -287,6 +377,54 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
         )
         remaining = await self.bot.db.list_events(self.guild_id, status="scheduled")
         await resync_event_cards(self.bot, remaining)
+
+
+class EventView(discord.ui.View):
+    def __init__(self, bot: ErundaBot, event_id: int) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.event_id = event_id
+
+        join_btn = discord.ui.Button(
+            label="Присоединиться",
+            style=discord.ButtonStyle.success,
+            custom_id=f"event:join:{event_id}",
+        )
+        join_btn.callback = self.join_button
+        self.add_item(join_btn)
+
+        leave_btn = discord.ui.Button(
+            label="Покинуть ивент",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"event:leave:{event_id}",
+        )
+        leave_btn.callback = self.leave_button
+        self.add_item(leave_btn)
+
+    async def _refresh_message(self, interaction: discord.Interaction, event: Event) -> None:
+        config = await self.bot.config_service.get(event.guild_id)
+        embed = await render_event_embed(self.bot, event, config.timezone)
+        disabled = event.status != "scheduled"
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = disabled
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    async def join_button(self, interaction: discord.Interaction) -> None:
+        try:
+            event, _ = await self.bot.event_service.join(self.event_id, interaction.user.id)
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await self._refresh_message(interaction, event)
+
+    async def leave_button(self, interaction: discord.Interaction) -> None:
+        try:
+            event, _ = await self.bot.event_service.leave(self.event_id, interaction.user.id)
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await self._refresh_message(interaction, event)
 
 
 class EventCancelConfirmView(discord.ui.View):
@@ -339,3 +477,9 @@ class EventCancelConfirmView(discord.ui.View):
             embed=success_embed("Ивент не отменён"),
             view=None,
         )
+
+
+def register_event_views(bot: ErundaBot, events: list[Event]) -> None:
+    for event in events:
+        if event.message_id and event.status == "scheduled":
+            bot.add_view(EventView(bot, event.id), message_id=event.message_id)

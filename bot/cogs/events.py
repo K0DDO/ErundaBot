@@ -14,8 +14,10 @@ from bot.utils.formatting import role_mention
 from bot.views.event_views import (
     EventCancelConfirmView,
     EventCreateModal,
-    event_embed,
+    register_event_views,
+    render_event_embed,
     resync_event_cards,
+    retire_event,
     sweep_orphan_event_mentions,
 )
 
@@ -37,6 +39,7 @@ class EventsCog(commands.Cog):
         self._cards_synced = True
         try:
             events = await self.bot.db.list_scheduled_events()
+            register_event_views(self.bot, events)
             await resync_event_cards(self.bot, events)
             await sweep_orphan_event_mentions(self.bot)
             log.info("Resynced %s event cards", len(events))
@@ -87,9 +90,14 @@ class EventsCog(commands.Cog):
         config = await self.bot.config_service.get(interaction.guild.id)
         lines: list[str] = []
         for ev in events[:15]:
-            date_label, time_label = self.bot.event_service.format_starts_at(ev, config.timezone)
-            status = "идёт" if self.bot.event_service.has_started(ev) else f"{date_label} {time_label}"
-            line = f"**#{ev.number}** {ev.title} — {status} · {role_mention(ev.ping_role_id)}"
+            date_label, _time_label = self.bot.event_service.format_starts_at(ev, config.timezone)
+            count = await self.bot.event_service.participant_count(ev.id)
+            time_label = self.bot.event_service.time_display(ev, config.timezone)
+            status = time_label if time_label in {"Идёт", "Закончился"} else f"{date_label} {time_label}"
+            line = (
+                f"**#{ev.number}** {ev.title} — {status} · {count} чел. · "
+                f"{role_mention(ev.ping_role_id)}"
+            )
             channel_id = ev.channel_id or config.events_channel_id
             if channel_id and ev.message_id:
                 url = f"https://discord.com/channels/{ev.guild_id}/{channel_id}/{ev.message_id}"
@@ -100,7 +108,7 @@ class EventsCog(commands.Cog):
             ephemeral=True,
         )
 
-    @event.command(name="ping", description="Пингануть роль ивента")
+    @event.command(name="ping", description="Пингануть участников ивента")
     @app_commands.describe(number="Номер ивента из /event list")
     @app_commands.guild_only()
     async def event_ping(self, interaction: discord.Interaction, number: int) -> None:
@@ -113,16 +121,16 @@ class EventsCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        if event.ping_role_id is None:
+        if not self.bot.event_service.is_pingable(event):
             await interaction.response.send_message(
-                embed=error_embed("У ивента не задана роль для пинга"),
+                embed=error_embed("Этот ивент больше нельзя пинговать"),
                 ephemeral=True,
             )
             return
-        role = interaction.guild.get_role(event.ping_role_id)
-        if role is None:
+        participants = await self.bot.event_service.participants_for_display(event)
+        if not participants:
             await interaction.response.send_message(
-                embed=error_embed("Роль ивента не найдена на сервере"),
+                embed=error_embed("Никто не присоединился к ивенту"),
                 ephemeral=True,
             )
             return
@@ -135,7 +143,18 @@ class EventsCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        await channel.send(self.bot.event_service.ping_text(event, role))
+        text = self.bot.event_service.participant_ping_content(
+            event,
+            participants,
+            mode=self.bot.event_service.manual_ping_mode(event),
+        )
+        if text is None:
+            await interaction.response.send_message(
+                embed=error_embed("Некого пинговать"),
+                ephemeral=True,
+            )
+            return
+        await channel.send(text)
         await interaction.response.send_message(
             embed=success_embed("Пинг отправлен"),
             ephemeral=True,
@@ -149,11 +168,25 @@ class EventsCog(commands.Cog):
     ) -> list[app_commands.Choice[int]]:
         if interaction.guild is None:
             return []
-        events = await self.bot.event_service.list_scheduled(interaction.guild.id)
+        events = await self.bot.event_service.list_pingable(interaction.guild.id)
+        return await self._event_number_autocomplete(interaction, current, events)
+
+    async def _event_number_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+        events: list,
+    ) -> list[app_commands.Choice[int]]:
+        if interaction.guild is None:
+            return []
+        config = await self.bot.config_service.get(interaction.guild.id)
         choices: list[app_commands.Choice[int]] = []
         needle = current.strip().lower()
         for event in events:
-            label = f"#{event.number} · {event.title}"
+            date_label, time_label = self.bot.event_service.format_starts_at(
+                event, config.timezone
+            )
+            label = f"#{event.number} · {date_label} {time_label} · {event.title}"
             if self.bot.event_service.has_started(event):
                 label += " · идёт"
             if needle and needle not in label.lower() and needle not in str(event.number):
@@ -182,7 +215,7 @@ class EventsCog(commands.Cog):
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         config = await self.bot.config_service.get(interaction.guild.id)
-        embed = event_embed(self.bot, event, config.timezone)
+        embed = await render_event_embed(self.bot, event, config.timezone)
         await interaction.response.send_message(
             content="**Удалить этот ивент?**",
             embed=embed,
@@ -196,7 +229,56 @@ class EventsCog(commands.Cog):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[int]]:
-        return await self.event_ping_autocomplete(interaction, current)
+        if interaction.guild is None:
+            return []
+        events = await self.bot.event_service.list_scheduled(interaction.guild.id)
+        return await self._event_number_autocomplete(interaction, current, events)
+
+    @event.command(name="ended", description="Завершить ивент (создатель)")
+    @app_commands.describe(number="Номер ивента из /event list")
+    @app_commands.guild_only()
+    async def event_ended(self, interaction: discord.Interaction, number: int) -> None:
+        if interaction.guild is None:
+            return
+        match = await self.bot.event_service.get_by_number(interaction.guild.id, number)
+        if match is None:
+            await interaction.response.send_message(
+                embed=error_embed("Ивент не найден"),
+                ephemeral=True,
+            )
+            return
+        try:
+            event = await self.bot.event_service.end(match.id, interaction.user.id)
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        await retire_event(self.bot, event, status="completed")
+        await interaction.followup.send(embed=success_embed("Ивент завершён"), ephemeral=True)
+
+    @event_ended.autocomplete("number")
+    async def event_ended_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[int]]:
+        if interaction.guild is None:
+            return []
+        config = await self.bot.config_service.get(interaction.guild.id)
+        events = await self.bot.event_service.list_running(interaction.guild.id)
+        choices: list[app_commands.Choice[int]] = []
+        needle = current.strip().lower()
+        for event in events:
+            date_label, time_label = self.bot.event_service.format_starts_at(
+                event, config.timezone
+            )
+            label = f"#{event.number} · {date_label} {time_label} · {event.title} · идёт"
+            if needle and needle not in label.lower() and needle not in str(event.number):
+                continue
+            choices.append(app_commands.Choice(name=label[:100], value=event.number))
+            if len(choices) >= 25:
+                break
+        return choices
 
 
 async def setup(bot: ErundaBot) -> None:

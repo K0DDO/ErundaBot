@@ -11,7 +11,7 @@ from discord.ext import tasks
 import discord
 
 from bot.utils.embeds import base_embed
-from bot.views.event_views import retire_event
+from bot.views.event_views import refresh_event_card, retire_event
 from bot.views.proposal_views import build_proposal_embed
 
 log = logging.getLogger(__name__)
@@ -164,10 +164,34 @@ class BackgroundTasks:
         await self.bot.wait_until_ready()
         now = datetime.now(timezone.utc)
         try:
-            for event in await self.bot.event_service.overdue_events(now):
+            for event in await self.bot.event_service.due_starts(now):
+                guild = self.bot.get_guild(event.guild_id)
+                if guild is None:
+                    await self.bot.event_service.mark_notified(event.id, "start")
+                    continue
+                config = await self.bot.config_service.get(event.guild_id)
+                channel_id = event.channel_id or config.events_channel_id
+                channel = guild.get_channel(channel_id) if channel_id else None
+                if channel is None or not hasattr(channel, "send"):
+                    await self.bot.event_service.mark_notified(event.id, "start")
+                    continue
+                participants = await self.bot.event_service.participants_for_display(event)
+                text = self.bot.event_service.participant_ping_content(
+                    event,
+                    participants,
+                    mode="start",
+                )
+                if text:
+                    await channel.send(text)
+                await refresh_event_card(self.bot, event)
+                await self.bot.event_service.mark_notified(event.id, "start")
+        except Exception:
+            log.exception("Event start ping failed")
+        try:
+            for event in await self.bot.event_service.due_auto_end(now):
                 await retire_event(self.bot, event, status="completed")
         except Exception:
-            log.exception("Event completion sweep failed")
+            log.exception("Event auto-end failed")
 
     @tasks.loop(minutes=1)
     async def fest_loop(self) -> None:
