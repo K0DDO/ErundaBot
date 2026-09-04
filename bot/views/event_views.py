@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 import discord
@@ -161,6 +162,9 @@ class EventJoinButton(ui.Button):
         try:
             event, _ = await self.bot.event_service.join(self.event_id, interaction.user.id)
         except ValueError as exc:
+            if "не найден" in str(exc).casefold():
+                await _delete_missing_event_message(interaction, str(exc))
+                return
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         await _refresh_event_card_interaction(self.bot, interaction, event)
@@ -180,9 +184,25 @@ class EventLeaveButton(ui.Button):
         try:
             event, _ = await self.bot.event_service.leave(self.event_id, interaction.user.id)
         except ValueError as exc:
+            if "не найден" in str(exc).casefold():
+                await _delete_missing_event_message(interaction, str(exc))
+                return
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         await _refresh_event_card_interaction(self.bot, interaction, event)
+
+
+async def _delete_missing_event_message(
+    interaction: discord.Interaction,
+    reason: str,
+) -> None:
+    await interaction.response.send_message(embed=error_embed(reason), ephemeral=True)
+    if interaction.message is None:
+        return
+    try:
+        await interaction.message.delete()
+    except discord.HTTPException:
+        pass
 
 
 class EventActionView(discord.ui.View):
@@ -356,6 +376,46 @@ async def resync_event_cards(bot: ErundaBot, events: list[Event]) -> None:
             pass
 
 
+def _component_text_blob(message: discord.Message) -> str:
+    parts: list[str] = []
+
+    def walk(items: list) -> None:
+        for item in items:
+            content = getattr(item, "content", None)
+            if isinstance(content, str) and content:
+                parts.append(content)
+            children = getattr(item, "children", None) or getattr(item, "components", None)
+            if children:
+                walk(list(children))
+
+    walk(list(message.components or []))
+    return "\n".join(parts)
+
+
+def _is_event_card_message(message: discord.Message, bot_user_id: int) -> bool:
+    if message.author.id != bot_user_id:
+        return False
+    if message.embeds:
+        title = message.embeds[0].title or ""
+        if title.startswith("🎮") or title in _OLD_PING_EMBED_TITLES:
+            return True
+    blob = _component_text_blob(message)
+    if "🎮" in blob or "Участники" in blob:
+        return True
+    if blob and "## 🎮" in blob:
+        return True
+    return False
+
+
+def _is_bare_role_ping(message: discord.Message, bot_user_id: int) -> bool:
+    if message.author.id != bot_user_id:
+        return False
+    if message.embeds or message.components:
+        return False
+    content = (message.content or "").strip()
+    return bool(re.fullmatch(r"<@&\d+>", content))
+
+
 def _is_bot_event_mention(
     message: discord.Message,
     bot_user_id: int,
@@ -383,7 +443,29 @@ def _is_bot_event_mention(
         return False
     if title is not None and title not in content:
         return False
-    return "осталось" in lowered or "начинается" in lowered
+    return "осталось" in lowered or "начинается" in lowered or "идёт" in lowered
+
+
+def _is_orphan_event_message(
+    message: discord.Message,
+    bot_user_id: int,
+    *,
+    keep_ids: set[int],
+    live_titles: set[str],
+) -> bool:
+    if message.id in keep_ids:
+        return False
+    if message.author.id != bot_user_id:
+        return False
+    if _is_event_card_message(message, bot_user_id):
+        return True
+    if _is_bare_role_ping(message, bot_user_id):
+        return True
+    if _is_bot_event_mention(message, bot_user_id, keep_ids=keep_ids):
+        if live_titles and any(title in (message.content or "") for title in live_titles):
+            return False
+        return True
+    return False
 
 
 async def cleanup_event_mentions(
@@ -422,16 +504,43 @@ async def cleanup_event_mentions(
 
 
 async def sweep_orphan_event_mentions(bot: ErundaBot) -> None:
-    """Remove leftover event pings; keep pings for live events."""
+    """Remove phantom event cards/pings and DB rows without a live card."""
     for config in await bot.db.list_guilds():
         guild = bot.get_guild(config.guild_id)
         if guild is None or guild.me is None:
             continue
+
         live = await bot.event_service.list_scheduled(config.guild_id)
-        keep = {ev.message_id for ev in live if ev.message_id}
-        live_titles = {ev.title for ev in live}
+        kept: list = []
+        for event in live:
+            if not event.message_id:
+                try:
+                    await bot.event_service.delete_and_renumber(event)
+                    log.info("Removed phantom event %s (no message)", event.id)
+                except Exception:
+                    log.exception("Failed to delete phantom event %s", event.id)
+                continue
+            channel_id = event.channel_id or config.events_channel_id
+            channel = guild.get_channel(channel_id or 0) if channel_id else None
+            if channel is None or not hasattr(channel, "fetch_message"):
+                kept.append(event)
+                continue
+            try:
+                await channel.fetch_message(event.message_id)
+                kept.append(event)
+            except discord.NotFound:
+                try:
+                    await bot.event_service.delete_and_renumber(event)
+                    log.info("Removed phantom event %s (missing card)", event.id)
+                except Exception:
+                    log.exception("Failed to delete phantom event %s", event.id)
+            except discord.HTTPException:
+                kept.append(event)
+
+        keep = {ev.message_id for ev in kept if ev.message_id}
+        live_titles = {ev.title for ev in kept}
         channel_ids = {config.events_channel_id}
-        channel_ids.update(ev.channel_id for ev in live if ev.channel_id)
+        channel_ids.update(ev.channel_id for ev in kept if ev.channel_id)
         for channel_id in channel_ids:
             if channel_id is None:
                 continue
@@ -439,27 +548,20 @@ async def sweep_orphan_event_mentions(bot: ErundaBot) -> None:
             if channel is None or not isinstance(channel, discord.TextChannel):
                 continue
             try:
-                async for message in channel.history(limit=200):
-                    if keep and message.id in keep:
-                        continue
-                    if message.author.id != guild.me.id:
-                        continue
-                    if message.embeds and (message.embeds[0].title or "") in _OLD_PING_EMBED_TITLES:
-                        try:
-                            await message.delete()
-                        except discord.HTTPException:
-                            pass
-                        continue
-                    if not _is_bot_event_mention(message, guild.me.id, keep_ids=keep):
-                        continue
-                    if any(title in (message.content or "") for title in live_titles):
+                async for message in channel.history(limit=300):
+                    if not _is_orphan_event_message(
+                        message,
+                        guild.me.id,
+                        keep_ids=keep,
+                        live_titles=live_titles,
+                    ):
                         continue
                     try:
                         await message.delete()
                     except discord.HTTPException:
                         pass
             except discord.HTTPException:
-                log.warning("Failed to sweep orphan event mentions in guild %s", guild.id)
+                log.warning("Failed to sweep orphan event messages in guild %s", guild.id)
 
 
 async def retire_event(bot: ErundaBot, event: Event, *, status: str) -> None:
@@ -534,6 +636,7 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
         channel_id = config.events_channel_id or interaction.channel_id
         channel = interaction.guild.get_channel(channel_id) if channel_id else None
         if channel is None or not hasattr(channel, "send"):
+            await self.bot.event_service.delete_and_renumber(event)
             await interaction.followup.send(
                 embed=error_embed("Канал ивентов не найден. Настрой /config."),
                 ephemeral=True,
@@ -542,6 +645,7 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
 
         denied = bot_cannot_send_reason(interaction.guild, channel)
         if denied:
+            await self.bot.event_service.delete_and_renumber(event)
             await interaction.followup.send(embed=error_embed(denied), ephemeral=True)
             return
 
@@ -560,10 +664,13 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
             bind_event_view(self.bot, event, message.id)
         except Exception:
             log.exception("Failed to publish event card %s", event.id)
+            try:
+                await self.bot.event_service.delete_and_renumber(event)
+            except Exception:
+                log.exception("Failed to roll back phantom event %s", event.id)
             await interaction.followup.send(
                 embed=error_embed(
-                    "Ивент создан в БД, но карточку отправить не удалось. "
-                    "Проверь права бота в канале ивентов."
+                    "Карточку отправить не удалось. Проверь права бота в канале ивентов."
                 ),
                 ephemeral=True,
             )
@@ -574,6 +681,7 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
             ephemeral=True,
         )
         try:
+            await sweep_orphan_event_mentions(self.bot)
             remaining = await self.bot.db.list_events(self.guild_id, status="scheduled")
             await resync_event_cards(self.bot, remaining)
         except Exception:
