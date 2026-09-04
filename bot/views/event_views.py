@@ -17,6 +17,7 @@ from bot.utils.embeds import (
     success_embed,
 )
 from bot.utils.formatting import role_mention
+from bot.utils.permissions import bot_cannot_send_reason
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -224,9 +225,8 @@ async def _refresh_event_card_interaction(
 ) -> None:
     config = await bot.config_service.get(event.guild_id)
     view = await build_event_card_view(bot, event, config.timezone)
-    content = interaction.message.content if interaction.message else None
     await interaction.response.edit_message(
-        content=content,
+        content=None,
         embeds=[],
         view=view,
         allowed_mentions=EVENT_MENTIONS,
@@ -234,8 +234,9 @@ async def _refresh_event_card_interaction(
 
 
 async def _edit_event_message(msg: discord.Message, view: ui.LayoutView) -> None:
+    # LayoutView = Components V2: Discord rejects messages that also have content/embeds.
     await msg.edit(
-        content=msg.content or None,
+        content=None,
         embeds=[],
         view=view,
         allowed_mentions=EVENT_MENTIONS,
@@ -507,6 +508,10 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
         self.ping_role_id = ping_role_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            return
+        await interaction.response.defer(ephemeral=True)
+
         try:
             event = await self.bot.event_service.create(
                 self.guild_id,
@@ -519,42 +524,60 @@ class EventCreateModal(discord.ui.Modal, title="Создать ивент"):
                 ping_role_id=self.ping_role_id,
             )
         except ValueError as exc:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=error_embed("Ошибка", str(exc)),
                 ephemeral=True,
             )
             return
 
-        if interaction.guild is None:
-            return
         config = await self.bot.config_service.get(self.guild_id)
         channel_id = config.events_channel_id or interaction.channel_id
         channel = interaction.guild.get_channel(channel_id) if channel_id else None
         if channel is None or not hasattr(channel, "send"):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=error_embed("Канал ивентов не найден. Настрой /config."),
                 ephemeral=True,
             )
             return
 
-        role = interaction.guild.get_role(self.ping_role_id)
-        content = role.mention if role is not None else None
-        view = await build_event_card_view(self.bot, event, self.tz_name)
-        message = await channel.send(
-            content=content,
-            view=view,
-            allowed_mentions=EVENT_MENTIONS,
-        )
-        await self.bot.event_service.set_message(event.id, message.id)
-        await self.bot.db.update_event(event.id, channel_id=channel.id)
-        bind_event_view(self.bot, event, message.id)
+        denied = bot_cannot_send_reason(interaction.guild, channel)
+        if denied:
+            await interaction.followup.send(embed=error_embed(denied), ephemeral=True)
+            return
 
-        await interaction.response.send_message(
+        role = interaction.guild.get_role(self.ping_role_id)
+        try:
+            view = await build_event_card_view(self.bot, event, self.tz_name)
+            # LayoutView is Components V2 — cannot combine with message content.
+            message = await channel.send(view=view, allowed_mentions=EVENT_MENTIONS)
+            if role is not None:
+                try:
+                    await channel.send(role.mention, allowed_mentions=EVENT_MENTIONS)
+                except discord.HTTPException:
+                    log.warning("Failed to ping role %s for event %s", role.id, event.id)
+            await self.bot.event_service.set_message(event.id, message.id)
+            await self.bot.db.update_event(event.id, channel_id=channel.id)
+            bind_event_view(self.bot, event, message.id)
+        except Exception:
+            log.exception("Failed to publish event card %s", event.id)
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Ивент создан в БД, но карточку отправить не удалось. "
+                    "Проверь права бота в канале ивентов."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
             embed=success_embed("Ивент создан", f"[Открыть]({message.jump_url})"),
             ephemeral=True,
         )
-        remaining = await self.bot.db.list_events(self.guild_id, status="scheduled")
-        await resync_event_cards(self.bot, remaining)
+        try:
+            remaining = await self.bot.db.list_events(self.guild_id, status="scheduled")
+            await resync_event_cards(self.bot, remaining)
+        except Exception:
+            log.exception("Failed to resync event cards after create")
 
 
 class EventCancelConfirmView(discord.ui.View):
