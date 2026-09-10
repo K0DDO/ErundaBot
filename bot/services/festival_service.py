@@ -1195,17 +1195,22 @@ class FestivalService:
         self,
         films: list[FestivalFilm],
         guild: discord.Guild | None = None,
+        *,
+        winner_user_id: int | None = None,
+        winner_emoji: str = "🎬",
     ) -> str:
         shown = films[:40]
         if not shown:
             return "_Пока никто не предложил._"
-        lines = [
-            (
+        lines: list[str] = []
+        for film in shown:
+            line = (
                 f"**{self._display_name(film.user_id, guild)}** — "
                 f"{normalize_film_title(film.title)}{format_age_tag(film_age_rating(film))}"
             )
-            for film in shown
-        ]
+            if winner_user_id is not None and film.user_id == winner_user_id:
+                line += f"\n-# {winner_emoji} победитель"
+            lines.append(line)
         extra = len(films) - len(shown)
         if extra > 0:
             lines.append(f"📌 …и ещё {extra}")
@@ -1233,7 +1238,14 @@ class FestivalService:
         if has_winner and ping_role is not None:
             sections.append(ping_role.mention)
         sections.append(self.session_text(festival, runtime, has_winner=has_winner))
-        sections.append(self.film_list_text(films, guild))
+        sections.append(
+            self.film_list_text(
+                films,
+                guild,
+                winner_user_id=festival.winner_user_id if has_winner else None,
+                winner_emoji=winner_emoji,
+            )
+        )
         if has_winner:
             winner_rating = film_age_rating(winner_film) if winner_film is not None else None
             score_line = "Оценка: пока нет"
