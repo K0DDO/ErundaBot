@@ -363,10 +363,12 @@ class TgChannel:
     url: str
     image_url: str | None = None
     description: str | None = None
+    telegram_chat_id: int | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> TgChannel:
         keys = row.keys()
+        chat_id = row["telegram_chat_id"] if "telegram_chat_id" in keys else None
         return cls(
             id=row["id"],
             guild_id=row["guild_id"],
@@ -376,6 +378,7 @@ class TgChannel:
             url=row["url"],
             image_url=row["image_url"] if "image_url" in keys else None,
             description=row["description"] if "description" in keys else None,
+            telegram_chat_id=int(chat_id) if chat_id is not None else None,
         )
 
 

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
@@ -55,6 +58,8 @@ class TgChannelMeta:
     title: str
     image_url: str | None = None
     description: str | None = None
+    telegram_chat_id: int | None = None
+    url: str | None = None
 
 
 class TgkService:
@@ -68,6 +73,10 @@ class TgkService:
 
     def __init__(self, db: Database) -> None:
         self.db = db
+
+    @staticmethod
+    def telegram_bot_token() -> str:
+        return os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 
     @staticmethod
     def normalize_url(raw: str) -> str:
@@ -112,6 +121,10 @@ class TgkService:
         if TG_INVITE_RE.match(url) or TG_JOINCHAT_RE.match(url):
             return "Telegram-канал"
         return "канал"
+
+    @staticmethod
+    def _url_from_username(username: str) -> str:
+        return f"https://t.me/{username.lstrip('@')}"
 
     @staticmethod
     def _clean_title(raw: str, fallback: str) -> str:
@@ -182,7 +195,88 @@ class TgkService:
 
         return TgChannelMeta(title=cleaned, image_url=og_image, description=description)
 
-    def fetch_channel_meta(self, url: str) -> TgChannelMeta:
+    def _telegram_api(self, method: str, **params: object) -> dict | None:
+        token = self.telegram_bot_token()
+        if not token:
+            return None
+        query = urllib.parse.urlencode({key: str(value) for key, value in params.items()})
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/{method}?{query}",
+            headers={"User-Agent": "ErundaBot/1.0"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, UnicodeDecodeError):
+            log.warning("Telegram API %s failed", method)
+            return None
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            description = ""
+            if isinstance(payload, dict):
+                description = str(payload.get("description") or "")
+            log.warning("Telegram API %s error: %s", method, description or payload)
+            return None
+        result = payload.get("result")
+        return result if isinstance(result, dict) else None
+
+    def _chat_photo_url(self, chat: dict) -> str | None:
+        token = self.telegram_bot_token()
+        photo = chat.get("photo")
+        if not token or not isinstance(photo, dict):
+            return None
+        file_id = photo.get("big_file_id") or photo.get("small_file_id")
+        if not file_id:
+            return None
+        file_info = self._telegram_api("getFile", file_id=file_id)
+        if not file_info:
+            return None
+        path = file_info.get("file_path")
+        if not isinstance(path, str) or not path:
+            return None
+        return f"https://api.telegram.org/file/bot{token}/{path}"
+
+    def _meta_from_chat(self, chat: dict, fallback_url: str) -> TgChannelMeta:
+        chat_id = chat.get("id")
+        telegram_chat_id = int(chat_id) if isinstance(chat_id, int) else None
+        username = chat.get("username")
+        if isinstance(username, str) and username.strip():
+            url = self._url_from_username(username.strip())
+            fallback = f"@{username.strip()}"
+        else:
+            url = fallback_url
+            fallback = self._page_label(fallback_url)
+        title_raw = chat.get("title") or chat.get("first_name") or fallback
+        title = self._clean_title(str(title_raw), fallback)
+        description_raw = chat.get("description")
+        description = (
+            self._clean_description(str(description_raw))
+            if isinstance(description_raw, str) and description_raw.strip()
+            else None
+        )
+        image_url = None
+        if isinstance(username, str) and username.strip():
+            try:
+                image_url = self.fetch_page_meta(url).image_url
+            except ValueError:
+                image_url = None
+        if image_url is None:
+            image_url = self._chat_photo_url(chat)
+        return TgChannelMeta(
+            title=title,
+            image_url=image_url,
+            description=description or None,
+            telegram_chat_id=telegram_chat_id,
+            url=url,
+        )
+
+    def resolve_chat_by_username(self, username: str) -> dict | None:
+        return self._telegram_api("getChat", chat_id=f"@{username.lstrip('@')}")
+
+    def resolve_chat_by_id(self, telegram_chat_id: int) -> dict | None:
+        return self._telegram_api("getChat", chat_id=telegram_chat_id)
+
+    def fetch_page_meta(self, url: str) -> TgChannelMeta:
         normalized = self.normalize_url(url)
         fallback = self._page_label(normalized)
         request = urllib.request.Request(
@@ -198,18 +292,61 @@ class TgkService:
         meta = self._parse_page_meta(page, fallback)
         if meta.title == fallback and meta.image_url is None:
             raise ValueError("Канал не найден или ссылка ведёт не на Telegram-канал")
+        meta.url = normalized
         return meta
+
+    def fetch_channel_meta(self, url: str) -> TgChannelMeta:
+        normalized = self.normalize_url(url)
+        username = self._public_username(normalized)
+        if username is not None:
+            chat = self.resolve_chat_by_username(username)
+            if chat is not None:
+                return self._meta_from_chat(chat, normalized)
+            if not self.telegram_bot_token():
+                log.warning("TELEGRAM_BOT_TOKEN not set — TGK stored without chat id")
+            else:
+                raise ValueError(
+                    "Не удалось получить id канала через Telegram Bot API. "
+                    "Проверь TELEGRAM_BOT_TOKEN и что канал публичный."
+                )
+        return self.fetch_page_meta(normalized)
+
+    def refresh_channel_meta(self, channel: TgChannel) -> TgChannelMeta:
+        if channel.telegram_chat_id is not None:
+            chat = self.resolve_chat_by_id(channel.telegram_chat_id)
+            if chat is not None:
+                return self._meta_from_chat(chat, channel.url)
+            log.warning(
+                "Telegram getChat(%s) failed for channel %s — falling back to url",
+                channel.telegram_chat_id,
+                channel.id,
+            )
+        username = self._public_username(channel.url)
+        if username is not None and self.telegram_bot_token():
+            chat = self.resolve_chat_by_username(username)
+            if chat is not None:
+                return self._meta_from_chat(chat, channel.url)
+        return self.fetch_page_meta(channel.url)
 
     async def add(self, guild_id: int, user_id: int, raw_url: str) -> TgChannel:
         url = self.normalize_url(raw_url)
         meta = await asyncio.to_thread(self.fetch_channel_meta, url)
+        final_url = meta.url or url
+        if meta.telegram_chat_id is not None:
+            existing = await self.db.get_tg_channel_by_telegram_id(
+                guild_id,
+                meta.telegram_chat_id,
+            )
+            if existing is not None:
+                raise ValueError(f"Этот канал уже в списке как #{existing.number}")
         return await self.db.add_tg_channel(
             guild_id,
             user_id,
             meta.title,
-            url,
+            final_url,
             meta.image_url,
             meta.description,
+            telegram_chat_id=meta.telegram_chat_id,
         )
 
     async def remove(self, guild_id: int, number: int, user_id: int, *, is_admin: bool) -> TgChannel:
@@ -361,7 +498,7 @@ class TgkService:
         updated = 0
         for channel in channels:
             try:
-                meta = await asyncio.to_thread(self.fetch_channel_meta, channel.url)
+                meta = await asyncio.to_thread(self.refresh_channel_meta, channel)
             except ValueError:
                 log.warning(
                     "TGK meta refresh failed for channel %s in guild %s",
@@ -369,10 +506,14 @@ class TgkService:
                     guild_id,
                 )
                 continue
+            new_url = meta.url or channel.url
+            new_chat_id = meta.telegram_chat_id
             if (
                 meta.title == channel.title
                 and meta.image_url == channel.image_url
                 and meta.description == channel.description
+                and new_url == channel.url
+                and new_chat_id == channel.telegram_chat_id
             ):
                 continue
             await self.db.update_tg_channel_meta(
@@ -381,6 +522,8 @@ class TgkService:
                 meta.title,
                 meta.image_url,
                 meta.description,
+                url=new_url,
+                telegram_chat_id=new_chat_id,
             )
             updated += 1
             await asyncio.sleep(0.35)

@@ -291,6 +291,8 @@ CREATE TABLE IF NOT EXISTS tg_channels (
     title TEXT NOT NULL,
     url TEXT NOT NULL,
     image_url TEXT,
+    description TEXT,
+    telegram_chat_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (guild_id, number),
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
@@ -697,6 +699,14 @@ class Database:
             except Exception:
                 pass
             await self._db.execute("PRAGMA user_version = 22")
+        if version < 23:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE tg_channels ADD COLUMN telegram_chat_id INTEGER"
+                )
+            except Exception:
+                pass
+            await self._db.execute("PRAGMA user_version = 23")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2165,15 +2175,27 @@ class Database:
         url: str,
         image_url: str | None,
         description: str | None = None,
+        telegram_chat_id: int | None = None,
     ) -> TgChannel:
         await self.ensure_guild(guild_id)
         number = await self.next_tg_channel_number(guild_id)
         cursor = await self.connection.execute(
             """
-            INSERT INTO tg_channels (guild_id, user_id, number, title, url, image_url, description)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tg_channels (
+                guild_id, user_id, number, title, url, image_url, description, telegram_chat_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, user_id, number, title, url, image_url, description),
+            (
+                guild_id,
+                user_id,
+                number,
+                title,
+                url,
+                image_url,
+                description,
+                telegram_chat_id,
+            ),
         )
         await self.connection.commit()
         channel = await self.get_tg_channel(cursor.lastrowid)
@@ -2184,6 +2206,22 @@ class Database:
         cursor = await self.connection.execute(
             "SELECT * FROM tg_channels WHERE id = ?",
             (channel_id,),
+        )
+        row = await cursor.fetchone()
+        return TgChannel.from_row(row) if row else None
+
+    async def get_tg_channel_by_telegram_id(
+        self,
+        guild_id: int,
+        telegram_chat_id: int,
+    ) -> TgChannel | None:
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM tg_channels
+            WHERE guild_id = ? AND telegram_chat_id = ?
+            LIMIT 1
+            """,
+            (guild_id, telegram_chat_id),
         )
         row = await cursor.fetchone()
         return TgChannel.from_row(row) if row else None
@@ -2219,14 +2257,28 @@ class Database:
         title: str,
         image_url: str | None,
         description: str | None = None,
+        *,
+        url: str | None = None,
+        telegram_chat_id: int | None = None,
     ) -> None:
+        fields = {
+            "title": title,
+            "image_url": image_url,
+            "description": description,
+        }
+        if url is not None:
+            fields["url"] = url
+        if telegram_chat_id is not None:
+            fields["telegram_chat_id"] = telegram_chat_id
+        assignments = ", ".join(f"{key} = ?" for key in fields)
+        values = list(fields.values()) + [channel_id, guild_id]
         await self.connection.execute(
-            """
+            f"""
             UPDATE tg_channels
-            SET title = ?, image_url = ?, description = ?
+            SET {assignments}
             WHERE id = ? AND guild_id = ?
             """,
-            (title, image_url, description, channel_id, guild_id),
+            values,
         )
         await self.connection.commit()
 
