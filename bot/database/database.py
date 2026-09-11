@@ -22,6 +22,7 @@ from .models import (
     Event,
     Festival,
     FestivalFilm,
+    FestivalRatingLog,
     GuildConfig,
     Proposal,
     Quote,
@@ -273,6 +274,18 @@ CREATE TABLE IF NOT EXISTS festival_ratings (
     PRIMARY KEY (festival_id, user_id),
     FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS festival_rating_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    festival_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 10),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_festival_rating_logs_fest
+ON festival_rating_logs(festival_id, created_at, id);
 
 CREATE TABLE IF NOT EXISTS festival_blocked_films (
     guild_id INTEGER NOT NULL,
@@ -707,6 +720,37 @@ class Database:
             except Exception:
                 pass
             await self._db.execute("PRAGMA user_version = 23")
+        if version < 24:
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS festival_rating_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    festival_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 10),
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_festival_rating_logs_fest
+                ON festival_rating_logs(festival_id, created_at, id)
+                """
+            )
+            await self._db.execute(
+                """
+                INSERT INTO festival_rating_logs (festival_id, user_id, score, created_at)
+                SELECT r.festival_id, r.user_id, r.score, r.created_at
+                FROM festival_ratings r
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM festival_rating_logs l
+                    WHERE l.festival_id = r.festival_id AND l.user_id = r.user_id
+                )
+                """
+            )
+            await self._db.execute("PRAGMA user_version = 24")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2106,6 +2150,15 @@ class Database:
         user_id: int,
         score: int,
     ) -> None:
+        cursor = await self.connection.execute(
+            """
+            SELECT score FROM festival_ratings
+            WHERE festival_id = ? AND user_id = ?
+            """,
+            (festival_id, user_id),
+        )
+        previous = await cursor.fetchone()
+        previous_score = int(previous["score"]) if previous is not None else None
         await self.connection.execute(
             """
             INSERT INTO festival_ratings (festival_id, user_id, score)
@@ -2114,7 +2167,27 @@ class Database:
             """,
             (festival_id, user_id, score),
         )
+        if previous_score != score:
+            await self.connection.execute(
+                """
+                INSERT INTO festival_rating_logs (festival_id, user_id, score)
+                VALUES (?, ?, ?)
+                """,
+                (festival_id, user_id, score),
+            )
         await self.connection.commit()
+
+    async def list_festival_rating_logs(self, festival_id: int) -> list[FestivalRatingLog]:
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM festival_rating_logs
+            WHERE festival_id = ?
+            ORDER BY created_at, id
+            """,
+            (festival_id,),
+        )
+        rows = await cursor.fetchall()
+        return [FestivalRatingLog.from_row(r) for r in rows]
 
     async def festival_rating_stats(self, festival_id: int) -> tuple[float | None, int]:
         cursor = await self.connection.execute(

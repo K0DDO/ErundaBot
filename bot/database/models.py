@@ -354,6 +354,25 @@ class FestivalFilm:
 
 
 @dataclass(slots=True)
+class FestivalRatingLog:
+    id: int
+    festival_id: int
+    user_id: int
+    score: int
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: Any) -> FestivalRatingLog:
+        return cls(
+            id=row["id"],
+            festival_id=row["festival_id"],
+            user_id=row["user_id"],
+            score=row["score"],
+            created_at=row["created_at"],
+        )
+
+
+@dataclass(slots=True)
 class TgChannel:
     id: int
     guild_id: int

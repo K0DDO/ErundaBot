@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from bot.database.database import Database
-from bot.database.models import Festival, FestivalFilm, GuildConfig
+from bot.database.models import Festival, FestivalFilm, FestivalRatingLog, GuildConfig
 from bot.utils.birthday_emojis import escape_markdown_inline, guild_emoji_pool
 from bot.utils.formatting import format_duration
 from bot.utils.permissions import fetch_bot_member, is_guild_admin
@@ -1096,6 +1096,47 @@ class FestivalService:
         await self.db.upsert_festival_rating(festival_id, user_id, score)
         average, count = await self.db.festival_rating_stats(festival_id)
         return festival, average, count
+
+    def format_rating_logs(
+        self,
+        festival: Festival,
+        logs: list[FestivalRatingLog],
+        guild: discord.Guild,
+    ) -> str:
+        film = normalize_film_title(festival.winner_film) if festival.winner_film else "без фильма"
+        header = f"**#{festival.number}** · {escape_markdown_inline(film)}"
+        if not logs:
+            return f"{header}\n\nПока нет оценок."
+
+        by_user: dict[int, list[FestivalRatingLog]] = {}
+        for entry in logs:
+            by_user.setdefault(entry.user_id, []).append(entry)
+
+        blocks: list[str] = [header, ""]
+        for user_id, entries in by_user.items():
+            member = guild.get_member(user_id)
+            name = escape_markdown_inline(member.display_name) if member else f"`{user_id}`"
+            lines = [f"**{name}**"]
+            previous: int | None = None
+            for entry in entries:
+                stamp = self._rating_log_stamp(entry.created_at)
+                if previous is None:
+                    lines.append(f"· **{entry.score}** · {stamp}")
+                else:
+                    lines.append(f"· **{previous}** → **{entry.score}** · {stamp}")
+                previous = entry.score
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _rating_log_stamp(raw: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace(" ", "T").replace("Z", "+00:00"))
+        except ValueError:
+            return raw
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return f"<t:{int(parsed.timestamp())}:f>"
 
     async def block_film(self, guild_id: int, title: str) -> tuple[str, Festival | None]:
         cleaned = normalize_film_title(title)
