@@ -71,8 +71,16 @@ async def festival_card(
             for film in films
         ]
     rating_average, rating_count = (None, 0)
+    rating_all_average, rating_all_count = (None, 0)
+    rating_dual = False
     if has_winner:
-        rating_average, rating_count = await bot.db.festival_rating_stats(festival.id)
+        (
+            rating_average,
+            rating_count,
+            rating_all_average,
+            rating_all_count,
+            rating_dual,
+        ) = await bot.festival_service.rating_display(festival)
     runtime = winner_film.runtime_minutes if winner_film is not None else None
     show_ratings = bool(
         has_winner
@@ -87,6 +95,9 @@ async def festival_card(
         ping_role=ping_role,
         rating_average=rating_average,
         rating_count=rating_count,
+        rating_all_average=rating_all_average,
+        rating_all_count=rating_all_count,
+        rating_dual=rating_dual,
     )
     return FestivalCardView(
         bot,
@@ -384,7 +395,7 @@ class FestivalRateButton(ui.Button):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         try:
-            festival, average, count = await self.bot.festival_service.set_film_score(
+            festival, display = await self.bot.festival_service.set_film_score(
                 self.festival_id,
                 interaction.user.id,
                 self.score,
@@ -393,7 +404,17 @@ class FestivalRateButton(ui.Button):
             await interaction.response.send_message(embed=error_embed(str(extra)), ephemeral=True)
             return
         await refresh_festival_message(self.bot, festival)
-        extra = f"Средняя: **{average:.1f}** · {count}" if average is not None else ""
+        viewer_avg, viewer_count, all_avg, all_count, dual = display
+        extra = ""
+        if all_count:
+            extra = self.bot.festival_service.format_rating_score_line(
+                viewer_avg,
+                viewer_count,
+                all_avg,
+                all_count,
+                dual=dual,
+                label="Средняя",
+            )
         await interaction.response.send_message(
             embed=success_embed(f"Оценка {self.score} сохранена", extra),
             ephemeral=True,

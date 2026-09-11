@@ -16,6 +16,10 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import Festival, FestivalFilm, FestivalRatingLog, FestivalVoiceStats, GuildConfig
+from bot.services.festival_presence_service import (
+    FEST_PRESENCE_FROM_NUMBER,
+    FEST_PRESENCE_MIN_SECONDS,
+)
 from bot.utils.birthday_emojis import escape_markdown_inline, guild_emoji_pool
 from bot.utils.formatting import format_duration
 from bot.utils.permissions import fetch_bot_member, is_guild_admin
@@ -1082,7 +1086,7 @@ class FestivalService:
         festival_id: int,
         user_id: int,
         score: int,
-    ) -> tuple[Festival, float | None, int]:
+    ) -> tuple[Festival, tuple[float | None, int, float | None, int, bool]]:
         if score < 1 or score > 10:
             raise ValueError("Оценка от 1 до 10")
         festival = await self.db.get_festival(festival_id)
@@ -1103,8 +1107,66 @@ class FestivalService:
                 presence_check_enabled=config.fest_presence_check,
             )
         await self.db.upsert_festival_rating(festival_id, user_id, score)
-        average, count = await self.db.festival_rating_stats(festival_id)
-        return festival, average, count
+        display = await self.rating_display(festival)
+        return festival, display
+
+    async def rating_display(
+        self,
+        festival: Festival,
+    ) -> tuple[float | None, int, float | None, int, bool]:
+        """Return viewer avg/count, all avg/count, and whether dual (#33+) format applies."""
+        ratings = await self.db.list_festival_ratings(festival.id)
+        if not ratings:
+            return None, 0, None, 0, False
+        all_scores = [score for _user_id, score in ratings]
+        all_average = sum(all_scores) / len(all_scores)
+        all_count = len(all_scores)
+        dual = festival.number >= FEST_PRESENCE_FROM_NUMBER
+        if not dual:
+            return all_average, all_count, all_average, all_count, False
+        now_iso = datetime.now(timezone.utc).isoformat()
+        voice_stats = await self.db.festival_voice_stats(festival.id, now_iso)
+        watched = {
+            item.user_id
+            for item in voice_stats
+            if item.total_seconds >= FEST_PRESENCE_MIN_SECONDS
+        }
+        viewer_scores = [score for user_id, score in ratings if user_id in watched]
+        if not viewer_scores:
+            return None, 0, all_average, all_count, True
+        viewer_average = sum(viewer_scores) / len(viewer_scores)
+        return viewer_average, len(viewer_scores), all_average, all_count, True
+
+    @staticmethod
+    def format_rating_score_line(
+        viewer_average: float | None,
+        viewer_count: int,
+        all_average: float | None,
+        all_count: int,
+        *,
+        dual: bool,
+        label: str = "Оценка",
+    ) -> str:
+        if not all_count or all_average is None:
+            return f"{label}: пока нет"
+        if (
+            not dual
+            or (
+                viewer_count == all_count
+                and viewer_average is not None
+                and abs(viewer_average - all_average) < 0.05
+            )
+        ):
+            return f"{label}: **{all_average:.1f}** · {all_count}"
+        viewer_avg = (
+            f"**{viewer_average:.1f}**"
+            if viewer_count and viewer_average is not None
+            else "—"
+        )
+        return (
+            f"{label}: {viewer_avg} (**{all_average:.1f}**) · "
+            f"{viewer_count} (**{all_count}**)"
+        )
 
     def format_fest_stats(
         self,
@@ -1324,6 +1386,9 @@ class FestivalService:
         ping_role: discord.Role | None = None,
         rating_average: float | None = None,
         rating_count: int = 0,
+        rating_all_average: float | None = None,
+        rating_all_count: int = 0,
+        rating_dual: bool = False,
     ) -> list[str]:
         has_winner = bool(festival.winner_user_id and festival.winner_film)
         winner_film = next(
@@ -1339,9 +1404,13 @@ class FestivalService:
         if has_winner:
             winner_rating = film_age_rating(winner_film) if winner_film is not None else None
             winner_name = self._display_name(festival.winner_user_id or 0, guild)
-            score_line = "Оценка: пока нет"
-            if rating_count:
-                score_line = f"Оценка: **{rating_average:.1f}** · {rating_count}"
+            score_line = self.format_rating_score_line(
+                rating_average,
+                rating_count,
+                rating_all_average if rating_dual else rating_average,
+                rating_all_count if rating_dual else rating_count,
+                dual=rating_dual,
+            )
             sections.append(
                 f"### {winner_emoji} {normalize_film_title(festival.winner_film or '')}"
                 f"{format_age_tag(winner_rating)}\n"
