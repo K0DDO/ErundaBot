@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import discord
@@ -30,20 +31,45 @@ class FestivalCog(commands.Cog):
     def __init__(self, bot: ErundaBot) -> None:
         self.bot = bot
         self._views_restored = False
+        self._presence_ready = False
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        if self._views_restored:
+        if not self._views_restored:
+            self._views_restored = True
+            try:
+                festivals = await self.bot.db.list_posted_festivals()
+                register_festival_views(self.bot, festivals)
+                for festival in festivals:
+                    await refresh_festival_message(self.bot, festival)
+                log.info("Restored %s festival cards", len(festivals))
+            except Exception:
+                log.exception("Failed to restore festival views")
+        if not self._presence_ready:
+            self._presence_ready = True
+            try:
+                await self.bot.festival_presence_service.recover(self.bot)
+                log.info("Festival presence recovered")
+            except Exception:
+                log.exception("Festival presence recovery failed")
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        if member.guild is None:
             return
-        self._views_restored = True
+        if before.channel is None and after.channel is None:
+            return
+        if before.channel == after.channel and before.self_stream == after.self_stream:
+            return
         try:
-            festivals = await self.bot.db.list_posted_festivals()
-            register_festival_views(self.bot, festivals)
-            for festival in festivals:
-                await refresh_festival_message(self.bot, festival)
-            log.info("Restored %s festival cards", len(festivals))
+            await self.bot.festival_presence_service.sync_guild(member.guild)
         except Exception:
-            log.exception("Failed to restore festival views")
+            log.exception("Festival presence sync failed for guild %s", member.guild.id)
 
     fest = app_commands.Group(name="fest", description="Кинофестиваль")
 
@@ -251,10 +277,10 @@ class FestivalCog(commands.Cog):
         await channel.send(text)
         await interaction.response.send_message(embed=success_embed("Напоминание отправлено"), ephemeral=True)
 
-    @fest.command(name="ratings", description="Лог оценок фильма")
+    @fest.command(name="stats", description="Оценки и присутствие на сеансе")
     @app_commands.describe(number="Номер кинофестиваля")
     @app_commands.guild_only()
-    async def fest_ratings(self, interaction: discord.Interaction, number: int) -> None:
+    async def fest_stats(self, interaction: discord.Interaction, number: int) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
         config = await self.bot.config_service.get(interaction.guild.id)
@@ -267,8 +293,22 @@ class FestivalCog(commands.Cog):
         except ValueError as exc:
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
+        if interaction.guild is not None:
+            try:
+                await self.bot.festival_presence_service.sync_guild(interaction.guild)
+            except Exception:
+                log.exception("Festival presence sync before stats failed")
         logs = await self.bot.db.list_festival_rating_logs(festival.id)
-        text = self.bot.festival_service.format_rating_logs(festival, logs, interaction.guild)
+        ratings = await self.bot.db.list_festival_ratings(festival.id)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        voice_stats = await self.bot.db.festival_voice_stats(festival.id, now_iso)
+        text = self.bot.festival_service.format_fest_stats(
+            festival,
+            logs,
+            ratings,
+            voice_stats,
+            interaction.guild,
+        )
         chunks = self._split_message(text, 3900)
         await interaction.response.send_message(
             embed=discord.Embed(description=chunks[0], color=0x7C9CFF),
@@ -280,8 +320,8 @@ class FestivalCog(commands.Cog):
                 ephemeral=True,
             )
 
-    @fest_ratings.autocomplete("number")
-    async def fest_ratings_autocomplete(
+    @fest_stats.autocomplete("number")
+    async def fest_stats_autocomplete(
         self,
         interaction: discord.Interaction,
         current: str,

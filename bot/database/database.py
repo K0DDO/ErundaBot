@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from .models import (
     Festival,
     FestivalFilm,
     FestivalRatingLog,
+    FestivalVoiceStats,
     GuildConfig,
     Proposal,
     Quote,
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS guilds (
     fest_ping_role_id INTEGER,
     config_role_id INTEGER,
     fest_reminder_minutes INTEGER NOT NULL DEFAULT 60,
+    fest_presence_check INTEGER NOT NULL DEFAULT 1,
     tgk_board_message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -286,6 +288,19 @@ CREATE TABLE IF NOT EXISTS festival_rating_logs (
 
 CREATE INDEX IF NOT EXISTS idx_festival_rating_logs_fest
 ON festival_rating_logs(festival_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS festival_voice_segments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    festival_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_festival_voice_open
+ON festival_voice_segments(festival_id, user_id, ended_at);
 
 CREATE TABLE IF NOT EXISTS festival_blocked_films (
     guild_id INTEGER NOT NULL,
@@ -751,6 +766,34 @@ class Database:
                 """
             )
             await self._db.execute("PRAGMA user_version = 24")
+        if version < 25:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE guilds ADD COLUMN fest_presence_check "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
+            except Exception:
+                pass
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS festival_voice_segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    festival_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_festival_voice_open
+                ON festival_voice_segments(festival_id, user_id, ended_at)
+                """
+            )
+            await self._db.execute("PRAGMA user_version = 25")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2188,6 +2231,156 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [FestivalRatingLog.from_row(r) for r in rows]
+
+    async def list_festival_ratings(self, festival_id: int) -> list[tuple[int, int]]:
+        cursor = await self.connection.execute(
+            """
+            SELECT user_id, score FROM festival_ratings
+            WHERE festival_id = ?
+            ORDER BY created_at, user_id
+            """,
+            (festival_id,),
+        )
+        rows = await cursor.fetchall()
+        return [(int(row["user_id"]), int(row["score"])) for row in rows]
+
+    async def open_festival_voice_segment(
+        self,
+        festival_id: int,
+        user_id: int,
+        channel_id: int,
+        started_at: str,
+    ) -> None:
+        existing = await self.get_open_festival_voice_segment(festival_id, user_id)
+        if existing is not None:
+            return
+        await self.connection.execute(
+            """
+            INSERT INTO festival_voice_segments
+                (festival_id, user_id, channel_id, started_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (festival_id, user_id, channel_id, started_at),
+        )
+        await self.connection.commit()
+
+    async def get_open_festival_voice_segment(
+        self,
+        festival_id: int,
+        user_id: int,
+    ):
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM festival_voice_segments
+            WHERE festival_id = ? AND user_id = ? AND ended_at IS NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (festival_id, user_id),
+        )
+        return await cursor.fetchone()
+
+    async def list_open_festival_voice_segments(self, festival_id: int) -> list:
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM festival_voice_segments
+            WHERE festival_id = ? AND ended_at IS NULL
+            """,
+            (festival_id,),
+        )
+        return list(await cursor.fetchall())
+
+    async def close_festival_voice_segment(self, segment_id: int, ended_at: str) -> None:
+        await self.connection.execute(
+            """
+            UPDATE festival_voice_segments
+            SET ended_at = ?
+            WHERE id = ? AND ended_at IS NULL
+            """,
+            (ended_at, segment_id),
+        )
+        await self.connection.commit()
+
+    async def close_festival_voice_segments(self, festival_id: int, ended_at: str) -> None:
+        await self.connection.execute(
+            """
+            UPDATE festival_voice_segments
+            SET ended_at = ?
+            WHERE festival_id = ? AND ended_at IS NULL
+            """,
+            (ended_at, festival_id),
+        )
+        await self.connection.commit()
+
+    async def close_all_open_festival_voice_segments(self, ended_at: str) -> None:
+        await self.connection.execute(
+            """
+            UPDATE festival_voice_segments
+            SET ended_at = ?
+            WHERE ended_at IS NULL
+            """,
+            (ended_at,),
+        )
+        await self.connection.commit()
+
+    async def festival_voice_user_seconds(
+        self,
+        festival_id: int,
+        user_id: int,
+        now_iso: str,
+    ) -> int:
+        cursor = await self.connection.execute(
+            """
+            SELECT started_at, ended_at FROM festival_voice_segments
+            WHERE festival_id = ? AND user_id = ?
+            """,
+            (festival_id, user_id),
+        )
+        total = 0
+        for row in await cursor.fetchall():
+            total += self._segment_seconds(row["started_at"], row["ended_at"], now_iso)
+        return total
+
+    async def festival_voice_stats(
+        self,
+        festival_id: int,
+        now_iso: str,
+    ) -> list[FestivalVoiceStats]:
+        cursor = await self.connection.execute(
+            """
+            SELECT user_id, started_at, ended_at FROM festival_voice_segments
+            WHERE festival_id = ?
+            ORDER BY user_id, started_at, id
+            """,
+            (festival_id,),
+        )
+        by_user: dict[int, list[int]] = {}
+        for row in await cursor.fetchall():
+            user_id = int(row["user_id"])
+            seconds = self._segment_seconds(row["started_at"], row["ended_at"], now_iso)
+            by_user.setdefault(user_id, []).append(seconds)
+        return [
+            FestivalVoiceStats(
+                user_id=user_id,
+                total_seconds=sum(parts),
+                max_continuous_seconds=max(parts) if parts else 0,
+            )
+            for user_id, parts in by_user.items()
+            if sum(parts) > 0
+        ]
+
+    @staticmethod
+    def _segment_seconds(started_at: str, ended_at: str | None, now_iso: str) -> int:
+        try:
+            start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+            end_raw = ended_at if ended_at is not None else now_iso
+            end = datetime.fromisoformat(str(end_raw).replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        return max(0, int((end - start).total_seconds()))
 
     async def festival_rating_stats(self, festival_id: int) -> tuple[float | None, int]:
         cursor = await self.connection.execute(

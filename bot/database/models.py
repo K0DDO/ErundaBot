@@ -34,6 +34,7 @@ class GuildConfig:
     fest_ping_role_id: int | None = None
     config_role_id: int | None = None
     fest_reminder_minutes: int = 60
+    fest_presence_check: bool = True
     tgk_board_message_id: int | None = None
     tgk_board_message_ids: list[int] | None = None
     tgk_list_role_id: int | None = None
@@ -94,6 +95,9 @@ class GuildConfig:
             fest_reminder_minutes=int(row["fest_reminder_minutes"])
             if "fest_reminder_minutes" in row.keys() and row["fest_reminder_minutes"] is not None
             else 60,
+            fest_presence_check=bool(row["fest_presence_check"])
+            if "fest_presence_check" in row.keys()
+            else True,
             tgk_board_message_id=row["tgk_board_message_id"]
             if "tgk_board_message_id" in row.keys()
             else None,
@@ -373,6 +377,13 @@ class FestivalRatingLog:
 
 
 @dataclass(slots=True)
+class FestivalVoiceStats:
+    user_id: int
+    total_seconds: int
+    max_continuous_seconds: int
+
+
+@dataclass(slots=True)
 class TgChannel:
     id: int
     guild_id: int
@@ -427,6 +438,7 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "fest_ping_role_id",
         "config_role_id",
         "fest_reminder_minutes",
+        "fest_presence_check",
         "tgk_board_message_id",
         "tgk_board_message_ids",
         "tgk_list_role_id",

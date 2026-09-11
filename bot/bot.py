@@ -17,6 +17,7 @@ from bot.services.config_service import ConfigService
 from bot.services.democracy_service import DemocracyService
 from bot.services.event_service import EventService
 from bot.services.festival_service import FestivalService
+from bot.services.festival_presence_service import FestivalPresenceService
 from bot.services.quote_service import QuoteService
 from bot.services.role_service import RoleService
 from bot.services.statistics_service import StatisticsService
@@ -64,6 +65,11 @@ class ErundaBot(commands.Bot):
         self.statistics_service = StatisticsService(self.db)
         self.event_service = EventService(self.db)
         self.festival_service = FestivalService(self.db, self.ai_service)
+        self.festival_presence_service = FestivalPresenceService(
+            self.db,
+            self.festival_service,
+        )
+        self.festival_service.presence = self.festival_presence_service
         self.tgk_service = TgkService(self.db)
         self.quote_service = QuoteService(self.db)
         self.role_service = RoleService(self.db)

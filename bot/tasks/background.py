@@ -219,6 +219,11 @@ class BackgroundTasks:
         except Exception:
             log.exception("Festival session refresh failed")
         try:
+            for guild in self.bot.guilds:
+                await self.bot.festival_presence_service.sync_guild(guild)
+        except Exception:
+            log.exception("Festival presence sync in fest loop failed")
+        try:
             guilds = await self.bot.db.list_guilds()
         except Exception:
             log.exception("Failed to load guilds for fest loop")

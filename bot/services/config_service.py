@@ -37,6 +37,7 @@ class ConfigService:
             "statistics_enabled",
             "personal_roles_enabled",
             "auto_execute_proposals",
+            "fest_presence_check",
         }
         if field not in allowed:
             raise ValueError(f"Invalid flag field: {field}")

@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from bot.database.database import Database
-from bot.database.models import Festival, FestivalFilm, FestivalRatingLog, GuildConfig
+from bot.database.models import Festival, FestivalFilm, FestivalRatingLog, FestivalVoiceStats, GuildConfig
 from bot.utils.birthday_emojis import escape_markdown_inline, guild_emoji_pool
 from bot.utils.formatting import format_duration
 from bot.utils.permissions import fetch_bot_member, is_guild_admin
@@ -788,6 +788,7 @@ class FestivalService:
     def __init__(self, db: Database, ai_service=None) -> None:
         self.db = db
         self.ai = ai_service
+        self.presence = None
 
     async def lookup_terms(self, title: str) -> list[str]:
         cleaned = normalize_film_title(title)
@@ -1093,40 +1094,100 @@ class FestivalService:
         runtime = winner.runtime_minutes if winner is not None else None
         if self.session_phase(festival, runtime) == "upcoming":
             raise ValueError("Сеанс ещё не начался")
+        if self.presence is not None:
+            config = await self.db.ensure_guild(festival.guild_id)
+            await self.presence.ensure_can_rate(
+                festival,
+                user_id,
+                runtime,
+                presence_check_enabled=config.fest_presence_check,
+            )
         await self.db.upsert_festival_rating(festival_id, user_id, score)
         average, count = await self.db.festival_rating_stats(festival_id)
         return festival, average, count
 
-    def format_rating_logs(
+    def format_fest_stats(
         self,
         festival: Festival,
         logs: list[FestivalRatingLog],
+        ratings: list[tuple[int, int]],
+        voice_stats: list[FestivalVoiceStats],
         guild: discord.Guild,
     ) -> str:
         film = normalize_film_title(festival.winner_film) if festival.winner_film else "без фильма"
         header = f"**#{festival.number}** · {escape_markdown_inline(film)}"
-        if not logs:
-            return f"{header}\n\nПока нет оценок."
+        voice_by_user = {item.user_id: item for item in voice_stats}
+        score_by_user = {user_id: score for user_id, score in ratings}
 
-        by_user: dict[int, list[FestivalRatingLog]] = {}
+        by_user_logs: dict[int, list[FestivalRatingLog]] = {}
         for entry in logs:
-            by_user.setdefault(entry.user_id, []).append(entry)
+            by_user_logs.setdefault(entry.user_id, []).append(entry)
 
-        blocks: list[str] = [header, ""]
-        for user_id, entries in by_user.items():
-            member = guild.get_member(user_id)
-            name = escape_markdown_inline(member.display_name) if member else f"`{user_id}`"
-            lines = [f"**{name}**"]
+        blocks: list[str] = [header]
+        rated_ids = [user_id for user_id, _score in ratings]
+        for user_id in rated_ids:
+            blocks.append(
+                self._format_stats_user_block(
+                    guild,
+                    user_id,
+                    score=score_by_user.get(user_id),
+                    logs=by_user_logs.get(user_id, []),
+                    voice=voice_by_user.get(user_id),
+                )
+            )
+
+        present_only = [
+            item
+            for item in sorted(voice_stats, key=lambda row: (-row.total_seconds, row.user_id))
+            if item.user_id not in score_by_user
+        ]
+        if present_only:
+            blocks.append("**Были в войсе без оценки**")
+            for item in present_only:
+                blocks.append(
+                    self._format_stats_user_block(
+                        guild,
+                        item.user_id,
+                        score=None,
+                        logs=[],
+                        voice=item,
+                    )
+                )
+
+        if len(blocks) == 1:
+            return f"{header}\n\nПока нет оценок и присутствия."
+        return "\n\n".join(blocks)
+
+    def _format_stats_user_block(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        *,
+        score: int | None,
+        logs: list[FestivalRatingLog],
+        voice: FestivalVoiceStats | None,
+    ) -> str:
+        member = guild.get_member(user_id)
+        name = escape_markdown_inline(member.display_name) if member else f"`{user_id}`"
+        lines = [f"**{name}**"]
+        if score is not None:
+            lines.append(f"оценка **{score}**")
+        if voice is not None and voice.total_seconds > 0:
+            lines.append(
+                "войс "
+                f"**{format_duration(voice.total_seconds)}**"
+                f" · подряд **{format_duration(voice.max_continuous_seconds)}**"
+            )
+        if logs:
             previous: int | None = None
-            for entry in entries:
+            for entry in logs:
                 stamp = self._rating_log_stamp(entry.created_at)
                 if previous is None:
                     lines.append(f"· **{entry.score}** · {stamp}")
                 else:
                     lines.append(f"· **{previous}** → **{entry.score}** · {stamp}")
                 previous = entry.score
-            blocks.append("\n".join(lines))
-        return "\n\n".join(blocks)
+        return "\n".join(lines)
 
     @staticmethod
     def _rating_log_stamp(raw: str) -> str:

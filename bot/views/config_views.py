@@ -29,6 +29,7 @@ FLAG_OPTIONS = (
     ("statistics_enabled", "Статистика"),
     ("personal_roles_enabled", "Персональные роли"),
     ("auto_execute_proposals", "Автовыполнение предложений"),
+    ("fest_presence_check", "Проверка присутствия на сеансе"),
 )
 
 ROLE_OPTIONS = (
@@ -70,7 +71,8 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
         value=(
             f"Статистика: {bool_label(config.statistics_enabled)}\n"
             f"Персональные роли: {bool_label(config.personal_roles_enabled)}\n"
-            f"Автовыполнение: {bool_label(config.auto_execute_proposals)}"
+            f"Автовыполнение: {bool_label(config.auto_execute_proposals)}\n"
+            f"Проверка присутствия на сеансе: {bool_label(config.fest_presence_check)}"
         ),
         inline=False,
     )
