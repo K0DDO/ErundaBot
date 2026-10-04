@@ -28,6 +28,7 @@ FLAG_OPTIONS = (
     ("statistics_enabled", "Статистика"),
     ("personal_roles_enabled", "Персональные роли"),
     ("fest_presence_check", "Проверка присутствия на сеансе"),
+    ("tarot_show_meaning", "Значение карты таро"),
 )
 
 ROLE_OPTIONS = (
@@ -68,7 +69,8 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
         value=(
             f"Статистика: {bool_label(config.statistics_enabled)}\n"
             f"Персональные роли: {bool_label(config.personal_roles_enabled)}\n"
-            f"Проверка присутствия на сеансе: {bool_label(config.fest_presence_check)}"
+            f"Проверка присутствия на сеансе: {bool_label(config.fest_presence_check)}\n"
+            f"Значение карты таро: {bool_label(config.tarot_show_meaning)}"
         ),
         inline=False,
     )
@@ -78,7 +80,8 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
             f"Timezone: `{config.timezone}`\n"
             f"Поздравления: `{config.birthday_announce_time}`\n"
             f"Напоминание ДР (дней): `{config.birthday_reminder_days}`\n"
-            f"Напоминание кино (мин): `{config.fest_reminder_minutes}`"
+            f"Напоминание кино (мин): `{config.fest_reminder_minutes}`\n"
+            f"Сброс колоды таро (мин): `{config.tarot_reset_minutes}`"
         ),
         inline=False,
     )
@@ -151,7 +154,8 @@ class ConfigPanel(discord.ui.View):
         elif value == "timezone":
             await interaction.response.send_modal(TimezoneModal(self.bot, self.guild_id))
         elif value == "times":
-            await interaction.response.send_modal(TimesModal(self.bot, self.guild_id))
+            config = await self.bot.config_service.get(self.guild_id)
+            await interaction.response.send_modal(TimesModal(self.bot, self.guild_id, config))
 
 
 class ChannelFieldSelect(discord.ui.Select):
@@ -388,11 +392,21 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
         required=True,
         max_length=5,
     )
+    tarot_minutes = discord.ui.TextInput(
+        label="Сброс колоды таро (минут после карты)",
+        placeholder="10",
+        required=True,
+        max_length=4,
+    )
 
-    def __init__(self, bot: ErundaBot, guild_id: int) -> None:
+    def __init__(self, bot: ErundaBot, guild_id: int, config: GuildConfig) -> None:
         super().__init__()
         self.bot = bot
         self.guild_id = guild_id
+        self.announce_time.default = config.birthday_announce_time
+        self.reminder_days.default = str(config.birthday_reminder_days)
+        self.fest_minutes.default = str(config.fest_reminder_minutes)
+        self.tarot_minutes.default = str(config.tarot_reset_minutes)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
@@ -405,10 +419,15 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
                 "birthday_reminder_days",
                 int(str(self.reminder_days.value).strip()),
             )
-            config = await self.bot.config_service.set_int(
+            await self.bot.config_service.set_int(
                 self.guild_id,
                 "fest_reminder_minutes",
                 int(str(self.fest_minutes.value).strip()),
+            )
+            config = await self.bot.config_service.set_int(
+                self.guild_id,
+                "tarot_reset_minutes",
+                int(str(self.tarot_minutes.value).strip()),
             )
         except ValueError as exc:
             await interaction.response.send_message(
@@ -423,7 +442,8 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
                 (
                     f"Поздравления: `{config.birthday_announce_time}`\n"
                     f"ДР заранее: `{config.birthday_reminder_days}` дн.\n"
-                    f"Кино: `{config.fest_reminder_minutes}` мин."
+                    f"Кино: `{config.fest_reminder_minutes}` мин.\n"
+                    f"Таро: сброс через `{config.tarot_reset_minutes}` мин."
                 ),
             ),
             ephemeral=True,

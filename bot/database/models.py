@@ -30,6 +30,8 @@ class GuildConfig:
     config_role_id: int | None = None
     fest_reminder_minutes: int = 60
     fest_presence_check: bool = True
+    tarot_reset_minutes: int = 10
+    tarot_show_meaning: bool = True
     tgk_board_message_id: int | None = None
     tgk_board_message_ids: list[int] | None = None
     tgk_list_role_id: int | None = None
@@ -87,6 +89,12 @@ class GuildConfig:
             else 60,
             fest_presence_check=bool(row["fest_presence_check"])
             if "fest_presence_check" in row.keys()
+            else True,
+            tarot_reset_minutes=int(row["tarot_reset_minutes"])
+            if "tarot_reset_minutes" in row.keys() and row["tarot_reset_minutes"]
+            else 10,
+            tarot_show_meaning=bool(row["tarot_show_meaning"])
+            if "tarot_show_meaning" in row.keys()
             else True,
             tgk_board_message_id=row["tgk_board_message_id"]
             if "tgk_board_message_id" in row.keys()
@@ -393,6 +401,8 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "config_role_id",
         "fest_reminder_minutes",
         "fest_presence_check",
+        "tarot_reset_minutes",
+        "tarot_show_meaning",
         "tgk_board_message_id",
         "tgk_board_message_ids",
         "tgk_list_role_id",

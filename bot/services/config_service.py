@@ -36,6 +36,7 @@ class ConfigService:
             "statistics_enabled",
             "personal_roles_enabled",
             "fest_presence_check",
+            "tarot_show_meaning",
         }
         if field not in allowed:
             raise ValueError(f"Invalid flag field: {field}")
@@ -61,6 +62,7 @@ class ConfigService:
         bounds: dict[str, tuple[int, int]] = {
             "birthday_reminder_days": (0, 30),
             "fest_reminder_minutes": (0, 10080),
+            "tarot_reset_minutes": (1, 1440),
         }
         if field not in bounds:
             raise ValueError(f"Invalid int field: {field}")

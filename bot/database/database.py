@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS guilds (
     config_role_id INTEGER,
     fest_reminder_minutes INTEGER NOT NULL DEFAULT 60,
     fest_presence_check INTEGER NOT NULL DEFAULT 1,
+    tarot_reset_minutes INTEGER NOT NULL DEFAULT 10,
+    tarot_show_meaning INTEGER NOT NULL DEFAULT 1,
     tgk_board_message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -300,6 +302,16 @@ CREATE TABLE IF NOT EXISTS festival_voice_segments (
 
 CREATE INDEX IF NOT EXISTS idx_festival_voice_open
 ON festival_voice_segments(festival_id, user_id, ended_at);
+
+CREATE TABLE IF NOT EXISTS tarot_draws (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    card_id TEXT NOT NULL,
+    reversed INTEGER NOT NULL DEFAULT 0,
+    drawn_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, user_id, card_id),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS festival_blocked_films (
     guild_id INTEGER NOT NULL,
@@ -793,6 +805,29 @@ class Database:
                 """
             )
             await self._db.execute("PRAGMA user_version = 25")
+        if version < 26:
+            for sql in (
+                "ALTER TABLE guilds ADD COLUMN tarot_reset_minutes INTEGER NOT NULL DEFAULT 10",
+                "ALTER TABLE guilds ADD COLUMN tarot_show_meaning INTEGER NOT NULL DEFAULT 1",
+            ):
+                try:
+                    await self._db.execute(sql)
+                except Exception:
+                    pass
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tarot_draws (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    card_id TEXT NOT NULL,
+                    reversed INTEGER NOT NULL DEFAULT 0,
+                    drawn_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, user_id, card_id),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute("PRAGMA user_version = 26")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2288,6 +2323,40 @@ class Database:
         )
         await self.connection.commit()
         return cursor.rowcount > 0
+
+    # --- Tarot ---
+
+    async def list_tarot_draws(self, guild_id: int, user_id: int) -> list[tuple[str, str]]:
+        cursor = await self.connection.execute(
+            "SELECT card_id, drawn_at FROM tarot_draws WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        return [(row["card_id"], row["drawn_at"]) for row in await cursor.fetchall()]
+
+    async def add_tarot_draw(
+        self,
+        guild_id: int,
+        user_id: int,
+        card_id: str,
+        reversed_: bool,
+        drawn_at: str,
+    ) -> None:
+        await self.ensure_guild(guild_id)
+        await self.connection.execute(
+            """
+            INSERT OR REPLACE INTO tarot_draws (guild_id, user_id, card_id, reversed, drawn_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (guild_id, user_id, card_id, int(reversed_), drawn_at),
+        )
+        await self.connection.commit()
+
+    async def clear_tarot_draws(self, guild_id: int, user_id: int) -> None:
+        await self.connection.execute(
+            "DELETE FROM tarot_draws WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        await self.connection.commit()
 
     # --- Telegram channels ---
 
