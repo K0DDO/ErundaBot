@@ -2,7 +2,7 @@
 
 Discord-бот для небольшого сервера «Ерундульки».
 
-Делает сервер живее: дни рождения, статистика и топы, ивенты, цитаты, роли (включая RGB) и серверная демократия.
+Делает сервер живее: дни рождения, статистика и топы, ивенты, кинофестиваль, ТГК, цитаты и роли.
 
 ## Требования
 
@@ -61,7 +61,6 @@ DEFAULT_TIMEZONE=Europe/Moscow
 | Attach Files | Вложения (иконки ролей и т.п.) |
 | Read Message History | Контекст / цитаты |
 | Manage Roles | Роли и RGB |
-| Manage Channels | Автодействия демократии |
 | Use Application Commands | Slash Commands |
 
 Роль бота должна быть **выше** ролей, которыми он управляет.
@@ -72,7 +71,7 @@ DEFAULT_TIMEZONE=Europe/Moscow
 https://discord.com/oauth2/authorize?client_id=CLIENT_ID&permissions=268823632&scope=bot%20applications.commands
 ```
 
-`268823632` ≈ View Channels + Send Messages + Embed Links + Attach Files + Read Message History + Manage Roles + Manage Channels.
+`268823632` ≈ View Channels + Send Messages + Embed Links + Attach Files + Read Message History + Manage Roles + Manage Channels (Manage Channels больше не обязателен).
 
 ## Запуск
 
@@ -86,10 +85,10 @@ python main.py
 
 На сервере выполни `/config` (нужны Administrator или Manage Server):
 
-- каналы дней рождения / ивентов / голосований / цитат;
+- каналы дней рождения / ивентов / цитат / кинофестиваля / ТГК;
 - timezone;
-- флаги статистики, personal roles, RGB, auto-execute;
-- время уведомлений и правила голосований.
+- флаги статистики, personal roles и проверки присутствия на сеансе;
+- время уведомлений.
 
 ## Лицензия
 

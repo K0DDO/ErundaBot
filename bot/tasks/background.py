@@ -12,7 +12,6 @@ import discord
 
 from bot.utils.embeds import base_embed
 from bot.views.event_views import refresh_event_card, retire_event
-from bot.views.proposal_views import build_proposal_embed
 
 log = logging.getLogger(__name__)
 
@@ -42,8 +41,6 @@ class BackgroundTasks:
             self.birthday_loop.start()
         if not self.event_loop.is_running():
             self.event_loop.start()
-        if not self.proposal_loop.is_running():
-            self.proposal_loop.start()
         if not self.fest_loop.is_running():
             self.fest_loop.start()
         if not self.birthday_rgb_loop.is_running():
@@ -59,7 +56,6 @@ class BackgroundTasks:
         for loop in (
             self.birthday_loop,
             self.event_loop,
-            self.proposal_loop,
             self.fest_loop,
             self.birthday_rgb_loop,
             self.tgk_meta_loop,
@@ -247,46 +243,6 @@ class BackgroundTasks:
                 log.exception("Fest loop failed for guild %s", config.guild_id)
 
     @tasks.loop(minutes=1)
-    async def proposal_loop(self) -> None:
-        await self.bot.wait_until_ready()
-        now = datetime.now(timezone.utc)
-        try:
-            open_proposals = await self.bot.db.list_open_proposals()
-        except Exception:
-            log.exception("Failed to load open proposals")
-            return
-
-        for proposal in open_proposals:
-            ends = datetime.fromisoformat(proposal.ends_at)
-            if ends.tzinfo is None:
-                ends = ends.replace(tzinfo=timezone.utc)
-            if now < ends.astimezone(timezone.utc):
-                continue
-            config = await self.bot.db.get_guild(proposal.guild_id)
-            if config is None:
-                continue
-            guild = self.bot.get_guild(proposal.guild_id)
-            if guild is None:
-                continue
-            try:
-                updated = await self.bot.democracy_service.close_proposal(
-                    proposal, config, self.bot
-                )
-                if updated.message_id and updated.channel_id:
-                    channel = guild.get_channel(updated.channel_id)
-                    if channel and hasattr(channel, "fetch_message"):
-                        try:
-                            msg = await channel.fetch_message(updated.message_id)
-                            embed = await build_proposal_embed(
-                                self.bot, updated, config.timezone, final=True
-                            )
-                            await msg.edit(embed=embed, view=None)
-                        except Exception:
-                            log.exception("Failed to update proposal message %s", updated.id)
-            except Exception:
-                log.exception("Proposal close failed for %s", proposal.id)
-
-    @tasks.loop(minutes=1)
     async def tgk_meta_loop(self) -> None:
         await self.bot.wait_until_ready()
         try:
@@ -325,10 +281,6 @@ class BackgroundTasks:
 
     @fest_loop.before_loop
     async def before_fest_loop(self) -> None:
-        await self.bot.wait_until_ready()
-
-    @proposal_loop.before_loop
-    async def before_proposal_loop(self) -> None:
         await self.bot.wait_until_ready()
 
     @tasks.loop(seconds=8)

@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 CHANNEL_OPTIONS = (
     ("birthday_channel_id", "Дни рождения"),
     ("events_channel_id", "Ивенты"),
-    ("proposals_channel_id", "Голосования"),
     ("quotes_channel_id", "Цитаты"),
     ("fest_channel_id", "Кинофестиваль"),
     ("tgk_channel_id", "ТГК"),
@@ -28,7 +27,6 @@ CHANNEL_OPTIONS = (
 FLAG_OPTIONS = (
     ("statistics_enabled", "Статистика"),
     ("personal_roles_enabled", "Персональные роли"),
-    ("auto_execute_proposals", "Автовыполнение предложений"),
     ("fest_presence_check", "Проверка присутствия на сеансе"),
 )
 
@@ -50,7 +48,6 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
         value=(
             f"Дни рождения: {channel_mention(config.birthday_channel_id)}\n"
             f"Ивенты: {channel_mention(config.events_channel_id)}\n"
-            f"Голосования: {channel_mention(config.proposals_channel_id)}\n"
             f"Цитаты: {channel_mention(config.quotes_channel_id)}\n"
             f"Кинофестиваль: {channel_mention(config.fest_channel_id)}\n"
             f"ТГК: {channel_mention(config.tgk_channel_id)}"
@@ -71,21 +68,17 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
         value=(
             f"Статистика: {bool_label(config.statistics_enabled)}\n"
             f"Персональные роли: {bool_label(config.personal_roles_enabled)}\n"
-            f"Автовыполнение: {bool_label(config.auto_execute_proposals)}\n"
             f"Проверка присутствия на сеансе: {bool_label(config.fest_presence_check)}"
         ),
         inline=False,
     )
     embed.add_field(
-        name="Время и голосования",
+        name="Время",
         value=(
             f"Timezone: `{config.timezone}`\n"
             f"Поздравления: `{config.birthday_announce_time}`\n"
             f"Напоминание ДР (дней): `{config.birthday_reminder_days}`\n"
-            f"Напоминание кино (мин): `{config.fest_reminder_minutes}`\n"
-            f"Длительность голосования (ч): `{config.proposal_duration_hours}`\n"
-            f"Кворум: `{config.proposal_quorum}`\n"
-            f"Порог принятия: `{config.proposal_pass_ratio:.0%}`"
+            f"Напоминание кино (мин): `{config.fest_reminder_minutes}`"
         ),
         inline=False,
     )
@@ -129,7 +122,6 @@ class ConfigPanel(discord.ui.View):
             discord.SelectOption(label="Флаги", value="flags", emoji="🏳️"),
             discord.SelectOption(label="Timezone", value="timezone", emoji="🌍"),
             discord.SelectOption(label="Время уведомлений", value="times", emoji="⏰"),
-            discord.SelectOption(label="Голосования", value="votes", emoji="🗳️"),
         ],
     )
     async def section_select(
@@ -160,8 +152,6 @@ class ConfigPanel(discord.ui.View):
             await interaction.response.send_modal(TimezoneModal(self.bot, self.guild_id))
         elif value == "times":
             await interaction.response.send_modal(TimesModal(self.bot, self.guild_id))
-        elif value == "votes":
-            await interaction.response.send_modal(VotesModal(self.bot, self.guild_id))
 
 
 class ChannelFieldSelect(discord.ui.Select):
@@ -434,67 +424,6 @@ class TimesModal(discord.ui.Modal, title="Время уведомлений"):
                     f"Поздравления: `{config.birthday_announce_time}`\n"
                     f"ДР заранее: `{config.birthday_reminder_days}` дн.\n"
                     f"Кино: `{config.fest_reminder_minutes}` мин."
-                ),
-            ),
-            ephemeral=True,
-        )
-
-
-class VotesModal(discord.ui.Modal, title="Правила голосований"):
-    duration = discord.ui.TextInput(
-        label="Длительность (часов)",
-        placeholder="24",
-        required=True,
-        max_length=4,
-    )
-    quorum = discord.ui.TextInput(
-        label="Кворум (минимум голосов)",
-        placeholder="3",
-        required=True,
-        max_length=4,
-    )
-    ratio = discord.ui.TextInput(
-        label="Порог принятия (0.5–1.0)",
-        placeholder="0.5",
-        required=True,
-        max_length=4,
-    )
-
-    def __init__(self, bot: ErundaBot, guild_id: int) -> None:
-        super().__init__()
-        self.bot = bot
-        self.guild_id = guild_id
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        try:
-            await self.bot.config_service.set_int(
-                self.guild_id,
-                "proposal_duration_hours",
-                int(str(self.duration.value).strip()),
-            )
-            await self.bot.config_service.set_int(
-                self.guild_id,
-                "proposal_quorum",
-                int(str(self.quorum.value).strip()),
-            )
-            config = await self.bot.config_service.set_pass_ratio(
-                self.guild_id,
-                float(str(self.ratio.value).strip().replace(",", ".")),
-            )
-        except ValueError as exc:
-            await interaction.response.send_message(
-                embed=error_embed("Ошибка", str(exc)),
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            embed=success_embed(
-                "Правила голосований обновлены",
-                (
-                    f"Длительность: `{config.proposal_duration_hours}` ч\n"
-                    f"Кворум: `{config.proposal_quorum}`\n"
-                    f"Порог: `{config.proposal_pass_ratio:.0%}`"
                 ),
             ),
             ephemeral=True,

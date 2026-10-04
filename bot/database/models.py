@@ -13,21 +13,16 @@ class GuildConfig:
     timezone: str = "Europe/Moscow"
     birthday_channel_id: int | None = None
     events_channel_id: int | None = None
-    proposals_channel_id: int | None = None
     quotes_channel_id: int | None = None
     fest_channel_id: int | None = None
     tgk_channel_id: int | None = None
     statistics_enabled: bool = True
     personal_roles_enabled: bool = True
-    auto_execute_proposals: bool = False
     rgb_enabled: bool = True
     birthday_announce_time: str = "09:00"
     birthday_reminder_days: int = 1
     event_reminder_minutes: int = 60
     rgb_interval_seconds: int = 10
-    proposal_duration_hours: int = 24
-    proposal_quorum: int = 3
-    proposal_pass_ratio: float = 0.5
     birthday_board_message_id: int | None = None
     birthday_star_role_id: int | None = None
     fest_staff_role_id: int | None = None
@@ -62,21 +57,16 @@ class GuildConfig:
             timezone=row["timezone"],
             birthday_channel_id=row["birthday_channel_id"],
             events_channel_id=row["events_channel_id"],
-            proposals_channel_id=row["proposals_channel_id"],
             quotes_channel_id=row["quotes_channel_id"],
             fest_channel_id=row["fest_channel_id"] if "fest_channel_id" in row.keys() else None,
             tgk_channel_id=row["tgk_channel_id"] if "tgk_channel_id" in row.keys() else None,
             statistics_enabled=bool(row["statistics_enabled"]),
             personal_roles_enabled=bool(row["personal_roles_enabled"]),
-            auto_execute_proposals=bool(row["auto_execute_proposals"]),
             rgb_enabled=bool(row["rgb_enabled"]),
             birthday_announce_time=row["birthday_announce_time"],
             birthday_reminder_days=row["birthday_reminder_days"],
             event_reminder_minutes=row["event_reminder_minutes"],
             rgb_interval_seconds=row["rgb_interval_seconds"],
-            proposal_duration_hours=row["proposal_duration_hours"],
-            proposal_quorum=row["proposal_quorum"],
-            proposal_pass_ratio=float(row["proposal_pass_ratio"]),
             birthday_board_message_id=row["birthday_board_message_id"]
             if "birthday_board_message_id" in row.keys()
             else None,
@@ -274,37 +264,6 @@ class CustomRole:
 
 
 @dataclass(slots=True)
-class Proposal:
-    id: int
-    guild_id: int
-    number: int
-    content: str
-    author_id: int
-    channel_id: int | None
-    message_id: int | None
-    status: str
-    ends_at: str
-    action_type: str | None
-    action_payload: str | None
-
-    @classmethod
-    def from_row(cls, row: Any) -> Proposal:
-        return cls(
-            id=row["id"],
-            guild_id=row["guild_id"],
-            number=row["number"],
-            content=row["content"],
-            author_id=row["author_id"],
-            channel_id=row["channel_id"],
-            message_id=row["message_id"],
-            status=row["status"],
-            ends_at=row["ends_at"],
-            action_type=row["action_type"],
-            action_payload=row["action_payload"],
-        )
-
-
-@dataclass(slots=True)
 class Festival:
     id: int
     guild_id: int
@@ -418,21 +377,16 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "timezone",
         "birthday_channel_id",
         "events_channel_id",
-        "proposals_channel_id",
         "quotes_channel_id",
         "fest_channel_id",
         "tgk_channel_id",
         "statistics_enabled",
         "personal_roles_enabled",
-        "auto_execute_proposals",
         "rgb_enabled",
         "birthday_announce_time",
         "birthday_reminder_days",
         "event_reminder_minutes",
         "rgb_interval_seconds",
-        "proposal_duration_hours",
-        "proposal_quorum",
-        "proposal_pass_ratio",
         "birthday_star_role_id",
         "fest_staff_role_id",
         "fest_ping_role_id",

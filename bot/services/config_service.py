@@ -23,7 +23,6 @@ class ConfigService:
         allowed = {
             "birthday_channel_id",
             "events_channel_id",
-            "proposals_channel_id",
             "quotes_channel_id",
             "fest_channel_id",
             "tgk_channel_id",
@@ -36,7 +35,6 @@ class ConfigService:
         allowed = {
             "statistics_enabled",
             "personal_roles_enabled",
-            "auto_execute_proposals",
             "fest_presence_check",
         }
         if field not in allowed:
@@ -63,8 +61,6 @@ class ConfigService:
         bounds: dict[str, tuple[int, int]] = {
             "birthday_reminder_days": (0, 30),
             "fest_reminder_minutes": (0, 10080),
-            "proposal_duration_hours": (1, 720),
-            "proposal_quorum": (1, 1000),
         }
         if field not in bounds:
             raise ValueError(f"Invalid int field: {field}")
@@ -72,8 +68,3 @@ class ConfigService:
         if not (lo <= value <= hi):
             raise ValueError(f"{field} must be between {lo} and {hi}")
         return await self.db.update_guild(guild_id, **{field: value})
-
-    async def set_pass_ratio(self, guild_id: int, ratio: float) -> GuildConfig:
-        if not (0.5 <= ratio <= 1.0):
-            raise ValueError("proposal_pass_ratio must be between 0.5 and 1.0")
-        return await self.db.update_guild(guild_id, proposal_pass_ratio=ratio)

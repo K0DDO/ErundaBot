@@ -14,7 +14,6 @@ from bot.services.ai_service import AIService
 from bot.services.birthday_service import BirthdayService
 from bot.services.birthday_star_service import BirthdayStarService
 from bot.services.config_service import ConfigService
-from bot.services.democracy_service import DemocracyService
 from bot.services.event_service import EventService
 from bot.services.festival_service import FestivalService
 from bot.services.festival_presence_service import FestivalPresenceService
@@ -35,7 +34,6 @@ COG_MODULES = (
     "bot.cogs.tgk",
     "bot.cogs.quotes",
     "bot.cogs.roles",
-    "bot.cogs.democracy",
 )
 
 
@@ -73,7 +71,6 @@ class ErundaBot(commands.Bot):
         self.tgk_service = TgkService(self.db)
         self.quote_service = QuoteService(self.db)
         self.role_service = RoleService(self.db)
-        self.democracy_service = DemocracyService(self.db)
         self.background = BackgroundTasks(self)
         self._synced = False
 
