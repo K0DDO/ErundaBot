@@ -463,21 +463,20 @@ class BirthdayService:
                 allowed.append(role.name)
         quotes = await self.db.count_quotes(guild.id, user_id)
         if quotes:
-            facts.append(f"цитат на сервере: {quotes}")
+            facts.append("на сервере сохранены цитаты этого человека")
         wins = sum(
             1
             for festival in await self.db.list_guild_festivals(guild.id)
             if festival.winner_user_id == user_id
         )
         if wins:
-            facts.append(f"побед в кинофестивале: {wins}")
+            facts.append("фильм этого человека побеждал в кинофестивале сервера")
         config = await self.db.get_guild(guild.id)
         tz_name = config.timezone if config is not None else "Europe/Moscow"
         now_iso = datetime.now(ZoneInfo(tz_name)).isoformat()
         voice = await self.db.sum_voice_seconds(guild.id, user_id, None, None, now_iso)
-        if isinstance(voice, int) and voice >= 3600:
-            hours = voice // 3600
-            facts.append(f"в войсе всего около {hours} ч")
+        if isinstance(voice, int) and voice >= 50 * 3600:
+            facts.append("много времени проводит с друзьями в войсе")
         return facts, allowed
 
     async def announce_embed(

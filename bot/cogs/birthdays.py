@@ -11,7 +11,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from bot.database.models import Birthday
 from bot.utils.embeds import error_embed, success_embed
+from bot.utils.permissions import can_edit_config, config_denied_reason
 from bot.views.birthday_views import BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
@@ -89,6 +91,52 @@ class BirthdaysCog(commands.Cog):
             ephemeral=True,
         )
         await refresh_birthday_board(self.bot, interaction.guild)
+
+    @birthday.command(name="test", description="Тестовое поздравление (видно только тебе)")
+    @app_commands.describe(user="Кого поздравить, по умолчанию тебя")
+    @app_commands.guild_only()
+    async def birthday_test(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member | None = None,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if not can_edit_config(interaction.user, config.config_role_id):
+            await interaction.response.send_message(
+                embed=error_embed(config_denied_reason(config.config_role_id)),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        target = user or interaction.user
+        today = datetime.now(ZoneInfo(config.timezone)).date()
+        stored = await self.bot.birthday_service.get_birthday(interaction.guild.id, target.id)
+        birthday = Birthday(
+            guild_id=interaction.guild.id,
+            user_id=target.id,
+            day=today.day,
+            month=today.month,
+            year=stored.year if stored is not None else None,
+        )
+        try:
+            embed, used_ai = await self.bot.birthday_service.announce_embed(
+                interaction.guild,
+                birthday,
+                today,
+                self.bot.ai_service,
+            )
+        except Exception:
+            log.exception("Birthday test greeting failed")
+            await interaction.followup.send(
+                embed=error_embed("Не получилось собрать поздравление"),
+                ephemeral=True,
+            )
+            return
+        note = "Сгенерировано ИИ" if used_ai else "ИИ не ответил — запасной текст"
+        embed.set_footer(text=f"Тест · {note}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: ErundaBot) -> None:

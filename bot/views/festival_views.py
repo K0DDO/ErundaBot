@@ -215,8 +215,8 @@ class FestivalAddModal(discord.ui.Modal, title="Предложить фильм"
 
 
 class FestivalNewModal(discord.ui.Modal, title="Новый кинофестиваль"):
-    date = discord.ui.TextInput(label="Дата сеанса (DD.MM.YYYY)", placeholder="15.08.2026", max_length=10)
-    time = discord.ui.TextInput(label="Время (HH:MM)", placeholder="21:00", max_length=5)
+    date = discord.ui.TextInput(label="Дата сеанса по МСК (DD.MM.YYYY)", placeholder="15.08.2026", max_length=10)
+    time = discord.ui.TextInput(label="Время по МСК (HH:MM)", placeholder="21:00 — московское время", max_length=5)
 
     def __init__(self, bot: ErundaBot, guild_id: int, tz_name: str) -> None:
         super().__init__()
@@ -271,8 +271,8 @@ class FestivalNewModal(discord.ui.Modal, title="Новый кинофестив�
 
 
 class FestivalEditModal(discord.ui.Modal, title="Изменить кинофестиваль"):
-    date = discord.ui.TextInput(label="Дата сеанса (DD.MM.YYYY)", placeholder="15.08.2026", max_length=10)
-    time = discord.ui.TextInput(label="Время (HH:MM)", placeholder="21:00", max_length=5)
+    date = discord.ui.TextInput(label="Дата сеанса по МСК (DD.MM.YYYY)", placeholder="15.08.2026", max_length=10)
+    time = discord.ui.TextInput(label="Время по МСК (HH:MM)", placeholder="21:00 — московское время", max_length=5)
 
     def __init__(self, bot: ErundaBot, guild_id: int, tz_name: str, date_value: str, time_value: str) -> None:
         super().__init__()

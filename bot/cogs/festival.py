@@ -10,7 +10,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.services.festival_service import film_age_rating, format_age_tag, normalize_film_title
+from bot.services.festival_service import (
+    MSK_TIMEZONE,
+    film_age_rating,
+    format_age_tag,
+    normalize_film_title,
+)
 from bot.utils.embeds import error_embed, success_embed
 from bot.views.festival_views import (
     FestivalAddModal,
@@ -125,7 +130,7 @@ class FestivalCog(commands.Cog):
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         await interaction.response.send_modal(
-            FestivalNewModal(self.bot, interaction.guild.id, config.timezone)
+            FestivalNewModal(self.bot, interaction.guild.id, MSK_TIMEZONE)
         )
 
     @fest.command(name="edit", description="Изменить дату и время сеанса")
@@ -141,13 +146,13 @@ class FestivalCog(commands.Cog):
             await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
             return
         date_value, time_value = self.bot.festival_service.starts_input(
-            festival, config.timezone
+            festival, MSK_TIMEZONE
         )
         await interaction.response.send_modal(
             FestivalEditModal(
                 self.bot,
                 interaction.guild.id,
-                config.timezone,
+                MSK_TIMEZONE,
                 date_value,
                 time_value,
             )
