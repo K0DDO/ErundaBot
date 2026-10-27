@@ -14,7 +14,11 @@ from bot.database.database import Database
 from bot.database.models import Birthday, GuildConfig
 from bot.services.birthday_service import occurrence_on_year
 from bot.utils.colors import hsv_to_discord_color
-from bot.utils.permissions import assert_bot_can_manage_role, fetch_bot_member
+from bot.utils.permissions import (
+    assert_bot_can_manage_role,
+    bot_can_manage_role,
+    fetch_bot_member,
+)
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -32,6 +36,34 @@ class BirthdayStarService:
         self._hue = 0.0
         self._rgb_backoff_until: datetime | None = None
 
+    async def _create_star_role(
+        self,
+        guild: discord.Guild,
+        bot_member: discord.Member,
+        *,
+        reason: str,
+    ) -> discord.Role:
+        if not bot_member.guild_permissions.manage_roles:
+            raise ValueError("У бота нет права Manage Roles")
+        # Color/hoist only — no permissions. Discord places new roles under the bot.
+        role = await guild.create_role(
+            name=STAR_ROLE_NAME,
+            colour=discord.Colour(hsv_to_discord_color(0.0)),
+            permissions=discord.Permissions.none(),
+            hoist=True,
+            mentionable=False,
+            reason=reason,
+        )
+        await self.db.set_birthday_star_role_id(guild.id, role.id)
+        await self.db.save_custom_role(
+            guild.id,
+            role.id,
+            owner_id=None,
+            kind="managed",
+            rgb_enabled=True,
+        )
+        return role
+
     async def get_or_create_star_role(
         self,
         guild: discord.Guild,
@@ -40,23 +72,27 @@ class BirthdayStarService:
         config = await self.db.ensure_guild(guild.id)
         bot_member = bot_member or await fetch_bot_member(guild)
         role = guild.get_role(config.birthday_star_role_id) if config.birthday_star_role_id else None
-        if role is None:
-            if not bot_member.guild_permissions.manage_roles:
-                raise ValueError("У бота нет права Manage Roles")
-            role = await guild.create_role(
-                name=STAR_ROLE_NAME,
-                colour=discord.Colour(hsv_to_discord_color(0.0)),
-                hoist=True,
-                mentionable=False,
-                reason="Ерунда: роль именинника",
-            )
-            await self.db.set_birthday_star_role_id(guild.id, role.id)
-            await self.db.save_custom_role(
-                guild.id,
+        if role is not None and not bot_can_manage_role(bot_member, role):
+            # Hierarchy drift: someone dragged Именинник above the bot. Bot can't
+            # move/delete that role — create a fresh color-only one underneath.
+            log.warning(
+                "Birthday star role %s is above bot in guild %s — recreating",
                 role.id,
-                owner_id=None,
-                kind="managed",
-                rgb_enabled=True,
+                guild.id,
+            )
+            try:
+                await role.edit(
+                    name="🎂 Именинник (старая)",
+                    reason="Ерунда: роль выше бота, создаём новую",
+                )
+            except discord.HTTPException:
+                pass
+            role = None
+        if role is None:
+            role = await self._create_star_role(
+                guild,
+                bot_member,
+                reason="Ерунда: роль именинника",
             )
         assert_bot_can_manage_role(bot_member, role)
         await self._position_star_role(bot_member, role)
