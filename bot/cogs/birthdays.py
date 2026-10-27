@@ -135,7 +135,19 @@ class BirthdaysCog(commands.Cog):
             )
             return
         note = "Сгенерировано ИИ" if used_ai else "ИИ не ответил — запасной текст"
-        embed.set_footer(text=f"Тест · {note}")
+        role_note = "роль не трогали"
+        if isinstance(target, discord.Member):
+            try:
+                role_note = await self.bot.birthday_star_service.grant(
+                    interaction.guild,
+                    target,
+                    granted_on=today,
+                    force=True,
+                )
+            except Exception as exc:
+                log.exception("Birthday test star grant failed")
+                role_note = f"роль не выдана: {exc}"
+        embed.set_footer(text=f"Тест · {note} · {role_note}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 

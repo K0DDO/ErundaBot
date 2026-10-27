@@ -74,6 +74,16 @@ class BirthdayStarService:
         except discord.HTTPException:
             log.warning("Could not reposition birthday star role %s", role.id)
 
+    @staticmethod
+    async def resolve_member(guild: discord.Guild, user_id: int) -> discord.Member | None:
+        member = guild.get_member(user_id)
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except discord.HTTPException:
+            return None
+
     async def _personal_roles_to_hide(
         self,
         guild: discord.Guild,
@@ -182,7 +192,7 @@ class BirthdayStarService:
         for grant in grants:
             if grant.user_id in today_ids:
                 continue
-            member = guild.get_member(grant.user_id)
+            member = await self.resolve_member(guild, grant.user_id)
             if member is None:
                 await self.db.delete_birthday_star_grant(guild.id, grant.user_id)
                 continue
@@ -194,11 +204,26 @@ class BirthdayStarService:
         holders = {grant.user_id for grant in await self.db.list_birthday_star_grants(guild.id)}
         for user_id in today_ids:
             if user_id in holders:
+                member = await self.resolve_member(guild, user_id)
+                if member is None:
+                    continue
+                config_role = await self.get_or_create_star_role(guild)
+                if config_role in member.roles:
+                    continue
+                try:
+                    await self.grant(guild, member, granted_on=today)
+                except Exception:
+                    log.exception("Failed to re-grant missing birthday star to %s", user_id)
                 continue
             if len(holders) >= MAX_STAR_HOLDERS:
                 break
-            member = guild.get_member(user_id)
+            member = await self.resolve_member(guild, user_id)
             if member is None:
+                log.warning(
+                    "Birthday star skip: member %s not found in guild %s",
+                    user_id,
+                    guild.id,
+                )
                 continue
             try:
                 await self.grant(guild, member, granted_on=today)

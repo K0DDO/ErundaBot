@@ -81,12 +81,19 @@ class BackgroundTasks:
             try:
                 local_now = now.astimezone(ZoneInfo(config.timezone))
                 local_today = local_now.date()
-                if local_now.hour == 0 and local_now.minute == 0:
-                    if config.birthday_channel_id:
-                        await self.bot.birthday_service.sync_board(guild, self.bot)
+                # Keep RGB birthday role in sync every minute (not only at 00:00):
+                # retries failed grants and clears yesterday's holders.
+                try:
                     await self.bot.birthday_star_service.sync_today(
                         guild, config, local_today, self.bot
                     )
+                except Exception:
+                    log.exception(
+                        "Failed to sync birthday star roles for guild %s",
+                        config.guild_id,
+                    )
+                if local_now.hour == 0 and local_now.minute == 0 and config.birthday_channel_id:
+                    await self.bot.birthday_service.sync_board(guild, self.bot)
 
                 channel = (
                     guild.get_channel(config.birthday_channel_id)
@@ -106,7 +113,9 @@ class BackgroundTasks:
 
                 announcements = await self.bot.birthday_service.due_announcements(config, now)
                 for birthday in announcements:
-                    member = guild.get_member(birthday.user_id)
+                    member = await self.bot.birthday_star_service.resolve_member(
+                        guild, birthday.user_id
+                    )
                     if member is not None:
                         try:
                             await self.bot.birthday_star_service.grant(
@@ -114,6 +123,12 @@ class BackgroundTasks:
                             )
                         except Exception:
                             log.exception("Failed to grant birthday star to %s", birthday.user_id)
+                    else:
+                        log.warning(
+                            "Birthday announce without member cache/fetch for %s in guild %s",
+                            birthday.user_id,
+                            config.guild_id,
+                        )
                     # Mention only in message content — embeds show raw IDs on mobile.
                     embed, _used_ai = await self.bot.birthday_service.announce_embed(
                         guild,
