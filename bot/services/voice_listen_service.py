@@ -41,6 +41,11 @@ BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
 # Join nearby STT chunks so "сикс" + "севен" across a short pause still match.
 SIXSEVEN_CONTEXT_SECONDS = 3.5
 SIXSEVEN_CONTEXT_MAX_CHUNKS = 4
+# Auto-recover when SSRC/speaker map dies (bot stays connected but STT stops).
+VOICE_RECOVER_UNKNOWN_THRESHOLD = 200
+VOICE_RECOVER_COOLDOWN_SECONDS = 45.0
+VOICE_STALE_PCM_SECONDS = 50.0
+VOICE_HEALTH_CHECK_EVERY = 20.0
 
 # RU (+ EN Whisper) swear stems; count after STT for /stats later.
 # Word-start only; include common prefixes (заеб/нахуй/…) as separate alts.
@@ -428,6 +433,10 @@ class VoiceListenService:
         self._announce_channels: dict[int, int] = {}
         self._pcm_packets: dict[int, int] = defaultdict(int)
         self._unknown_speaker_packets: dict[int, int] = defaultdict(int)
+        self._last_pcm_at: dict[int, float] = {}
+        self._last_recover_at: dict[int, float] = {}
+        self._recovering: set[int] = set()
+        self._health_tick: float = 0.0
         # guild_id -> ssrc -> user_id (survives brief speaking-map gaps)
         self._ssrc_users: dict[int, dict[int, int]] = defaultdict(dict)
         # (guild_id, user_id) -> recent STT chunks for cross-pause sixseven
@@ -540,8 +549,11 @@ class VoiceListenService:
                         voice_listen_channel_id=int(channel.id),
                         voice_announce_channel_id=self._announce_channels.get(guild.id),
                     )
+                    # Sink can die while vc stays connected — always rebind.
+                    self._bind_listen_sink(bot, guild, existing)
                     self._ensure_watchdog(bot)
-                    return f"Уже слушаю {channel.mention}"
+                    tip = await self._soundboard_status(guild, channel)
+                    return f"Уже слушаю {channel.mention}\n{tip}"
                 await existing.disconnect(force=True)
 
             if not discord.opus.is_loaded():
@@ -558,6 +570,7 @@ class VoiceListenService:
             self._buffers[guild.id] = {}
             self._pcm_packets[guild.id] = 0
             self._unknown_speaker_packets[guild.id] = 0
+            self._last_pcm_at.pop(guild.id, None)
             if announce_channel_id is not None:
                 self._announce_channels[guild.id] = int(announce_channel_id)
                 log.info(
@@ -566,34 +579,7 @@ class VoiceListenService:
                     announce_channel_id,
                 )
             await _wait_for_dave(vc)
-
-            def on_voice(user: discord.User | discord.Member | None, data) -> None:
-                user_id = self._resolve_speaker_id(guild.id, vc, user, data)
-                if user_id is None:
-                    self._unknown_speaker_packets[guild.id] += 1
-                    if self._unknown_speaker_packets[guild.id] in (1, 50, 200, 1000):
-                        log.warning(
-                            "Voice packets without speaker map in guild %s (n=%s)",
-                            guild.id,
-                            self._unknown_speaker_packets[guild.id],
-                        )
-                    return
-                pcm = getattr(data, "pcm", None)
-                if not pcm:
-                    return
-                self._pcm_packets[guild.id] += 1
-                if self._pcm_packets[guild.id] == 1:
-                    log.info("First voice PCM packet in guild %s user=%s", guild.id, user_id)
-                loop = bot.loop
-                loop.call_soon_threadsafe(
-                    self._append_pcm,
-                    guild.id,
-                    user_id,
-                    bytes(pcm),
-                )
-
-            # Library decode (with FEC). Router is patched to survive OpusError.
-            vc.listen(voice_recv.BasicSink(on_voice, decode=True))
+            self._bind_listen_sink(bot, guild, vc)
             self._ensure_watchdog(bot)
             await self.db.update_guild(
                 guild.id,
@@ -605,6 +591,110 @@ class VoiceListenService:
             if guild.id in self._announce_channels:
                 where = f"\nРеплики пишу в <#{self._announce_channels[guild.id]}>"
             return f"Слушаю {channel.mention}\n{tip}{where}"
+
+    def _bind_listen_sink(
+        self,
+        bot: ErundaBot,
+        guild: discord.Guild,
+        vc: discord.VoiceProtocol,
+    ) -> None:
+        from discord.ext import voice_recv
+
+        try:
+            if getattr(vc, "is_listening", lambda: False)():
+                vc.stop_listening()
+        except Exception:
+            pass
+
+        def on_voice(user: discord.User | discord.Member | None, data) -> None:
+            user_id = self._resolve_speaker_id(guild.id, vc, user, data)
+            if user_id is None:
+                self._unknown_speaker_packets[guild.id] += 1
+                n = self._unknown_speaker_packets[guild.id]
+                if n in (1, 50, 200, 500, 1000):
+                    log.warning(
+                        "Voice packets without speaker map in guild %s (n=%s)",
+                        guild.id,
+                        n,
+                    )
+                if n == VOICE_RECOVER_UNKNOWN_THRESHOLD or n == 1000:
+                    self._schedule_recover(guild.id, reason=f"unknown_ssrc={n}")
+                return
+            pcm = getattr(data, "pcm", None)
+            if not pcm:
+                return
+            self._pcm_packets[guild.id] += 1
+            self._last_pcm_at[guild.id] = datetime.now(timezone.utc).timestamp()
+            # Successful map — don't let old unknown counter force recover forever.
+            if self._unknown_speaker_packets[guild.id] > 0:
+                self._unknown_speaker_packets[guild.id] = 0
+            if self._pcm_packets[guild.id] == 1:
+                log.info("First voice PCM packet in guild %s user=%s", guild.id, user_id)
+            bot.loop.call_soon_threadsafe(
+                self._append_pcm,
+                guild.id,
+                user_id,
+                bytes(pcm),
+            )
+
+        vc.listen(voice_recv.BasicSink(on_voice, decode=True))
+
+    def _schedule_recover(self, guild_id: int, *, reason: str) -> None:
+        bot = self._bot
+        if bot is None:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        if guild_id in self._recovering:
+            return
+        last = self._last_recover_at.get(guild_id, 0.0)
+        if now - last < VOICE_RECOVER_COOLDOWN_SECONDS:
+            return
+        log.warning("Scheduling voice listen recover guild=%s (%s)", guild_id, reason)
+
+        def _go() -> None:
+            asyncio.create_task(self._recover_listen(guild_id, reason=reason))
+
+        bot.loop.call_soon_threadsafe(_go)
+
+    async def _recover_listen(self, guild_id: int, *, reason: str) -> None:
+        if guild_id in self._recovering:
+            return
+        bot = self._bot
+        if bot is None or self.ai.stt_credits_exhausted:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        last = self._last_recover_at.get(guild_id, 0.0)
+        if now - last < VOICE_RECOVER_COOLDOWN_SECONDS:
+            return
+        self._recovering.add(guild_id)
+        self._last_recover_at[guild_id] = now
+        try:
+            announce_id = self._announce_channels.get(guild_id)
+            channel = self.listening_channel(guild_id)
+            config = await self.db.get_guild(guild_id)
+            if announce_id is None and config is not None:
+                announce_id = config.voice_announce_channel_id
+            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                channel_id = config.voice_listen_channel_id if config else None
+                guild = bot.get_guild(guild_id)
+                channel = guild.get_channel(channel_id) if guild and channel_id else None
+            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                log.warning("Voice recover aborted: no channel guild=%s", guild_id)
+                return
+            log.warning(
+                "Recovering voice listen guild=%s channel=%s (%s)",
+                guild_id,
+                channel.id,
+                reason,
+            )
+            await self.leave(guild_id, flush=False, clear_resume=False)
+            await asyncio.sleep(1.2)
+            await self.join(bot, channel, announce_channel_id=announce_id)
+            log.info("Voice listen recovered guild=%s", guild_id)
+        except Exception:
+            log.exception("Voice listen recover failed guild=%s", guild_id)
+        finally:
+            self._recovering.discard(guild_id)
 
     async def leave(self, guild_id: int, *, flush: bool = True, clear_resume: bool = True) -> str:
         async with self._lock:
@@ -628,6 +718,7 @@ class VoiceListenService:
         self._announce_channels.pop(guild_id, None)
         self._pcm_packets.pop(guild_id, None)
         self._unknown_speaker_packets.pop(guild_id, None)
+        self._last_pcm_at.pop(guild_id, None)
         self._ssrc_users.pop(guild_id, None)
         for key in [k for k in self._recent_stt if k[0] == guild_id]:
             self._recent_stt.pop(key, None)
@@ -769,10 +860,47 @@ class VoiceListenService:
                         asyncio.create_task(
                             self._transcribe_and_store(bot, guild_id, user_id, pcm, buf)
                         )
+                if now - self._health_tick >= VOICE_HEALTH_CHECK_EVERY:
+                    self._health_tick = now
+                    await self._check_voice_health(bot, now)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("Voice silence watchdog failed")
+
+    async def _check_voice_health(self, bot: ErundaBot, now: float) -> None:
+        for guild_id in list(self._clients):
+            if not self.is_listening(guild_id):
+                continue
+            if guild_id in self._recovering:
+                continue
+            guild = bot.get_guild(guild_id)
+            channel = self.listening_channel(guild_id)
+            if guild is None or not isinstance(channel, discord.VoiceChannel):
+                continue
+            humans = [
+                m
+                for m in channel.members
+                if not getattr(m, "bot", False)
+            ]
+            if not humans:
+                continue
+            last_pcm = self._last_pcm_at.get(guild_id, 0.0)
+            unknown = self._unknown_speaker_packets.get(guild_id, 0)
+            stale = last_pcm > 0 and (now - last_pcm) >= VOICE_STALE_PCM_SECONDS
+            # Someone is in VC, packets arrive unmapped, and no good PCM for a while.
+            if stale and unknown >= 50:
+                self._schedule_recover(
+                    guild_id,
+                    reason=f"stale_pcm={now - last_pcm:.0f}s unknown={unknown}",
+                )
+                continue
+            # Never got PCM after join but unknowns pile up.
+            if last_pcm <= 0 and unknown >= VOICE_RECOVER_UNKNOWN_THRESHOLD:
+                self._schedule_recover(
+                    guild_id,
+                    reason=f"no_pcm unknown={unknown}",
+                )
 
     async def _transcribe_and_store(
         self,
