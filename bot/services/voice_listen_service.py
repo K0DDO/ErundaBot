@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import discord
-from discord.opus import Decoder, OpusError
+from discord.opus import OpusError
 
 from bot.database.database import Database
 from bot.services.ai_service import OpenRouterCreditsExhausted
@@ -57,8 +57,13 @@ SIXSEVEN_RE = re.compile(
     r"шесть\s*-?\s*семь"
     r")"
 )
+# Whisper noise / music hallucinations on bad audio.
+JUNK_TRANSCRIPT_RE = re.compile(
+    r"(?is)^(?:[\s\-–—*.,…·•]+|\*[^*]{0,40}\*|♪+|\[.*?\]|\(.*?\))$"
+)
 SOUNDBOARD_TRIGGER_NAME = "уц"
 SOUNDBOARD_COOLDOWN_SECONDS = 4.0
+_VOICE_RECV_PATCHED = False
 
 
 def count_swears(text: str) -> int:
@@ -69,6 +74,16 @@ def mentions_sixseven(text: str) -> bool:
     return bool(SIXSEVEN_RE.search(text or ""))
 
 
+def is_useful_transcript(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if len(cleaned) < 2:
+        return False
+    if JUNK_TRANSCRIPT_RE.match(cleaned):
+        return False
+    letters = sum(1 for ch in cleaned if ch.isalpha())
+    return letters >= 2
+
+
 def pcm_to_wav_bytes(pcm: bytes) -> bytes:
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wav:
@@ -77,6 +92,48 @@ def pcm_to_wav_bytes(pcm: bytes) -> bytes:
         wav.setframerate(PCM_RATE)
         wav.writeframes(pcm)
     return buf.getvalue()
+
+
+def _patch_voice_recv_router() -> None:
+    """Keep listening when a single opus packet is corrupt.
+
+    discord-ext-voice-recv's PacketRouter.run() always stop_listening() on any
+    exception. Without this patch one bad frame kills the whole session.
+    """
+    global _VOICE_RECV_PATCHED
+    if _VOICE_RECV_PATCHED:
+        return
+    from discord.ext.voice_recv import router as vr_router
+
+    def _do_run(self) -> None:  # type: ignore[no-untyped-def]
+        while not self._end_thread.is_set():
+            self.waiter.wait()
+            with self._lock:
+                for decoder in list(self.waiter.items):
+                    try:
+                        data = decoder.pop_data()
+                    except OpusError:
+                        try:
+                            decoder.reset()
+                        except Exception:
+                            pass
+                        continue
+                    except Exception:
+                        log.exception("voice_recv decoder.pop_data failed")
+                        try:
+                            decoder.reset()
+                        except Exception:
+                            pass
+                        continue
+                    if data is not None:
+                        try:
+                            self.sink.write(data.source, data)
+                        except Exception:
+                            log.exception("voice_recv sink.write failed")
+
+    vr_router.PacketRouter._do_run = _do_run  # type: ignore[method-assign]
+    _VOICE_RECV_PATCHED = True
+    log.info("Patched voice_recv PacketRouter to survive OpusError")
 
 
 class _UserBuffer:
@@ -101,11 +158,8 @@ class VoiceListenService:
         self._credits_shutdown = False
         self._sound_cache: dict[int, discord.SoundboardSound | None] = {}
         self._sound_cooldown_until: dict[int, float] = {}
-        # Decode opus ourselves: voice_recv PacketRouter stops listening on any OpusError.
-        self._decoders: dict[tuple[int, int], Decoder] = {}
         self._announce_channels: dict[int, int] = {}
         self._pcm_packets: dict[int, int] = defaultdict(int)
-        self._decode_failures: dict[int, int] = defaultdict(int)
         self._unknown_speaker_packets: dict[int, int] = defaultdict(int)
 
     def is_listening(self, guild_id: int) -> bool:
@@ -150,6 +204,8 @@ class VoiceListenService:
                 "Пакет discord-ext-voice-recv не установлен на сервере"
             ) from exc
 
+        _patch_voice_recv_router()
+
         guild = channel.guild
         async with self._lock:
             existing = guild.voice_client
@@ -174,9 +230,7 @@ class VoiceListenService:
             )
             self._clients[guild.id] = vc
             self._buffers[guild.id] = {}
-            self._clear_decoders(guild.id)
             self._pcm_packets[guild.id] = 0
-            self._decode_failures[guild.id] = 0
             self._unknown_speaker_packets[guild.id] = 0
             if announce_channel is not None and getattr(announce_channel, "id", None):
                 self._announce_channels[guild.id] = int(announce_channel.id)
@@ -192,20 +246,8 @@ class VoiceListenService:
                             self._unknown_speaker_packets[guild.id],
                         )
                     return
-                # decode=False → raw opus; we decode with OpusError isolation so one
-                # bad packet cannot kill PacketRouter (it always stop_listening()).
-                opus = getattr(data, "opus", None)
-                if not opus:
-                    return
-                pcm = self._decode_opus(guild.id, user_id, opus)
+                pcm = getattr(data, "pcm", None)
                 if not pcm:
-                    self._decode_failures[guild.id] += 1
-                    if self._decode_failures[guild.id] in (1, 50, 200):
-                        log.warning(
-                            "Opus decode failures in guild %s (n=%s)",
-                            guild.id,
-                            self._decode_failures[guild.id],
-                        )
                     return
                 self._pcm_packets[guild.id] += 1
                 if self._pcm_packets[guild.id] == 1:
@@ -218,7 +260,8 @@ class VoiceListenService:
                     bytes(pcm),
                 )
 
-            vc.listen(voice_recv.BasicSink(on_voice, decode=False))
+            # Library decode (with FEC). Router is patched to survive OpusError.
+            vc.listen(voice_recv.BasicSink(on_voice, decode=True))
             await self.start(bot)
             tip = await self._soundboard_status(guild, channel)
             where = ""
@@ -245,10 +288,8 @@ class VoiceListenService:
                 pcm = bytes(buf.pcm)
                 buf.pcm.clear()
                 await self._transcribe_and_store(bot, guild_id, user_id, pcm, buf)
-        self._clear_decoders(guild_id)
         self._announce_channels.pop(guild_id, None)
         self._pcm_packets.pop(guild_id, None)
-        self._decode_failures.pop(guild_id, None)
         self._unknown_speaker_packets.pop(guild_id, None)
         if vc is not None and vc.is_connected():
             try:
@@ -287,26 +328,6 @@ class VoiceListenService:
         if len(humans) == 1:
             return int(humans[0].id)
         return None
-
-    def _clear_decoders(self, guild_id: int) -> None:
-        for key in [k for k in self._decoders if k[0] == guild_id]:
-            self._decoders.pop(key, None)
-
-    def _decode_opus(self, guild_id: int, user_id: int, opus: bytes) -> bytes | None:
-        key = (guild_id, user_id)
-        decoder = self._decoders.get(key)
-        if decoder is None:
-            decoder = Decoder()
-            self._decoders[key] = decoder
-        try:
-            return decoder.decode(opus, fec=False)
-        except OpusError:
-            # Drop frame and reset state; keep listening.
-            try:
-                self._decoders[key] = Decoder()
-            except Exception:
-                self._decoders.pop(key, None)
-            return None
 
     async def leave_all_credits_exhausted(self) -> None:
         """Stop listening everywhere after OpenRouter 402."""
@@ -377,12 +398,13 @@ class VoiceListenService:
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
-            if len(text) < 2:
+            if not is_useful_transcript(text):
                 log.info(
-                    "STT empty user=%s guild=%s audio=%.1fs",
+                    "STT skip user=%s guild=%s audio=%.1fs text=%r",
                     user_id,
                     guild_id,
                     seconds,
+                    text[:80],
                 )
                 return
             log.info(
@@ -430,10 +452,13 @@ class VoiceListenService:
         channel_id = self._announce_channels.get(guild_id)
         if channel_id is None:
             return
+        config = await self.db.get_guild(guild_id)
+        if config is not None and not config.voice_chat_transcripts:
+            return
         guild = bot.get_guild(guild_id)
         if guild is None:
             return
-        channel = guild.get_channel(channel_id)
+        channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
         if channel is None or not hasattr(channel, "send"):
             return
         member = guild.get_member(user_id)
@@ -444,7 +469,11 @@ class VoiceListenService:
         try:
             await channel.send(
                 f"{who} говорит: {body}",
-                allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=user_id)]),
+                allowed_mentions=discord.AllowedMentions(
+                    users=[discord.Object(id=user_id)],
+                    roles=False,
+                    everyone=False,
+                ),
             )
         except discord.Forbidden:
             log.warning(

@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS guilds (
     fest_presence_check INTEGER NOT NULL DEFAULT 1,
     tarot_reset_minutes INTEGER NOT NULL DEFAULT 10,
     tarot_show_meaning INTEGER NOT NULL DEFAULT 1,
+    voice_chat_transcripts INTEGER NOT NULL DEFAULT 1,
     tgk_board_message_id INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -933,6 +934,12 @@ class Database:
                 """
             )
             await self._db.execute("PRAGMA user_version = 28")
+        if version < 29:
+            await self._db.execute(
+                "ALTER TABLE guilds ADD COLUMN voice_chat_transcripts "
+                "INTEGER NOT NULL DEFAULT 1"
+            )
+            await self._db.execute("PRAGMA user_version = 29")
 
     async def close(self) -> None:
         if self._db is not None:

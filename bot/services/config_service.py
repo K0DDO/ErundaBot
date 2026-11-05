@@ -38,6 +38,7 @@ class ConfigService:
             "personal_roles_enabled",
             "fest_presence_check",
             "tarot_show_meaning",
+            "voice_chat_transcripts",
         }
         if field not in allowed:
             raise ValueError(f"Invalid flag field: {field}")

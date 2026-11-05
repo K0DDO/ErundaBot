@@ -33,6 +33,7 @@ class GuildConfig:
     fest_presence_check: bool = True
     tarot_reset_minutes: int = 10
     tarot_show_meaning: bool = True
+    voice_chat_transcripts: bool = True
     tgk_board_message_id: int | None = None
     tgk_board_message_ids: list[int] | None = None
     tgk_list_role_id: int | None = None
@@ -97,6 +98,9 @@ class GuildConfig:
             else 10,
             tarot_show_meaning=bool(row["tarot_show_meaning"])
             if "tarot_show_meaning" in row.keys()
+            else True,
+            voice_chat_transcripts=bool(row["voice_chat_transcripts"])
+            if "voice_chat_transcripts" in row.keys()
             else True,
             tgk_board_message_id=row["tgk_board_message_id"]
             if "tgk_board_message_id" in row.keys()
@@ -406,6 +410,7 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "fest_presence_check",
         "tarot_reset_minutes",
         "tarot_show_meaning",
+        "voice_chat_transcripts",
         "tgk_board_message_id",
         "tgk_board_message_ids",
         "tgk_list_role_id",

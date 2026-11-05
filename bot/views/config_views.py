@@ -30,6 +30,7 @@ FLAG_OPTIONS = (
     ("personal_roles_enabled", "Персональные роли"),
     ("fest_presence_check", "Проверка присутствия на сеансе"),
     ("tarot_show_meaning", "Значение карты таро"),
+    ("voice_chat_transcripts", "Войс → текст в чат"),
 )
 
 ROLE_OPTIONS = (
@@ -72,7 +73,8 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
             f"Статистика: {bool_label(config.statistics_enabled)}\n"
             f"Персональные роли: {bool_label(config.personal_roles_enabled)}\n"
             f"Проверка присутствия на сеансе: {bool_label(config.fest_presence_check)}\n"
-            f"Значение карты таро: {bool_label(config.tarot_show_meaning)}"
+            f"Значение карты таро: {bool_label(config.tarot_show_meaning)}\n"
+            f"Войс → текст в чат: {bool_label(config.voice_chat_transcripts)}"
         ),
         inline=False,
     )

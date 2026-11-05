@@ -390,7 +390,9 @@ class AdminCog(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True)
-        announce = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
+        announce = None
+        if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
+            announce = interaction.channel
         try:
             text = await self.bot.voice_listen_service.join(
                 self.bot,
@@ -407,10 +409,19 @@ class AdminCog(commands.Cog):
                 ephemeral=True,
             )
             return
+        chat_note = (
+            "Реплики в этот чат можно выключить в `/админ config` → флаги → «Войс → текст в чат»."
+            if announce is not None and config.voice_chat_transcripts
+            else (
+                "Постинг в чат выключен флагом «Войс → текст в чат»."
+                if announce is not None
+                else "Реплики только в «дело» (сюда писать некуда)."
+            )
+        )
         await interaction.followup.send(
             embed=success_embed(
                 "Слушаю войс",
-                f"{text}\nРеплики пишу в этот чат и коплю в «дело» (~04:10).",
+                f"{text}\n{chat_note}\nКопятся в «дело» (~04:10).",
             ),
             ephemeral=True,
         )

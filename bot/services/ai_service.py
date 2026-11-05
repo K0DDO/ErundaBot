@@ -261,10 +261,11 @@ class AIService:
             return None
 
     def _request_openrouter_transcribe(self, wav_bytes: bytes) -> str:
-        # Do not force language=ru: English meme phrases ("six seven") get mangled.
+        # Prefer RU for the server; sixseven matcher also covers RU/EN variants.
         payload = json.dumps(
             {
                 "model": self.stt_model,
+                "language": "ru",
                 "response_format": "json",
                 "input_audio": {
                     "data": base64.b64encode(wav_bytes).decode("ascii"),
