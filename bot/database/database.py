@@ -30,6 +30,8 @@ from .models import (
     SantaEntry,
     SantaEvent,
     TgChannel,
+    VoiceDossierEntry,
+    VoiceSnippet,
 )
 
 log = logging.getLogger(__name__)
@@ -879,6 +881,58 @@ class Database:
                 """
             )
             await self._db.execute("PRAGMA user_version = 27")
+        if version < 28:
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS voice_snippets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    processed INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_voice_snippets_pending
+                ON voice_snippets(guild_id, user_id, processed)
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS voice_dossier (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    fact TEXT NOT NULL,
+                    source_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_voice_dossier_user
+                ON voice_dossier(guild_id, user_id, created_at)
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS voice_swear_stats (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    day TEXT NOT NULL,
+                    count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id, day),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute("PRAGMA user_version = 28")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2735,3 +2789,151 @@ class Database:
         )
         rows = await cursor.fetchall()
         return [SantaAssignment.from_row(row) for row in rows]
+
+    async def add_voice_snippet(self, guild_id: int, user_id: int, text: str) -> None:
+        await self.connection.execute(
+            """
+            INSERT INTO voice_snippets (guild_id, user_id, text)
+            VALUES (?, ?, ?)
+            """,
+            (guild_id, user_id, text),
+        )
+        await self.connection.commit()
+
+    async def list_pending_voice_snippet_users(
+        self,
+        guild_id: int,
+    ) -> list[int]:
+        cursor = await self.connection.execute(
+            """
+            SELECT DISTINCT user_id FROM voice_snippets
+            WHERE guild_id = ? AND processed = 0
+            """,
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    async def list_pending_voice_snippets(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        limit: int = 80,
+    ) -> list[VoiceSnippet]:
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM voice_snippets
+            WHERE guild_id = ? AND user_id = ? AND processed = 0
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [VoiceSnippet.from_row(row) for row in rows]
+
+    async def mark_voice_snippets_processed(self, snippet_ids: list[int]) -> None:
+        if not snippet_ids:
+            return
+        placeholders = ",".join("?" for _ in snippet_ids)
+        await self.connection.execute(
+            f"UPDATE voice_snippets SET processed = 1 WHERE id IN ({placeholders})",
+            snippet_ids,
+        )
+        await self.connection.commit()
+
+    async def add_voice_dossier_entries(
+        self,
+        guild_id: int,
+        user_id: int,
+        facts: list[str],
+        source_date: str,
+    ) -> None:
+        if not facts:
+            return
+        await self.connection.executemany(
+            """
+            INSERT INTO voice_dossier (guild_id, user_id, fact, source_date)
+            VALUES (?, ?, ?, ?)
+            """,
+            [(guild_id, user_id, fact, source_date) for fact in facts],
+        )
+        await self.connection.commit()
+
+    async def list_voice_dossier(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        limit: int = 8,
+    ) -> list[VoiceDossierEntry]:
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM voice_dossier
+            WHERE guild_id = ? AND user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (guild_id, user_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [VoiceDossierEntry.from_row(row) for row in rows]
+
+    async def increment_voice_swears(
+        self,
+        guild_id: int,
+        user_id: int,
+        day: str,
+        amount: int,
+    ) -> None:
+        if amount <= 0:
+            return
+        await self.connection.execute(
+            """
+            INSERT INTO voice_swear_stats (guild_id, user_id, day, count)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, day) DO UPDATE SET
+                count = count + excluded.count
+            """,
+            (guild_id, user_id, day, amount),
+        )
+        await self.connection.commit()
+
+    async def sum_voice_swears(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        since_day: str | None = None,
+    ) -> int:
+        if since_day:
+            cursor = await self.connection.execute(
+                """
+                SELECT COALESCE(SUM(count), 0) AS c FROM voice_swear_stats
+                WHERE guild_id = ? AND user_id = ? AND day >= ?
+                """,
+                (guild_id, user_id, since_day),
+            )
+        else:
+            cursor = await self.connection.execute(
+                """
+                SELECT COALESCE(SUM(count), 0) AS c FROM voice_swear_stats
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            )
+        row = await cursor.fetchone()
+        return int(row["c"]) if row else 0
+
+    async def cleanup_old_voice_snippets(self, *, keep_days: int = 14) -> int:
+        cursor = await self.connection.execute(
+            """
+            DELETE FROM voice_snippets
+            WHERE processed = 1
+              AND created_at < datetime('now', ?)
+            """,
+            (f"-{keep_days} days",),
+        )
+        await self.connection.commit()
+        return cursor.rowcount

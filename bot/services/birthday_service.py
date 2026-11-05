@@ -477,6 +477,12 @@ class BirthdayService:
         voice = await self.db.sum_voice_seconds(guild.id, user_id, None, None, now_iso)
         if isinstance(voice, int) and voice >= 50 * 3600:
             facts.append("много времени проводит с друзьями в войсе")
+        dossier = await self.db.list_voice_dossier(guild.id, user_id, limit=3)
+        for entry in dossier:
+            fact = entry.fact.strip()
+            if fact:
+                facts.append(fact)
+                allowed.append(fact)
         return facts, allowed
 
     async def announce_embed(

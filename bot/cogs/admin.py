@@ -360,6 +360,107 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
+    @admin.command(name="voice_listen", description="Бот заходит в твой войс и слушает речь")
+    @app_commands.guild_only()
+    async def admin_voice_listen(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if not can_edit_config(interaction.user, config.config_role_id):
+            await interaction.response.send_message(
+                embed=error_embed(config_denied_reason(config.config_role_id)),
+                ephemeral=True,
+            )
+            return
+        channel = interaction.user.voice.channel if interaction.user.voice else None
+        if channel is None:
+            await interaction.response.send_message(
+                embed=error_embed("Сначала зайди в голосовой канал"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            text = await self.bot.voice_listen_service.join(self.bot, channel)
+        except ValueError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        except Exception:
+            log.exception("voice_listen join failed")
+            await interaction.followup.send(
+                embed=error_embed("Не получилось подключиться к войсу"),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=success_embed(
+                "Слушаю войс",
+                f"{text}\nРеплики копятся; раз в сутки (~04:10) уходят в «дело» участника.",
+            ),
+            ephemeral=True,
+        )
+
+    @admin.command(name="voice_leave", description="Бот выходит из войса и перестаёт слушать")
+    @app_commands.guild_only()
+    async def admin_voice_leave(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if not can_edit_config(interaction.user, config.config_role_id):
+            await interaction.response.send_message(
+                embed=error_embed(config_denied_reason(config.config_role_id)),
+                ephemeral=True,
+            )
+            return
+        text = await self.bot.voice_listen_service.leave(interaction.guild.id)
+        await interaction.response.send_message(
+            embed=success_embed(text),
+            ephemeral=True,
+        )
+
+    @admin.command(name="voice_dossier", description="Показать «дело» участника из войса")
+    @app_commands.describe(user="Участник")
+    @app_commands.guild_only()
+    async def admin_voice_dossier(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if not can_edit_config(interaction.user, config.config_role_id):
+            await interaction.response.send_message(
+                embed=error_embed(config_denied_reason(config.config_role_id)),
+                ephemeral=True,
+            )
+            return
+        entries = await self.bot.db.list_voice_dossier(
+            interaction.guild.id,
+            user.id,
+            limit=12,
+        )
+        swears = await self.bot.db.sum_voice_swears(interaction.guild.id, user.id)
+        if not entries and not swears:
+            await interaction.response.send_message(
+                embed=base_embed(
+                    title=f"Дело — {user.display_name}",
+                    description="Пока пусто. Включи `/админ voice_listen` и подожди суточную обработку.",
+                ),
+                ephemeral=True,
+            )
+            return
+        lines = [f"• {item.fact} _(до {item.source_date})_" for item in entries]
+        if swears:
+            lines.append(f"Маты (всего зафиксировано): **{swears}**")
+        await interaction.response.send_message(
+            embed=base_embed(
+                title=f"Дело — {user.display_name}",
+                description="\n".join(lines) if lines else "Пусто",
+            ),
+            ephemeral=True,
+        )
+
     @admin.command(name="santa_pairs", description="Кто кому выпал (только роль Кино)")
     @app_commands.guild_only()
     async def admin_santa_pairs(self, interaction: discord.Interaction) -> None:

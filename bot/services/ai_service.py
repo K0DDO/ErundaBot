@@ -16,11 +16,22 @@ from bot.database.models import Birthday
 log = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+DEFAULT_GROQ_WHISPER = "whisper-large-v3-turbo"
 DEPRECATED_GROQ_MODELS = {"llama-3.1-8b-instant"}
 USER_AGENT = "ErundaBot/1.0"
 GROQ_TIMEOUT_SECONDS = 120
+GROQ_TRANSCRIBE_TIMEOUT = 60
 FILM_TITLE_TIMEOUT_SECONDS = 20
+VOICE_DOSSIER_PROMPT = (
+    "Ты помощник Discord-бота. По репликам человека из голосового чата "
+    "выпиши до 3 коротких нейтральных фактов для «дела» (привычки, шутки, темы). "
+    "Без матов, оскорблений, NSFW, политики и личных тайн. "
+    "Каждый факт — одно короткое предложение на русском. "
+    "Если полезного нет — верни пустой JSON-массив []. "
+    "Ответ ТОЛЬКО JSON: [\"факт1\", \"факт2\"]"
+)
 LATIN_WORD_RE = re.compile(r"\b[A-Za-z]{2,}\b")
 SIGN_OFF_RE = re.compile(
     r"(?im)^\s*(sincerely|с уважением|с любовью|your friends|друзья сервера).*$"
@@ -68,6 +79,9 @@ class AIService:
         self.api_key = os.getenv("GROQ_API_KEY", "").strip()
         raw_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
         self.model = DEFAULT_GROQ_MODEL if raw_model in DEPRECATED_GROQ_MODELS else raw_model
+        self.whisper_model = (
+            os.getenv("GROQ_WHISPER_MODEL", DEFAULT_GROQ_WHISPER).strip() or DEFAULT_GROQ_WHISPER
+        )
 
     @property
     def enabled(self) -> bool:
@@ -206,6 +220,115 @@ class AIService:
         cyrillic = [item for item in ordered if re.search(r"[а-яё]", item, re.IGNORECASE)]
         latin = [item for item in ordered if item not in cyrillic]
         return [*cyrillic, *latin]
+
+    async def transcribe_wav(self, wav_bytes: bytes) -> str | None:
+        if not self.enabled or not wav_bytes:
+            return None
+        try:
+            return await asyncio.to_thread(self._request_groq_transcribe, wav_bytes)
+        except Exception:
+            log.exception("Groq transcription failed")
+            return None
+
+    def _request_groq_transcribe(self, wav_bytes: bytes) -> str:
+        boundary = f"----Erunda{os.urandom(8).hex()}"
+        chunks: list[bytes] = []
+
+        def add_field(name: str, value: str) -> None:
+            chunks.append(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    f"{value}\r\n"
+                ).encode("utf-8")
+            )
+
+        add_field("model", self.whisper_model)
+        add_field("language", "ru")
+        add_field("response_format", "json")
+        add_field(
+            "prompt",
+            "Разговорный русский Discord-войс, возможны сленг и междометия.",
+        )
+        chunks.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="file"; filename="chunk.wav"\r\n'
+                f"Content-Type: audio/wav\r\n\r\n"
+            ).encode("utf-8")
+        )
+        chunks.append(wav_bytes)
+        chunks.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(chunks)
+        request = urllib.request.Request(
+            GROQ_TRANSCRIBE_URL,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "User-Agent": USER_AGENT,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=GROQ_TRANSCRIBE_TIMEOUT) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        text = data.get("text") if isinstance(data, dict) else None
+        return str(text or "").strip()
+
+    async def summarize_voice_dossier(
+        self,
+        *,
+        display_name: str,
+        lines: str,
+    ) -> list[str]:
+        if not self.enabled or not lines.strip():
+            return []
+        body: dict = {
+            "model": self.model,
+            "temperature": 0.3,
+            "messages": [
+                {"role": "system", "content": VOICE_DOSSIER_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Имя: {display_name}\nРеплики:\n{lines[:6000]}",
+                },
+            ],
+        }
+        if self._is_reasoning_model:
+            body["max_completion_tokens"] = 1024
+            body["reasoning_effort"] = "low"
+        else:
+            body["max_tokens"] = 400
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        try:
+            raw = await asyncio.to_thread(self._request_groq, payload, 60)
+        except Exception:
+            log.exception("Voice dossier summarize failed")
+            return []
+        return self._parse_fact_list(raw)
+
+    @staticmethod
+    def _parse_fact_list(raw: str) -> list[str]:
+        text = (raw or "").strip()
+        if not text:
+            return []
+        try:
+            start = text.find("[")
+            end = text.rfind("]")
+            if start >= 0 and end > start:
+                text = text[start : end + 1]
+            data = json.loads(text)
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        facts: list[str] = []
+        for item in data:
+            if isinstance(item, str):
+                cleaned = " ".join(item.split()).strip()
+                if cleaned:
+                    facts.append(cleaned[:240])
+        return facts[:5]
 
     def _request_groq(self, payload: bytes, timeout: int = GROQ_TIMEOUT_SECONDS) -> str:
         request = urllib.request.Request(

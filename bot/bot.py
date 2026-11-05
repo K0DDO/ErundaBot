@@ -23,6 +23,7 @@ from bot.services.statistics_service import StatisticsService
 from bot.services.santa_service import SantaService
 from bot.services.tarot_service import TarotService
 from bot.services.tgk_service import TgkService
+from bot.services.voice_listen_service import VoiceListenService
 from bot.tasks.background import BackgroundTasks
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ class ErundaBot(commands.Bot):
         self.santa_service = SantaService(self.db)
         self.quote_service = QuoteService(self.db)
         self.role_service = RoleService(self.db)
+        self.voice_listen_service = VoiceListenService(self.db, self.ai_service)
         self.background = BackgroundTasks(self)
         self._synced = False
 
@@ -106,6 +108,10 @@ class ErundaBot(commands.Bot):
 
     async def close(self) -> None:
         await self.background.stop()
+        try:
+            await self.voice_listen_service.stop_all()
+        except Exception:
+            log.exception("Failed to stop voice listen on shutdown")
         await self.db.close()
         await super().close()
 

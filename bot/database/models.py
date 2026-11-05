@@ -468,3 +468,45 @@ class SantaAssignment:
             giver_id=row["giver_id"],
             receiver_id=row["receiver_id"],
         )
+
+
+@dataclass(slots=True)
+class VoiceSnippet:
+    id: int
+    guild_id: int
+    user_id: int
+    text: str
+    created_at: str
+    processed: bool = False
+
+    @classmethod
+    def from_row(cls, row: Any) -> VoiceSnippet:
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            user_id=row["user_id"],
+            text=row["text"],
+            created_at=row["created_at"],
+            processed=bool(row["processed"]),
+        )
+
+
+@dataclass(slots=True)
+class VoiceDossierEntry:
+    id: int
+    guild_id: int
+    user_id: int
+    fact: str
+    source_date: str
+    created_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> VoiceDossierEntry:
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            user_id=row["user_id"],
+            fact=row["fact"],
+            source_date=row["source_date"],
+            created_at=row["created_at"] if "created_at" in row.keys() else None,
+        )

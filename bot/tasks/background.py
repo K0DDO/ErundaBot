@@ -47,6 +47,9 @@ class BackgroundTasks:
             self.birthday_rgb_loop.start()
         if not self.tgk_meta_loop.is_running():
             self.tgk_meta_loop.start()
+        if not self.voice_dossier_loop.is_running():
+            self.voice_dossier_loop.start()
+        await self.bot.voice_listen_service.start(self.bot)
         log.info("Background tasks started")
 
     async def stop(self) -> None:
@@ -59,6 +62,7 @@ class BackgroundTasks:
             self.fest_loop,
             self.birthday_rgb_loop,
             self.tgk_meta_loop,
+            self.voice_dossier_loop,
         ):
             if loop.is_running():
                 loop.cancel()
@@ -309,4 +313,13 @@ class BackgroundTasks:
 
     @tgk_meta_loop.before_loop
     async def before_tgk_meta_loop(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(minutes=1)
+    async def voice_dossier_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        await self.bot.voice_listen_service.process_daily_dossiers(self.bot)
+
+    @voice_dossier_loop.before_loop
+    async def before_voice_dossier_loop(self) -> None:
         await self.bot.wait_until_ready()
