@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -16,13 +17,14 @@ from bot.database.models import Birthday
 log = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+OPENROUTER_TRANSCRIBE_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
-DEFAULT_GROQ_WHISPER = "whisper-large-v3-turbo"
+# Cheap multilingual STT on OpenRouter (RU ok). Override via OPENROUTER_STT_MODEL.
+DEFAULT_OPENROUTER_STT = "openai/whisper-large-v3-turbo"
 DEPRECATED_GROQ_MODELS = {"llama-3.1-8b-instant"}
 USER_AGENT = "ErundaBot/1.0"
 GROQ_TIMEOUT_SECONDS = 120
-GROQ_TRANSCRIBE_TIMEOUT = 60
+STT_TIMEOUT_SECONDS = 60
 FILM_TITLE_TIMEOUT_SECONDS = 20
 VOICE_DOSSIER_PROMPT = (
     "Ты помощник Discord-бота. По репликам человека из голосового чата "
@@ -77,15 +79,21 @@ SYSTEM_PROMPT = (
 class AIService:
     def __init__(self) -> None:
         self.api_key = os.getenv("GROQ_API_KEY", "").strip()
+        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
         raw_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
         self.model = DEFAULT_GROQ_MODEL if raw_model in DEPRECATED_GROQ_MODELS else raw_model
-        self.whisper_model = (
-            os.getenv("GROQ_WHISPER_MODEL", DEFAULT_GROQ_WHISPER).strip() or DEFAULT_GROQ_WHISPER
+        self.stt_model = (
+            os.getenv("OPENROUTER_STT_MODEL", DEFAULT_OPENROUTER_STT).strip()
+            or DEFAULT_OPENROUTER_STT
         )
 
     @property
     def enabled(self) -> bool:
         return bool(self.api_key)
+
+    @property
+    def transcription_enabled(self) -> bool:
+        return bool(self.openrouter_api_key)
 
     @property
     def _is_reasoning_model(self) -> bool:
@@ -222,56 +230,46 @@ class AIService:
         return [*cyrillic, *latin]
 
     async def transcribe_wav(self, wav_bytes: bytes) -> str | None:
-        if not self.enabled or not wav_bytes:
+        if not self.transcription_enabled or not wav_bytes:
             return None
         try:
-            return await asyncio.to_thread(self._request_groq_transcribe, wav_bytes)
+            return await asyncio.to_thread(self._request_openrouter_transcribe, wav_bytes)
         except Exception:
-            log.exception("Groq transcription failed")
+            log.exception("OpenRouter transcription failed")
             return None
 
-    def _request_groq_transcribe(self, wav_bytes: bytes) -> str:
-        boundary = f"----Erunda{os.urandom(8).hex()}"
-        chunks: list[bytes] = []
-
-        def add_field(name: str, value: str) -> None:
-            chunks.append(
-                (
-                    f"--{boundary}\r\n"
-                    f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-                    f"{value}\r\n"
-                ).encode("utf-8")
-            )
-
-        add_field("model", self.whisper_model)
-        add_field("language", "ru")
-        add_field("response_format", "json")
-        add_field(
-            "prompt",
-            "Разговорный русский Discord-войс, возможны сленг и междометия.",
-        )
-        chunks.append(
-            (
-                f"--{boundary}\r\n"
-                f'Content-Disposition: form-data; name="file"; filename="chunk.wav"\r\n'
-                f"Content-Type: audio/wav\r\n\r\n"
-            ).encode("utf-8")
-        )
-        chunks.append(wav_bytes)
-        chunks.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
-        body = b"".join(chunks)
+    def _request_openrouter_transcribe(self, wav_bytes: bytes) -> str:
+        payload = json.dumps(
+            {
+                "model": self.stt_model,
+                "language": "ru",
+                "response_format": "json",
+                "input_audio": {
+                    "data": base64.b64encode(wav_bytes).decode("ascii"),
+                    "format": "wav",
+                },
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
         request = urllib.request.Request(
-            GROQ_TRANSCRIBE_URL,
-            data=body,
+            OPENROUTER_TRANSCRIBE_URL,
+            data=payload,
             headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Authorization": f"Bearer {self.openrouter_api_key}",
+                "Content-Type": "application/json; charset=utf-8",
                 "User-Agent": USER_AGENT,
+                "HTTP-Referer": "https://github.com/K0DDO/ErundaBot",
+                "X-Title": "Erunda Discord Bot",
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=GROQ_TRANSCRIBE_TIMEOUT) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=STT_TIMEOUT_SECONDS) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")[:500]
+            log.error("OpenRouter STT HTTP %s: %s", exc.code, body)
+            raise
         text = data.get("text") if isinstance(data, dict) else None
         return str(text or "").strip()
 

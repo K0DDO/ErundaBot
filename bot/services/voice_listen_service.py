@@ -100,8 +100,10 @@ class VoiceListenService:
         bot: ErundaBot,
         channel: discord.VoiceChannel | discord.StageChannel,
     ) -> str:
-        if not self.ai.enabled:
-            raise ValueError("Нужен GROQ_API_KEY для распознавания речи")
+        if not self.ai.transcription_enabled:
+            raise ValueError(
+                "Нужен OPENROUTER_API_KEY в .env.production для распознавания речи"
+            )
         try:
             from discord.ext import voice_recv
         except ImportError as exc:
