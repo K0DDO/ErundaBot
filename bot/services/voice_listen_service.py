@@ -103,6 +103,10 @@ class VoiceListenService:
         self._sound_cooldown_until: dict[int, float] = {}
         # Decode opus ourselves: voice_recv PacketRouter stops listening on any OpusError.
         self._decoders: dict[tuple[int, int], Decoder] = {}
+        self._announce_channels: dict[int, int] = {}
+        self._pcm_packets: dict[int, int] = defaultdict(int)
+        self._decode_failures: dict[int, int] = defaultdict(int)
+        self._unknown_speaker_packets: dict[int, int] = defaultdict(int)
 
     def is_listening(self, guild_id: int) -> bool:
         vc = self._clients.get(guild_id)
@@ -130,6 +134,8 @@ class VoiceListenService:
         self,
         bot: ErundaBot,
         channel: discord.VoiceChannel | discord.StageChannel,
+        *,
+        announce_channel: discord.abc.Messageable | None = None,
     ) -> str:
         if self.ai.stt_credits_exhausted:
             raise ValueError(CREDITS_EXHAUSTED_MESSAGE)
@@ -151,6 +157,8 @@ class VoiceListenService:
                 if existing.channel and existing.channel.id == channel.id:
                     if guild.id not in self._clients:
                         self._clients[guild.id] = existing
+                    if announce_channel is not None and getattr(announce_channel, "id", None):
+                        self._announce_channels[guild.id] = int(announce_channel.id)
                     return f"Уже слушаю {channel.mention}"
                 await existing.disconnect(force=True)
 
@@ -167,30 +175,56 @@ class VoiceListenService:
             self._clients[guild.id] = vc
             self._buffers[guild.id] = {}
             self._clear_decoders(guild.id)
+            self._pcm_packets[guild.id] = 0
+            self._decode_failures[guild.id] = 0
+            self._unknown_speaker_packets[guild.id] = 0
+            if announce_channel is not None and getattr(announce_channel, "id", None):
+                self._announce_channels[guild.id] = int(announce_channel.id)
 
             def on_voice(user: discord.User | discord.Member | None, data) -> None:
-                if user is None or getattr(user, "bot", False):
+                user_id = self._resolve_speaker_id(vc, user, data)
+                if user_id is None:
+                    self._unknown_speaker_packets[guild.id] += 1
+                    if self._unknown_speaker_packets[guild.id] in (1, 50, 200):
+                        log.warning(
+                            "Voice packets without speaker map in guild %s (n=%s)",
+                            guild.id,
+                            self._unknown_speaker_packets[guild.id],
+                        )
                     return
                 # decode=False → raw opus; we decode with OpusError isolation so one
                 # bad packet cannot kill PacketRouter (it always stop_listening()).
                 opus = getattr(data, "opus", None)
                 if not opus:
                     return
-                pcm = self._decode_opus(guild.id, user.id, opus)
+                pcm = self._decode_opus(guild.id, user_id, opus)
                 if not pcm:
+                    self._decode_failures[guild.id] += 1
+                    if self._decode_failures[guild.id] in (1, 50, 200):
+                        log.warning(
+                            "Opus decode failures in guild %s (n=%s)",
+                            guild.id,
+                            self._decode_failures[guild.id],
+                        )
                     return
+                self._pcm_packets[guild.id] += 1
+                if self._pcm_packets[guild.id] == 1:
+                    log.info("First voice PCM packet in guild %s user=%s", guild.id, user_id)
                 loop = bot.loop
                 loop.call_soon_threadsafe(
                     self._append_pcm,
                     guild.id,
-                    user.id,
+                    user_id,
                     bytes(pcm),
                 )
 
             vc.listen(voice_recv.BasicSink(on_voice, decode=False))
             await self.start(bot)
             tip = await self._soundboard_status(guild, channel)
-            return f"Слушаю {channel.mention}\n{tip}"
+            where = ""
+            if guild.id in self._announce_channels:
+                where = f"\nРеплики пишу в <#{self._announce_channels[guild.id]}>"
+            return f"Слушаю {channel.mention}\n{tip}{where}"
 
     async def leave(self, guild_id: int, *, flush: bool = True) -> str:
         async with self._lock:
@@ -212,6 +246,10 @@ class VoiceListenService:
                 buf.pcm.clear()
                 await self._transcribe_and_store(bot, guild_id, user_id, pcm, buf)
         self._clear_decoders(guild_id)
+        self._announce_channels.pop(guild_id, None)
+        self._pcm_packets.pop(guild_id, None)
+        self._decode_failures.pop(guild_id, None)
+        self._unknown_speaker_packets.pop(guild_id, None)
         if vc is not None and vc.is_connected():
             try:
                 vc.stop_listening()
@@ -220,6 +258,35 @@ class VoiceListenService:
             await vc.disconnect(force=True)
             return "Вышел из войса"
         return "Бот не был в войсе"
+
+    @staticmethod
+    def _resolve_speaker_id(
+        vc: discord.VoiceProtocol,
+        user: discord.User | discord.Member | None,
+        data: object,
+    ) -> int | None:
+        if user is not None:
+            if getattr(user, "bot", False):
+                return None
+            return int(user.id)
+        packet = getattr(data, "packet", None)
+        ssrc = getattr(packet, "ssrc", None)
+        if ssrc is not None:
+            getter = getattr(vc, "_get_id_from_ssrc", None)
+            if callable(getter):
+                try:
+                    user_id = getter(ssrc)
+                except Exception:
+                    user_id = None
+                if user_id is not None:
+                    return int(user_id)
+        # Speaking-map sometimes lags; if only one human is in the channel, use them.
+        channel = getattr(vc, "channel", None)
+        members = getattr(channel, "members", None) or []
+        humans = [m for m in members if not getattr(m, "bot", False)]
+        if len(humans) == 1:
+            return int(humans[0].id)
+        return None
 
     def _clear_decoders(self, guild_id: int) -> None:
         for key in [k for k in self._decoders if k[0] == guild_id]:
@@ -306,12 +373,27 @@ class VoiceListenService:
         try:
             if self.ai.stt_credits_exhausted:
                 return
+            seconds = len(pcm) / BYTES_PER_SECOND
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
             if len(text) < 2:
+                log.info(
+                    "STT empty user=%s guild=%s audio=%.1fs",
+                    user_id,
+                    guild_id,
+                    seconds,
+                )
                 return
+            log.info(
+                "STT user=%s guild=%s audio=%.1fs text=%r",
+                user_id,
+                guild_id,
+                seconds,
+                text[:120],
+            )
             await self.db.add_voice_snippet(guild_id, user_id, text[:2000])
+            await self._announce_transcript(bot, guild_id, user_id, text)
             swears = count_swears(text)
             if swears:
                 guild = bot.get_guild(guild_id)
@@ -330,8 +412,6 @@ class VoiceListenService:
                     text[:120],
                 )
                 await self._play_sixseven_sound(bot, guild_id)
-            else:
-                log.debug("Voice snippet user=%s guild=%s: %s", user_id, guild_id, text[:80])
         except OpenRouterCreditsExhausted:
             log.warning("OpenRouter 402 — leaving voice and disabling listen")
             await self.leave_all_credits_exhausted()
@@ -339,6 +419,40 @@ class VoiceListenService:
             log.exception("Failed to transcribe voice for user %s", user_id)
         finally:
             buf.flushing = False
+
+    async def _announce_transcript(
+        self,
+        bot: ErundaBot,
+        guild_id: int,
+        user_id: int,
+        text: str,
+    ) -> None:
+        channel_id = self._announce_channels.get(guild_id)
+        if channel_id is None:
+            return
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            return
+        channel = guild.get_channel(channel_id)
+        if channel is None or not hasattr(channel, "send"):
+            return
+        member = guild.get_member(user_id)
+        who = member.mention if member is not None else f"<@{user_id}>"
+        body = text.strip()
+        if len(body) > 1800:
+            body = body[:1800] + "…"
+        try:
+            await channel.send(
+                f"{who} говорит: {body}",
+                allowed_mentions=discord.AllowedMentions(users=[discord.Object(id=user_id)]),
+            )
+        except discord.Forbidden:
+            log.warning(
+                "Cannot post voice transcript in channel %s (missing Send Messages)",
+                channel_id,
+            )
+        except discord.HTTPException:
+            log.exception("Failed to post voice transcript in channel %s", channel_id)
 
     @staticmethod
     def _sound_name_matches(name: str | None) -> bool:

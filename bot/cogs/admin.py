@@ -390,8 +390,13 @@ class AdminCog(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True)
+        announce = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
         try:
-            text = await self.bot.voice_listen_service.join(self.bot, channel)
+            text = await self.bot.voice_listen_service.join(
+                self.bot,
+                channel,
+                announce_channel=announce,
+            )
         except ValueError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
             return
@@ -405,7 +410,7 @@ class AdminCog(commands.Cog):
         await interaction.followup.send(
             embed=success_embed(
                 "Слушаю войс",
-                f"{text}\nРеплики копятся; раз в сутки (~04:10) уходят в «дело» участника.",
+                f"{text}\nРеплики пишу в этот чат и коплю в «дело» (~04:10).",
             ),
             ephemeral=True,
         )
