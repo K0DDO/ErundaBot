@@ -43,10 +43,19 @@ SWEAR_RE = re.compile(
     r"(бл[яа][дт]|бля|сука|хуй|хуя|хуе|пизд|ёб|еб[аоуы]|еба|ебл|муд[ае]|гандон|залуп|пидор|пидр)"
     r"[а-яёa-z]*"
 )
+SIXSEVEN_RE = re.compile(
+    r"(?i)(?:six\s*-?\s*seven|сикс\s*-?\s*севен|сиксевен)"
+)
+SOUNDBOARD_TRIGGER_NAME = "уц"
+SOUNDBOARD_COOLDOWN_SECONDS = 4.0
 
 
 def count_swears(text: str) -> int:
     return len(SWEAR_RE.findall(text or ""))
+
+
+def mentions_sixseven(text: str) -> bool:
+    return bool(SIXSEVEN_RE.search(text or ""))
 
 
 def pcm_to_wav_bytes(pcm: bytes) -> bytes:
@@ -79,6 +88,8 @@ class VoiceListenService:
         self._dossier_dates: dict[int, date] = {}
         self._bot: ErundaBot | None = None
         self._credits_shutdown = False
+        self._sound_cache: dict[int, discord.SoundboardSound | None] = {}
+        self._sound_cooldown_until: dict[int, float] = {}
 
     def is_listening(self, guild_id: int) -> bool:
         vc = self._clients.get(guild_id)
@@ -261,6 +272,8 @@ class VoiceListenService:
                         tz_name = config.timezone
                 day = datetime.now(ZoneInfo(tz_name)).date().isoformat()
                 await self.db.increment_voice_swears(guild_id, user_id, day, swears)
+            if mentions_sixseven(text):
+                await self._play_sixseven_sound(bot, guild_id)
             log.debug("Voice snippet user=%s guild=%s: %s", user_id, guild_id, text[:80])
         except OpenRouterCreditsExhausted:
             log.warning("OpenRouter 402 — leaving voice and disabling listen")
@@ -269,6 +282,62 @@ class VoiceListenService:
             log.exception("Failed to transcribe voice for user %s", user_id)
         finally:
             buf.flushing = False
+
+    async def _resolve_uc_sound(
+        self,
+        guild: discord.Guild,
+    ) -> discord.SoundboardSound | None:
+        if guild.id in self._sound_cache:
+            return self._sound_cache[guild.id]
+        sound = discord.utils.find(
+            lambda item: (item.name or "").casefold() == SOUNDBOARD_TRIGGER_NAME.casefold(),
+            guild.soundboard_sounds,
+        )
+        if sound is None:
+            try:
+                sounds = await guild.fetch_soundboard_sounds()
+            except discord.HTTPException:
+                log.exception("Failed to fetch soundboard sounds for guild %s", guild.id)
+                self._sound_cache[guild.id] = None
+                return None
+            sound = discord.utils.find(
+                lambda item: (item.name or "").casefold() == SOUNDBOARD_TRIGGER_NAME.casefold(),
+                sounds,
+            )
+        self._sound_cache[guild.id] = sound
+        if sound is None:
+            log.warning(
+                "Soundboard sound «%s» not found in guild %s",
+                SOUNDBOARD_TRIGGER_NAME,
+                guild.id,
+            )
+        return sound
+
+    async def _play_sixseven_sound(self, bot: ErundaBot, guild_id: int) -> None:
+        now = datetime.now(timezone.utc).timestamp()
+        until = self._sound_cooldown_until.get(guild_id, 0.0)
+        if now < until:
+            return
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            return
+        channel = self.listening_channel(guild_id)
+        if not isinstance(channel, discord.VoiceChannel):
+            return
+        sound = await self._resolve_uc_sound(guild)
+        if sound is None:
+            return
+        try:
+            await channel.send_sound(sound)
+            self._sound_cooldown_until[guild_id] = now + SOUNDBOARD_COOLDOWN_SECONDS
+            log.info("Played soundboard «%s» in guild %s", SOUNDBOARD_TRIGGER_NAME, guild_id)
+        except discord.Forbidden:
+            log.warning(
+                "No permission to use soundboard in guild %s (need Speak + Use Soundboard)",
+                guild_id,
+            )
+        except discord.HTTPException:
+            log.exception("Failed to send soundboard sound in guild %s", guild_id)
 
     async def process_daily_dossiers(self, bot: ErundaBot) -> None:
         """Once per guild local day: summarize pending snippets into dossier facts."""
