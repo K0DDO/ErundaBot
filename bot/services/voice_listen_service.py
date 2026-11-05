@@ -15,12 +15,18 @@ from zoneinfo import ZoneInfo
 import discord
 
 from bot.database.database import Database
+from bot.services.ai_service import OpenRouterCreditsExhausted
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
     from bot.services.ai_service import AIService
 
 log = logging.getLogger(__name__)
+
+CREDITS_EXHAUSTED_MESSAGE = (
+    "Токены OpenRouter исчерпаны — слушание войса отключено. "
+    "Пополни баланс и перезапусти бота (или дождись рестарта)."
+)
 
 # Discord voice PCM: 48 kHz, stereo, 16-bit LE.
 PCM_RATE = 48000
@@ -72,6 +78,7 @@ class VoiceListenService:
         self._flush_task: asyncio.Task | None = None
         self._dossier_dates: dict[int, date] = {}
         self._bot: ErundaBot | None = None
+        self._credits_shutdown = False
 
     def is_listening(self, guild_id: int) -> bool:
         vc = self._clients.get(guild_id)
@@ -100,6 +107,8 @@ class VoiceListenService:
         bot: ErundaBot,
         channel: discord.VoiceChannel | discord.StageChannel,
     ) -> str:
+        if self.ai.stt_credits_exhausted:
+            raise ValueError(CREDITS_EXHAUSTED_MESSAGE)
         if not self.ai.transcription_enabled:
             raise ValueError(
                 "Нужен OPENROUTER_API_KEY в .env.production для распознавания речи"
@@ -143,12 +152,16 @@ class VoiceListenService:
             await self.start(bot)
             return f"Слушаю {channel.mention}"
 
-    async def leave(self, guild_id: int) -> str:
+    async def leave(self, guild_id: int, *, flush: bool = True) -> str:
         async with self._lock:
             vc = self._clients.pop(guild_id, None)
             buffers = self._buffers.pop(guild_id, {})
         bot = self._bot
-        if bot is not None:
+        if (
+            flush
+            and bot is not None
+            and not self.ai.stt_credits_exhausted
+        ):
             for user_id, buf in list(buffers.items()):
                 if len(buf.pcm) < int(MIN_AUDIO_SECONDS * BYTES_PER_SECOND):
                     continue
@@ -166,6 +179,18 @@ class VoiceListenService:
             await vc.disconnect(force=True)
             return "Вышел из войса"
         return "Бот не был в войсе"
+
+    async def leave_all_credits_exhausted(self) -> None:
+        """Stop listening everywhere after OpenRouter 402."""
+        if self._credits_shutdown:
+            return
+        self._credits_shutdown = True
+        self.ai.mark_stt_credits_exhausted()
+        for guild_id in list(self._clients):
+            try:
+                await self.leave(guild_id, flush=False)
+            except Exception:
+                log.exception("Failed to leave voice after credits exhausted (%s)", guild_id)
 
     def _append_pcm(self, guild_id: int, user_id: int, pcm: bytes) -> None:
         bucket = self._buffers.setdefault(guild_id, {})
@@ -218,6 +243,8 @@ class VoiceListenService:
         buf: _UserBuffer,
     ) -> None:
         try:
+            if self.ai.stt_credits_exhausted:
+                return
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
@@ -235,6 +262,9 @@ class VoiceListenService:
                 day = datetime.now(ZoneInfo(tz_name)).date().isoformat()
                 await self.db.increment_voice_swears(guild_id, user_id, day, swears)
             log.debug("Voice snippet user=%s guild=%s: %s", user_id, guild_id, text[:80])
+        except OpenRouterCreditsExhausted:
+            log.warning("OpenRouter 402 — leaving voice and disabling listen")
+            await self.leave_all_credits_exhausted()
         except Exception:
             log.exception("Failed to transcribe voice for user %s", user_id)
         finally:

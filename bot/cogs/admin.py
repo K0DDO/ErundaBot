@@ -379,6 +379,16 @@ class AdminCog(commands.Cog):
                 ephemeral=True,
             )
             return
+        if self.bot.ai_service.stt_credits_exhausted:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Токены исчерпаны",
+                    "Лимит OpenRouter закончился — `/админ voice_listen` недоступен, "
+                    "пока не пополнишь баланс и не перезапустишь бота.",
+                ),
+                ephemeral=True,
+            )
+            return
         await interaction.response.defer(ephemeral=True)
         try:
             text = await self.bot.voice_listen_service.join(self.bot, channel)

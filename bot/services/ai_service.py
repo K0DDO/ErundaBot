@@ -16,6 +16,11 @@ from bot.database.models import Birthday
 
 log = logging.getLogger(__name__)
 
+
+class OpenRouterCreditsExhausted(Exception):
+    """OpenRouter returned 402 — balance/limit exhausted."""
+
+
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OPENROUTER_TRANSCRIBE_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
@@ -86,6 +91,7 @@ class AIService:
             os.getenv("OPENROUTER_STT_MODEL", DEFAULT_OPENROUTER_STT).strip()
             or DEFAULT_OPENROUTER_STT
         )
+        self._stt_credits_exhausted = False
 
     @property
     def enabled(self) -> bool:
@@ -93,7 +99,20 @@ class AIService:
 
     @property
     def transcription_enabled(self) -> bool:
-        return bool(self.openrouter_api_key)
+        return bool(self.openrouter_api_key) and not self._stt_credits_exhausted
+
+    @property
+    def stt_credits_exhausted(self) -> bool:
+        return self._stt_credits_exhausted
+
+    def mark_stt_credits_exhausted(self) -> None:
+        if not self._stt_credits_exhausted:
+            log.warning("OpenRouter STT credits exhausted (402) — voice listen disabled")
+        self._stt_credits_exhausted = True
+
+    def clear_stt_credits_exhausted(self) -> None:
+        """Call after topping up credits if you want listen without restart."""
+        self._stt_credits_exhausted = False
 
     @property
     def _is_reasoning_model(self) -> bool:
@@ -234,6 +253,9 @@ class AIService:
             return None
         try:
             return await asyncio.to_thread(self._request_openrouter_transcribe, wav_bytes)
+        except OpenRouterCreditsExhausted:
+            self.mark_stt_credits_exhausted()
+            raise
         except Exception:
             log.exception("OpenRouter transcription failed")
             return None
@@ -269,6 +291,10 @@ class AIService:
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")[:500]
             log.error("OpenRouter STT HTTP %s: %s", exc.code, body)
+            if exc.code == 402:
+                raise OpenRouterCreditsExhausted(
+                    "Токены OpenRouter исчерпаны (402)"
+                ) from exc
             raise
         text = data.get("text") if isinstance(data, dict) else None
         return str(text or "").strip()
