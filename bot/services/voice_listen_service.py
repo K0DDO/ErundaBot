@@ -34,10 +34,13 @@ CREDITS_EXHAUSTED_MESSAGE = (
 PCM_RATE = 48000
 PCM_CHANNELS = 2
 PCM_SAMPLE_WIDTH = 2
-SILENCE_FLUSH_SECONDS = 1.4
+SILENCE_FLUSH_SECONDS = 2.0
 MIN_AUDIO_SECONDS = 0.6
 MAX_BUFFER_SECONDS = 12.0
 BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
+# Join nearby STT chunks so "сикс" + "севен" across a short pause still match.
+SIXSEVEN_CONTEXT_SECONDS = 3.5
+SIXSEVEN_CONTEXT_MAX_CHUNKS = 4
 
 # Compact RU swear stems; count after STT for /stats later.
 SWEAR_RE = re.compile(
@@ -98,6 +101,15 @@ def mentions_sixseven(text: str) -> bool:
     # Whisper often sticks punctuation to digits/words: «6-7.», «Сек-севен?»
     cleaned = re.sub(r"[\"'«»„“”]", "", cleaned)
     return bool(SIXSEVEN_RE.search(cleaned))
+
+
+def is_hallucination_heavy(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    if HALLUCINATION_RE.search(cleaned):
+        return True
+    return False
 
 
 def is_useful_transcript(text: str) -> bool:
@@ -384,6 +396,8 @@ class VoiceListenService:
         self._unknown_speaker_packets: dict[int, int] = defaultdict(int)
         # guild_id -> ssrc -> user_id (survives brief speaking-map gaps)
         self._ssrc_users: dict[int, dict[int, int]] = defaultdict(dict)
+        # (guild_id, user_id) -> recent STT chunks for cross-pause sixseven
+        self._recent_stt: dict[tuple[int, int], list[tuple[float, str]]] = defaultdict(list)
 
     def is_listening(self, guild_id: int) -> bool:
         vc = self._clients.get(guild_id)
@@ -581,6 +595,8 @@ class VoiceListenService:
         self._pcm_packets.pop(guild_id, None)
         self._unknown_speaker_packets.pop(guild_id, None)
         self._ssrc_users.pop(guild_id, None)
+        for key in [k for k in self._recent_stt if k[0] == guild_id]:
+            self._recent_stt.pop(key, None)
         if clear_resume:
             try:
                 await self.db.update_guild(
@@ -598,6 +614,30 @@ class VoiceListenService:
             await vc.disconnect(force=True)
             return "Вышел из войса"
         return "Бот не был в войсе"
+
+    def _sixseven_from_context(
+        self,
+        guild_id: int,
+        user_id: int,
+        text: str,
+    ) -> tuple[bool, str]:
+        """Match meme in this chunk or across a short pause (сикс + севен)."""
+        now = datetime.now(timezone.utc).timestamp()
+        key = (guild_id, user_id)
+        chunks = self._recent_stt[key]
+        cleaned = (text or "").strip()
+        if cleaned:
+            chunks.append((now, cleaned))
+        cutoff = now - SIXSEVEN_CONTEXT_SECONDS
+        chunks[:] = [(ts, part) for ts, part in chunks if ts >= cutoff][
+            -SIXSEVEN_CONTEXT_MAX_CHUNKS:
+        ]
+        if mentions_sixseven(cleaned):
+            return True, cleaned
+        combined = " ".join(part for _, part in chunks)
+        if len(chunks) >= 2 and mentions_sixseven(combined):
+            return True, combined
+        return False, cleaned
 
     def _resolve_speaker_id(
         self,
@@ -725,13 +765,28 @@ class VoiceListenService:
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
-            # Soundboard even if Whisper mixed the meme with junk subtitles.
-            if mentions_sixseven(text):
+            # RU-locked Whisper often drops the meme into «Продолжение следует».
+            if text and is_hallucination_heavy(text) and not mentions_sixseven(text):
+                retry = await self.ai.transcribe_wav(wav, language=None)
+                retry = (retry or "").strip()
+                if retry and retry != text:
+                    log.info(
+                        "STT retry no-lang user=%s guild=%s was=%r now=%r",
+                        user_id,
+                        guild_id,
+                        text[:80],
+                        retry[:80],
+                    )
+                    if mentions_sixseven(retry) or not is_hallucination_heavy(retry):
+                        text = retry
+            hit, matched = self._sixseven_from_context(guild_id, user_id, text)
+            if hit:
                 log.info(
-                    "Sixseven trigger user=%s guild=%s text=%r",
+                    "Sixseven trigger user=%s guild=%s text=%r matched=%r",
                     user_id,
                     guild_id,
                     text[:120],
+                    matched[:120],
                 )
                 await self._play_sixseven_sound(bot, guild_id)
             if not is_useful_transcript(text):

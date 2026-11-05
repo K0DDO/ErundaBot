@@ -248,11 +248,20 @@ class AIService:
         latin = [item for item in ordered if item not in cyrillic]
         return [*cyrillic, *latin]
 
-    async def transcribe_wav(self, wav_bytes: bytes) -> str | None:
+    async def transcribe_wav(
+        self,
+        wav_bytes: bytes,
+        *,
+        language: str | None = "ru",
+    ) -> str | None:
         if not self.transcription_enabled or not wav_bytes:
             return None
         try:
-            return await asyncio.to_thread(self._request_openrouter_transcribe, wav_bytes)
+            return await asyncio.to_thread(
+                self._request_openrouter_transcribe,
+                wav_bytes,
+                language,
+            )
         except OpenRouterCreditsExhausted:
             self.mark_stt_credits_exhausted()
             raise
@@ -260,20 +269,27 @@ class AIService:
             log.exception("OpenRouter transcription failed")
             return None
 
-    def _request_openrouter_transcribe(self, wav_bytes: bytes) -> str:
-        # Prefer RU for the server; sixseven matcher also covers RU/EN variants.
-        payload = json.dumps(
-            {
-                "model": self.stt_model,
-                "language": "ru",
-                "response_format": "json",
-                "input_audio": {
-                    "data": base64.b64encode(wav_bytes).decode("ascii"),
-                    "format": "wav",
-                },
+    def _request_openrouter_transcribe(
+        self,
+        wav_bytes: bytes,
+        language: str | None = "ru",
+    ) -> str:
+        # Prompt biases Whisper toward the meme instead of subtitle hallucinations.
+        body: dict = {
+            "model": self.stt_model,
+            "response_format": "json",
+            "prompt": (
+                "six seven, 6-7, 67, сикс севен, сек севен, сексаван, "
+                "sex seven, шесть семь."
+            ),
+            "input_audio": {
+                "data": base64.b64encode(wav_bytes).decode("ascii"),
+                "format": "wav",
             },
-            ensure_ascii=False,
-        ).encode("utf-8")
+        }
+        if language:
+            body["language"] = language
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             OPENROUTER_TRANSCRIBE_URL,
             data=payload,
@@ -290,8 +306,8 @@ class AIService:
             with urllib.request.urlopen(request, timeout=STT_TIMEOUT_SECONDS) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[:500]
-            log.error("OpenRouter STT HTTP %s: %s", exc.code, body)
+            body_text = exc.read().decode("utf-8", errors="replace")[:500]
+            log.error("OpenRouter STT HTTP %s: %s", exc.code, body_text)
             if exc.code == 402:
                 raise OpenRouterCreditsExhausted(
                     "Токены OpenRouter исчерпаны (402)"
