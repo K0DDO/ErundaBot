@@ -34,6 +34,8 @@ class GuildConfig:
     tarot_reset_minutes: int = 10
     tarot_show_meaning: bool = True
     voice_chat_transcripts: bool = True
+    voice_listen_channel_id: int | None = None
+    voice_announce_channel_id: int | None = None
     tgk_board_message_id: int | None = None
     tgk_board_message_ids: list[int] | None = None
     tgk_list_role_id: int | None = None
@@ -102,6 +104,12 @@ class GuildConfig:
             voice_chat_transcripts=bool(row["voice_chat_transcripts"])
             if "voice_chat_transcripts" in row.keys()
             else True,
+            voice_listen_channel_id=row["voice_listen_channel_id"]
+            if "voice_listen_channel_id" in row.keys()
+            else None,
+            voice_announce_channel_id=row["voice_announce_channel_id"]
+            if "voice_announce_channel_id" in row.keys()
+            else None,
             tgk_board_message_id=row["tgk_board_message_id"]
             if "tgk_board_message_id" in row.keys()
             else None,
@@ -411,6 +419,8 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "tarot_reset_minutes",
         "tarot_show_meaning",
         "voice_chat_transcripts",
+        "voice_listen_channel_id",
+        "voice_announce_channel_id",
         "tgk_board_message_id",
         "tgk_board_message_ids",
         "tgk_list_role_id",

@@ -370,6 +370,8 @@ class VoiceListenService:
         self._announce_channels: dict[int, int] = {}
         self._pcm_packets: dict[int, int] = defaultdict(int)
         self._unknown_speaker_packets: dict[int, int] = defaultdict(int)
+        # guild_id -> ssrc -> user_id (survives brief speaking-map gaps)
+        self._ssrc_users: dict[int, dict[int, int]] = defaultdict(dict)
 
     def is_listening(self, guild_id: int) -> bool:
         vc = self._clients.get(guild_id)
@@ -381,17 +383,66 @@ class VoiceListenService:
             return None
         return vc.channel
 
-    async def start(self, bot: ErundaBot) -> None:
+    def _ensure_watchdog(self, bot: ErundaBot) -> None:
         self._bot = bot
         if self._flush_task is None or self._flush_task.done():
             self._flush_task = asyncio.create_task(self._silence_watchdog(bot))
+
+    async def start(self, bot: ErundaBot) -> None:
+        self._ensure_watchdog(bot)
+        asyncio.create_task(self._restore_sessions(bot))
 
     async def stop_all(self) -> None:
         if self._flush_task is not None:
             self._flush_task.cancel()
             self._flush_task = None
+        # Keep DB resume targets so redeploy can rejoin.
         for guild_id in list(self._clients):
-            await self.leave(guild_id)
+            await self.leave(guild_id, clear_resume=False)
+
+    async def _restore_sessions(self, bot: ErundaBot) -> None:
+        await bot.wait_until_ready()
+        await asyncio.sleep(2.0)
+        try:
+            guilds = await self.db.list_guilds()
+        except Exception:
+            log.exception("Failed to load guilds for voice listen restore")
+            return
+        for config in guilds:
+            channel_id = config.voice_listen_channel_id
+            if channel_id is None:
+                continue
+            if self.is_listening(config.guild_id):
+                continue
+            guild = bot.get_guild(config.guild_id)
+            if guild is None:
+                continue
+            channel = guild.get_channel(channel_id)
+            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+                log.warning(
+                    "Voice restore skipped: channel %s missing in guild %s",
+                    channel_id,
+                    config.guild_id,
+                )
+                continue
+            try:
+                text = await self.join(
+                    bot,
+                    channel,
+                    announce_channel_id=config.voice_announce_channel_id,
+                )
+                log.info(
+                    "Restored voice listen guild=%s channel=%s (%s)",
+                    config.guild_id,
+                    channel_id,
+                    text.split("\n", 1)[0],
+                )
+            except Exception:
+                log.exception(
+                    "Failed to restore voice listen guild=%s channel=%s",
+                    config.guild_id,
+                    channel_id,
+                )
 
     async def join(
         self,
@@ -424,6 +475,12 @@ class VoiceListenService:
                         self._clients[guild.id] = existing
                     if announce_channel_id is not None:
                         self._announce_channels[guild.id] = int(announce_channel_id)
+                    await self.db.update_guild(
+                        guild.id,
+                        voice_listen_channel_id=int(channel.id),
+                        voice_announce_channel_id=self._announce_channels.get(guild.id),
+                    )
+                    self._ensure_watchdog(bot)
                     return f"Уже слушаю {channel.mention}"
                 await existing.disconnect(force=True)
 
@@ -451,10 +508,10 @@ class VoiceListenService:
             await _wait_for_dave(vc)
 
             def on_voice(user: discord.User | discord.Member | None, data) -> None:
-                user_id = self._resolve_speaker_id(vc, user, data)
+                user_id = self._resolve_speaker_id(guild.id, vc, user, data)
                 if user_id is None:
                     self._unknown_speaker_packets[guild.id] += 1
-                    if self._unknown_speaker_packets[guild.id] in (1, 50, 200):
+                    if self._unknown_speaker_packets[guild.id] in (1, 50, 200, 1000):
                         log.warning(
                             "Voice packets without speaker map in guild %s (n=%s)",
                             guild.id,
@@ -477,14 +534,19 @@ class VoiceListenService:
 
             # Library decode (with FEC). Router is patched to survive OpusError.
             vc.listen(voice_recv.BasicSink(on_voice, decode=True))
-            await self.start(bot)
+            self._ensure_watchdog(bot)
+            await self.db.update_guild(
+                guild.id,
+                voice_listen_channel_id=int(channel.id),
+                voice_announce_channel_id=self._announce_channels.get(guild.id),
+            )
             tip = await self._soundboard_status(guild, channel)
             where = ""
             if guild.id in self._announce_channels:
                 where = f"\nРеплики пишу в <#{self._announce_channels[guild.id]}>"
             return f"Слушаю {channel.mention}\n{tip}{where}"
 
-    async def leave(self, guild_id: int, *, flush: bool = True) -> str:
+    async def leave(self, guild_id: int, *, flush: bool = True, clear_resume: bool = True) -> str:
         async with self._lock:
             vc = self._clients.pop(guild_id, None)
             buffers = self._buffers.pop(guild_id, {})
@@ -506,6 +568,16 @@ class VoiceListenService:
         self._announce_channels.pop(guild_id, None)
         self._pcm_packets.pop(guild_id, None)
         self._unknown_speaker_packets.pop(guild_id, None)
+        self._ssrc_users.pop(guild_id, None)
+        if clear_resume:
+            try:
+                await self.db.update_guild(
+                    guild_id,
+                    voice_listen_channel_id=None,
+                    voice_announce_channel_id=None,
+                )
+            except Exception:
+                log.exception("Failed to clear voice listen resume for guild %s", guild_id)
         if vc is not None and vc.is_connected():
             try:
                 vc.stop_listening()
@@ -517,17 +589,25 @@ class VoiceListenService:
 
     @staticmethod
     def _resolve_speaker_id(
+        self,
+        guild_id: int,
         vc: discord.VoiceProtocol,
         user: discord.User | discord.Member | None,
         data: object,
     ) -> int | None:
+        packet = getattr(data, "packet", None)
+        ssrc = getattr(packet, "ssrc", None)
         if user is not None:
             if getattr(user, "bot", False):
                 return None
-            return int(user.id)
-        packet = getattr(data, "packet", None)
-        ssrc = getattr(packet, "ssrc", None)
+            user_id = int(user.id)
+            if ssrc is not None:
+                self._ssrc_users[guild_id][int(ssrc)] = user_id
+            return user_id
         if ssrc is not None:
+            cached = self._ssrc_users[guild_id].get(int(ssrc))
+            if cached is not None:
+                return cached
             getter = getattr(vc, "_get_id_from_ssrc", None)
             if callable(getter):
                 try:
@@ -535,13 +615,24 @@ class VoiceListenService:
                 except Exception:
                     user_id = None
                 if user_id is not None:
+                    self._ssrc_users[guild_id][int(ssrc)] = int(user_id)
                     return int(user_id)
-        # Speaking-map sometimes lags; if only one human is in the channel, use them.
+        # Speaking-map sometimes lags; prefer a single unmuted human.
         channel = getattr(vc, "channel", None)
         members = getattr(channel, "members", None) or []
         humans = [m for m in members if not getattr(m, "bot", False)]
         if len(humans) == 1:
             return int(humans[0].id)
+        live = []
+        for member in humans:
+            state = getattr(member, "voice", None)
+            if state is None:
+                continue
+            if getattr(state, "self_mute", False) or getattr(state, "mute", False):
+                continue
+            live.append(member)
+        if len(live) == 1:
+            return int(live[0].id)
         return None
 
     async def leave_all_credits_exhausted(self) -> None:
