@@ -42,10 +42,39 @@ BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
 SIXSEVEN_CONTEXT_SECONDS = 3.5
 SIXSEVEN_CONTEXT_MAX_CHUNKS = 4
 
-# Compact RU swear stems; count after STT for /stats later.
+# RU (+ EN Whisper) swear stems; count after STT for /stats later.
+# Word-start only; include common prefixes (заеб/нахуй/…) as separate alts.
 SWEAR_RE = re.compile(
     r"(?i)(?<![а-яёa-z])"
-    r"(бл[яа][дт]|бля|сука|хуй|хуя|хуе|пизд|ёб|еб[аоуы]|еба|ебл|муд[ае]|гандон|залуп|пидор|пидр)"
+    r"(?:"
+    # бля*
+    r"бл[яа][дт]|бляд|блят|бля|"
+    # сука / сучка
+    r"сука|суки|сучк|сучар|"
+    # хуй*
+    r"хуй|хуя|хуе|хуё|хуи|хули|хуйн|хуяк|"
+    r"нахуй|нахуя|нихуя|похуй|охуе|охуи|охуел|ахуе|ахуи|"
+    # пизд*
+    r"пизд|"
+    # еб*/ёб* + prefixed
+    r"ёб|еб[аоуыиё]|еба|ебл|ебан|ебуч|еблан|ебат|"
+    r"заеб|наеб|уеб|выеб|разъеб|приеб|объеб|доеб|подъеб|перееб|отъеб|"
+    r"долбо[её]б|у[её]бищ|"
+    # муд*
+    r"муд[аеи]|мудил|мудо|"
+    # прочее классика
+    r"гандон|гондон|залуп|"
+    r"пидор|пидар|пидр|педик|педр|"
+    r"хер(?![еэ])|хрен|"
+    r"жоп|задниц|"
+    r"дроч|конч|сперм|минет|отсос|"
+    r"говн|дерьм|"
+    r"ссат|срат|сран|срун|"
+    r"шлюх|блядун|блядин|блядск|"
+    r"чмо|мраз|тварь|падл|ублюд|выбляд|сволоч|дрян|гнид|"
+    # EN (Whisper sometimes latinizes)
+    r"fuck|fucking|motherfucker|shit|bitch|asshole|dickhead|cunt|bastard"
+    r")"
     r"[а-яёa-z]*"
 )
 # Whisper mangles the meme hard: «6, 7», сексон, сексаван, sex seven, …
