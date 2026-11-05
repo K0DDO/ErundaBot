@@ -85,7 +85,7 @@ HALLUCINATION_RE = re.compile(
     # Empty-room / noise often becomes only «Спасибо» spam.
     r"^(?:спасибо[.!]?\s*)+$"
 )
-SOUNDBOARD_TRIGGER_NAME = "уц"
+SOUNDBOARD_TRIGGER_NAME = "67"
 SOUNDBOARD_COOLDOWN_SECONDS = 4.0
 # 16-bit PCM RMS below this ≈ silence / decrypt garbage.
 MIN_PCM_RMS = 250
