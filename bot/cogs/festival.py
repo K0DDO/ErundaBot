@@ -42,11 +42,12 @@ class FestivalCog(commands.Cog):
         if not self._views_restored:
             self._views_restored = True
             try:
+                # Only re-bind persistent buttons. Do NOT edit every old card on
+                # startup — that floods Discord with PATCH and 429s, and can
+                # destabilize voice while the HTTP client is backed up.
                 festivals = await self.bot.db.list_posted_festivals()
                 register_festival_views(self.bot, festivals)
-                for festival in festivals:
-                    await refresh_festival_message(self.bot, festival)
-                log.info("Restored %s festival cards", len(festivals))
+                log.info("Restored %s festival card views (no bulk refresh)", len(festivals))
             except Exception:
                 log.exception("Failed to restore festival views")
         if not self._presence_ready:

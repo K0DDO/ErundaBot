@@ -7,7 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libffi-dev libnacl-dev gcc \
+    && apt-get install -y --no-install-recommends \
+        libffi-dev \
+        libnacl-dev \
+        libopus0 \
+        gcc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
