@@ -45,16 +45,17 @@ SWEAR_RE = re.compile(
     r"(бл[яа][дт]|бля|сука|хуй|хуя|хуе|пизд|ёб|еб[аоуы]|еба|ебл|муд[ае]|гандон|залуп|пидор|пидр)"
     r"[а-яёa-z]*"
 )
-# Whisper often mangles the meme: 67, six7, сикс севен, шесть семь, etc.
+# Whisper often mangles the meme: 6-7, 67, six7, сикс севен, сексаван, etc.
 SIXSEVEN_RE = re.compile(
     r"(?i)(?:"
     r"six\s*-?\s*seven|"
     r"six\s*7|"
-    r"(?<!\d)6\s*7(?!\d)|"
+    r"(?<!\d)6\s*-?\s*7(?!\d)|"
     r"сикс\s*-?\s*севен|"
     r"сик\s*-?\s*севен|"
-    r"сиксевен|"
+    r"сикс[ае]?вен|"
     r"секс\s*-?\s*севен|"
+    r"секс[ао]?в[ае]н|"
     r"шесть\s*-?\s*семь"
     r")"
 )
@@ -68,7 +69,9 @@ HALLUCINATION_RE = re.compile(
     r"субтитры\s+сделал|продолжение\s+следует|dimatorzok|"
     r"редактор\s+субтитров|коррек(?:тор|ция)\s+субтитров|"
     r"thanks?\s+for\s+watching|subscribe|like\s+and\s+subscribe|"
-    r"amara\.org|translated\s+by|caption(s|ed)?\s+by"
+    r"amara\.org|translated\s+by|caption(s|ed)?\s+by|"
+    # Empty-room / noise often becomes only «Спасибо» spam.
+    r"^(?:спасибо[.!]?\s*)+$"
 )
 SOUNDBOARD_TRIGGER_NAME = "уц"
 SOUNDBOARD_COOLDOWN_SECONDS = 4.0
@@ -620,6 +623,15 @@ class VoiceListenService:
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
+            # Soundboard even if Whisper mixed the meme with junk subtitles.
+            if mentions_sixseven(text):
+                log.info(
+                    "Sixseven trigger user=%s guild=%s text=%r",
+                    user_id,
+                    guild_id,
+                    text[:120],
+                )
+                await self._play_sixseven_sound(bot, guild_id)
             if not is_useful_transcript(text):
                 log.info(
                     "STT skip user=%s guild=%s audio=%.1fs rms=%s text=%r",
@@ -650,14 +662,6 @@ class VoiceListenService:
                         tz_name = config.timezone
                 day = datetime.now(ZoneInfo(tz_name)).date().isoformat()
                 await self.db.increment_voice_swears(guild_id, user_id, day, swears)
-            if mentions_sixseven(text):
-                log.info(
-                    "Sixseven trigger user=%s guild=%s text=%r",
-                    user_id,
-                    guild_id,
-                    text[:120],
-                )
-                await self._play_sixseven_sound(bot, guild_id)
         except OpenRouterCreditsExhausted:
             log.warning("OpenRouter 402 — leaving voice and disabling listen")
             await self.leave_all_credits_exhausted()
@@ -673,10 +677,6 @@ class VoiceListenService:
         user_id: int,
         text: str,
     ) -> None:
-        channel_id = self._announce_channels.get(guild_id)
-        if channel_id is None:
-            log.info("Announce skipped: no channel set for guild %s", guild_id)
-            return
         config = await self.db.get_guild(guild_id)
         if config is not None and not config.voice_chat_transcripts:
             log.info("Announce skipped: voice_chat_transcripts off for guild %s", guild_id)
@@ -684,14 +684,28 @@ class VoiceListenService:
         guild = bot.get_guild(guild_id)
         if guild is None:
             return
-        channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
-        if channel is None and hasattr(bot, "fetch_channel"):
-            try:
-                channel = await bot.fetch_channel(channel_id)
-            except discord.HTTPException:
-                channel = None
+        channel_id = self._announce_channels.get(guild_id)
+        channel = None
+        if channel_id is not None:
+            channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
+            if channel is None and hasattr(bot, "fetch_channel"):
+                try:
+                    channel = await bot.fetch_channel(channel_id)
+                except discord.HTTPException:
+                    channel = None
+        # After redeploy announce id is gone — fall back to text-in-voice.
         if channel is None or not hasattr(channel, "send"):
-            log.warning("Announce skipped: channel %s not found/sendable", channel_id)
+            voice_ch = self.listening_channel(guild_id)
+            if voice_ch is not None and hasattr(voice_ch, "send"):
+                channel = voice_ch
+                channel_id = getattr(voice_ch, "id", None)
+                log.info(
+                    "Announce fallback to voice channel %s for guild %s",
+                    channel_id,
+                    guild_id,
+                )
+        if channel is None or not hasattr(channel, "send"):
+            log.info("Announce skipped: no channel set for guild %s", guild_id)
             return
         member = guild.get_member(user_id)
         who = member.mention if member is not None else f"<@{user_id}>"
