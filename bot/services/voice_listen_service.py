@@ -48,26 +48,29 @@ SWEAR_RE = re.compile(
     r"(бл[яа][дт]|бля|сука|хуй|хуя|хуе|пизд|ёб|еб[аоуы]|еба|ебл|муд[ае]|гандон|залуп|пидор|пидр)"
     r"[а-яёa-z]*"
 )
-# Whisper mangles the meme hard: 6-7, сек-севен, сексаван, sex seven, …
+# Whisper mangles the meme hard: «6, 7», сексон, сексаван, sex seven, …
+_SIX_SEP = r"[\s\-–—./,;:…]*"
 SIXSEVEN_RE = re.compile(
     r"(?:"
-    r"six\s*[-–—./]?\s*seven|"
+    rf"six{_SIX_SEP}seven|"
     r"six\s*7|"
-    r"6\s*seven|"
-    r"sex\s*[-–—./]?\s*seven|"
-    r"(?<!\d)6\s*[-–—./]?\s*7(?!\d)|"
-    r"сикс\s*[-–—./]?\s*севен|"
-    r"сик\s*с?\s*[-–—./]?\s*севен|"
+    rf"6{_SIX_SEP}seven|"
+    rf"sex{_SIX_SEP}seven|"
+    rf"(?<!\d)6{_SIX_SEP}7(?!\d)|"
+    rf"сикс{_SIX_SEP}севен|"
+    rf"сик\s*с?{_SIX_SEP}севен|"
     r"сикс[аеэ]?в[аеэ]?н|"
     r"сикс[ао]?в[аеэ]н|"
-    r"сек\s*с?\s*[-–—./]?\s*севен|"
-    r"секс\s*[-–—./]?\s*севен|"
+    rf"сек\s*с?{_SIX_SEP}севен|"
+    rf"секс{_SIX_SEP}севен|"
     r"секс[ао]?в[аеэ]н|"
     r"сексев[аеэ]н|"
-    r"сыкс\s*[-–—./]?\s*севен|"
-    r"сакс\s*[-–—./]?\s*севен|"
-    r"шесть\s*[-–—./]?\s*семь|"
-    r"6\s*семь|"
+    r"сексон|циксон|сиксон|сексан|"
+    rf"сыкс{_SIX_SEP}севен|"
+    rf"сакс{_SIX_SEP}севен|"
+    rf"шесть{_SIX_SEP}семь|"
+    rf"6{_SIX_SEP}семь|"
+    rf"6{_SIX_SEP}саван|"
     r"шесть\s*7"
     r")"
 )
@@ -86,7 +89,7 @@ HALLUCINATION_RE = re.compile(
     r"^(?:спасибо[.!]?\s*)+$"
 )
 SOUNDBOARD_TRIGGER_NAME = "67"
-SOUNDBOARD_COOLDOWN_SECONDS = 4.0
+SOUNDBOARD_COOLDOWN_SECONDS = 2.0
 # 16-bit PCM RMS below this ≈ silence / decrypt garbage.
 MIN_PCM_RMS = 250
 _VOICE_RECV_PATCHED = False
@@ -98,8 +101,9 @@ def count_swears(text: str) -> int:
 
 def mentions_sixseven(text: str) -> bool:
     cleaned = (text or "").casefold().replace("ё", "е")
-    # Whisper often sticks punctuation to digits/words: «6-7.», «Сек-севен?»
+    # Whisper often sticks punctuation to digits/words: «6-7.», «6, 7», «Сек-севен?»
     cleaned = re.sub(r"[\"'«»„“”]", "", cleaned)
+    cleaned = re.sub(r"(?<!\d)6[\s\-–—./,;:…]+7(?!\d)", "67", cleaned)
     return bool(SIXSEVEN_RE.search(cleaned))
 
 
@@ -900,7 +904,10 @@ class VoiceListenService:
         force: bool = False,
     ) -> discord.SoundboardSound | None:
         if not force and guild.id in self._sound_cache:
-            return self._sound_cache[guild.id]
+            cached = self._sound_cache[guild.id]
+            if cached is None or self._sound_name_matches(cached.name):
+                return cached
+            self._sound_cache.pop(guild.id, None)
         sounds = list(guild.soundboard_sounds)
         sound = discord.utils.find(lambda item: self._sound_name_matches(item.name), sounds)
         if sound is None:
