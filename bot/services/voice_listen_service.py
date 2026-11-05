@@ -54,7 +54,7 @@ SIXSEVEN_RE = re.compile(
     r"сикс\s*-?\s*севен|"
     r"сик\s*-?\s*севен|"
     r"сикс[ае]?вен|"
-    r"секс\s*-?\s*севен|"
+    r"секс?\s*-?\s*севен|"
     r"секс[ао]?в[ае]н|"
     r"шесть\s*-?\s*семь"
     r")"
@@ -66,7 +66,7 @@ JUNK_TRANSCRIPT_RE = re.compile(
 # Classic Whisper hallucinations when PCM is DAVE-ciphertext noise.
 HALLUCINATION_RE = re.compile(
     r"(?i)"
-    r"субтитры\s+сделал|продолжение\s+следует|dimatorzok|"
+    r"субтитры\s+(?:сделал|создавал)|продолжение\s+следует|dimatorzok|"
     r"редактор\s+субтитров|коррек(?:тор|ция)\s+субтитров|"
     r"thanks?\s+for\s+watching|subscribe|like\s+and\s+subscribe|"
     r"amara\.org|translated\s+by|caption(s|ed)?\s+by|"
