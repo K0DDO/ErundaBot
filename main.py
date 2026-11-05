@@ -22,15 +22,26 @@ def main() -> None:
     )
 
     if not discord.opus.is_loaded():
-        try:
-            discord.opus._load_default()
-        except Exception:
-            logging.exception("Failed to load libopus — voice listen will not work")
-        else:
+        # Debian/Docker ships libopus as libopus.so.0; find_library("opus") can miss it.
+        for candidate in (
+            None,  # discord._load_default / find_library
+            "opus",
+            "libopus.so.0",
+            "libopus.so",
+            "libopus",
+        ):
+            try:
+                if candidate is None:
+                    discord.opus._load_default()
+                else:
+                    discord.opus.load_opus(candidate)
+            except Exception:
+                logging.debug("opus load candidate %r failed", candidate, exc_info=True)
             if discord.opus.is_loaded():
-                logging.info("libopus loaded")
-            else:
-                logging.error("libopus still not loaded — install libopus0 in the image")
+                logging.info("libopus loaded (%s)", candidate or "default")
+                break
+        if not discord.opus.is_loaded():
+            logging.error("libopus still not loaded — install libopus0 in the image")
 
     token = os.getenv("DISCORD_TOKEN")
     if not token:

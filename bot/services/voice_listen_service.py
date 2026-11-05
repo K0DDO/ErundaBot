@@ -43,8 +43,18 @@ SWEAR_RE = re.compile(
     r"(бл[яа][дт]|бля|сука|хуй|хуя|хуе|пизд|ёб|еб[аоуы]|еба|ебл|муд[ае]|гандон|залуп|пидор|пидр)"
     r"[а-яёa-z]*"
 )
+# Whisper often mangles the meme: 67, six7, сикс севен, шесть семь, etc.
 SIXSEVEN_RE = re.compile(
-    r"(?i)(?:six\s*-?\s*seven|сикс\s*-?\s*севен|сиксевен)"
+    r"(?i)(?:"
+    r"six\s*-?\s*seven|"
+    r"six\s*7|"
+    r"(?<!\d)6\s*7(?!\d)|"
+    r"сикс\s*-?\s*севен|"
+    r"сик\s*-?\s*севен|"
+    r"сиксевен|"
+    r"секс\s*-?\s*севен|"
+    r"шесть\s*-?\s*семь"
+    r")"
 )
 SOUNDBOARD_TRIGGER_NAME = "уц"
 SOUNDBOARD_COOLDOWN_SECONDS = 4.0
@@ -141,7 +151,16 @@ class VoiceListenService:
                     return f"Уже слушаю {channel.mention}"
                 await existing.disconnect(force=True)
 
-            vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
+            if not discord.opus.is_loaded():
+                raise ValueError(
+                    "libopus не загружен — распознавание речи и саундборд недоступны"
+                )
+
+            vc = await channel.connect(
+                cls=voice_recv.VoiceRecvClient,
+                self_deaf=False,
+                self_mute=False,
+            )
             self._clients[guild.id] = vc
             self._buffers[guild.id] = {}
 
@@ -161,7 +180,8 @@ class VoiceListenService:
 
             vc.listen(voice_recv.BasicSink(on_voice))
             await self.start(bot)
-            return f"Слушаю {channel.mention}"
+            tip = await self._soundboard_status(guild, channel)
+            return f"Слушаю {channel.mention}\n{tip}"
 
     async def leave(self, guild_id: int, *, flush: bool = True) -> str:
         async with self._lock:
@@ -273,8 +293,15 @@ class VoiceListenService:
                 day = datetime.now(ZoneInfo(tz_name)).date().isoformat()
                 await self.db.increment_voice_swears(guild_id, user_id, day, swears)
             if mentions_sixseven(text):
+                log.info(
+                    "Sixseven trigger user=%s guild=%s text=%r",
+                    user_id,
+                    guild_id,
+                    text[:120],
+                )
                 await self._play_sixseven_sound(bot, guild_id)
-            log.debug("Voice snippet user=%s guild=%s: %s", user_id, guild_id, text[:80])
+            else:
+                log.debug("Voice snippet user=%s guild=%s: %s", user_id, guild_id, text[:80])
         except OpenRouterCreditsExhausted:
             log.warning("OpenRouter 402 — leaving voice and disabling listen")
             await self.leave_all_credits_exhausted()
@@ -283,35 +310,72 @@ class VoiceListenService:
         finally:
             buf.flushing = False
 
+    @staticmethod
+    def _sound_name_matches(name: str | None) -> bool:
+        cleaned = (name or "").casefold().replace("ё", "е").strip()
+        target = SOUNDBOARD_TRIGGER_NAME.casefold()
+        return cleaned == target or cleaned.startswith(f"{target} ")
+
     async def _resolve_uc_sound(
         self,
         guild: discord.Guild,
+        *,
+        force: bool = False,
     ) -> discord.SoundboardSound | None:
-        if guild.id in self._sound_cache:
+        if not force and guild.id in self._sound_cache:
             return self._sound_cache[guild.id]
-        sound = discord.utils.find(
-            lambda item: (item.name or "").casefold() == SOUNDBOARD_TRIGGER_NAME.casefold(),
-            guild.soundboard_sounds,
-        )
+        sounds = list(guild.soundboard_sounds)
+        sound = discord.utils.find(lambda item: self._sound_name_matches(item.name), sounds)
         if sound is None:
             try:
-                sounds = await guild.fetch_soundboard_sounds()
+                sounds = list(await guild.fetch_soundboard_sounds())
             except discord.HTTPException:
                 log.exception("Failed to fetch soundboard sounds for guild %s", guild.id)
-                self._sound_cache[guild.id] = None
+                # Do not cache failure forever — boosts/permissions may change.
                 return None
             sound = discord.utils.find(
-                lambda item: (item.name or "").casefold() == SOUNDBOARD_TRIGGER_NAME.casefold(),
+                lambda item: self._sound_name_matches(item.name),
                 sounds,
             )
-        self._sound_cache[guild.id] = sound
-        if sound is None:
+        if sound is not None and getattr(sound, "available", True) is False:
             log.warning(
-                "Soundboard sound «%s» not found in guild %s",
-                SOUNDBOARD_TRIGGER_NAME,
+                "Soundboard «%s» exists but unavailable in guild %s (boosts?)",
+                sound.name,
                 guild.id,
             )
+            sound = None
+        self._sound_cache[guild.id] = sound
+        if sound is None:
+            names = ", ".join(sorted({(s.name or "?") for s in sounds})) or "(пусто)"
+            log.warning(
+                "Soundboard sound «%s» not found in guild %s; available: %s",
+                SOUNDBOARD_TRIGGER_NAME,
+                guild.id,
+                names[:300],
+            )
         return sound
+
+    async def _soundboard_status(
+        self,
+        guild: discord.Guild,
+        channel: discord.VoiceChannel | discord.StageChannel,
+    ) -> str:
+        if not isinstance(channel, discord.VoiceChannel):
+            return "Саундборд: только обычный войс (не stage)."
+        me = guild.me
+        perms = channel.permissions_for(me) if me is not None else None
+        sound = await self._resolve_uc_sound(guild, force=True)
+        bits: list[str] = []
+        if sound is None:
+            bits.append(f"звук «{SOUNDBOARD_TRIGGER_NAME}» не найден на сервере")
+        else:
+            bits.append(f"звук «{sound.name}» ок")
+        if perms is not None:
+            if not perms.speak:
+                bits.append("нет права Speak")
+            if not perms.use_soundboard:
+                bits.append("нет права Use Soundboard")
+        return "Саундборд: " + "; ".join(bits)
 
     async def _play_sixseven_sound(self, bot: ErundaBot, guild_id: int) -> None:
         now = datetime.now(timezone.utc).timestamp()
@@ -323,17 +387,53 @@ class VoiceListenService:
             return
         channel = self.listening_channel(guild_id)
         if not isinstance(channel, discord.VoiceChannel):
+            log.warning("Sixseven: not a voice channel in guild %s", guild_id)
             return
+        # Discord rejects soundboard if the bot is mute/deaf/suppress.
+        me = guild.me
+        voice_state = me.voice if me is not None else None
+        if voice_state is not None and (
+            voice_state.self_mute
+            or voice_state.self_deaf
+            or voice_state.mute
+            or voice_state.deaf
+            or voice_state.suppress
+        ):
+            if voice_state.mute or voice_state.deaf or voice_state.suppress:
+                log.warning(
+                    "Cannot play soundboard in guild %s: bot muted/deaf/suppress by server",
+                    guild_id,
+                )
+                return
+            try:
+                await guild.change_voice_state(
+                    channel=channel,
+                    self_mute=False,
+                    self_deaf=False,
+                )
+            except Exception:
+                log.exception("Failed to clear self mute/deaf before soundboard")
         sound = await self._resolve_uc_sound(guild)
         if sound is None:
             return
+        if me is not None:
+            perms = channel.permissions_for(me)
+            if not perms.speak or not perms.use_soundboard:
+                log.warning(
+                    "No soundboard perms in guild %s channel %s (speak=%s use_soundboard=%s)",
+                    guild_id,
+                    channel.id,
+                    perms.speak,
+                    perms.use_soundboard,
+                )
+                return
         try:
             await channel.send_sound(sound)
             self._sound_cooldown_until[guild_id] = now + SOUNDBOARD_COOLDOWN_SECONDS
-            log.info("Played soundboard «%s» in guild %s", SOUNDBOARD_TRIGGER_NAME, guild_id)
+            log.info("Played soundboard «%s» in guild %s", sound.name, guild_id)
         except discord.Forbidden:
             log.warning(
-                "No permission to use soundboard in guild %s (need Speak + Use Soundboard)",
+                "Forbidden soundboard in guild %s (need Speak + Use Soundboard, not mute/deaf)",
                 guild_id,
             )
         except discord.HTTPException:
