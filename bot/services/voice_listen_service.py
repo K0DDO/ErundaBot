@@ -66,6 +66,7 @@ SIXSEVEN_RE = re.compile(
     r"секс[ао]?в[аеэ]н|"
     r"сексев[аеэ]н|"
     r"сексон|циксон|сиксон|сексан|"
+    r"экс[еэ]в[еэ]н|exseven|x\s*seven|"
     rf"сыкс{_SIX_SEP}севен|"
     rf"сакс{_SIX_SEP}севен|"
     rf"шесть{_SIX_SEP}семь|"
@@ -961,15 +962,46 @@ class VoiceListenService:
                 bits.append("нет права Use Soundboard")
         return "Саундборд: " + "; ".join(bits)
 
+    def _voice_channel_for_soundboard(
+        self,
+        guild: discord.Guild,
+        guild_id: int,
+    ) -> discord.VoiceChannel | None:
+        channel = self.listening_channel(guild_id)
+        if isinstance(channel, discord.VoiceChannel):
+            return channel
+        # During voice reconnect `_clients` / vc.channel can be briefly empty
+        # while STT still fires from buffered audio.
+        me = guild.me
+        voice_state = me.voice if me is not None else None
+        if voice_state is not None and isinstance(voice_state.channel, discord.VoiceChannel):
+            vc = guild.voice_client
+            if vc is not None and vc.is_connected():
+                self._clients[guild_id] = vc
+            return voice_state.channel
+        return None
+
     async def _play_sixseven_sound(self, bot: ErundaBot, guild_id: int) -> None:
         now = datetime.now(timezone.utc).timestamp()
         until = self._sound_cooldown_until.get(guild_id, 0.0)
         if now < until:
+            log.info("Sixseven cooldown guild=%s (%.1fs left)", guild_id, until - now)
             return
         guild = bot.get_guild(guild_id)
         if guild is None:
             return
-        channel = self.listening_channel(guild_id)
+        channel: discord.VoiceChannel | None = None
+        for attempt in range(1, 4):
+            channel = self._voice_channel_for_soundboard(guild, guild_id)
+            if channel is not None:
+                break
+            log.warning(
+                "Sixseven: voice channel missing guild=%s attempt=%s/%s",
+                guild_id,
+                attempt,
+                3,
+            )
+            await asyncio.sleep(0.6 * attempt)
         if not isinstance(channel, discord.VoiceChannel):
             log.warning("Sixseven: not a voice channel in guild %s", guild_id)
             return
@@ -997,8 +1029,9 @@ class VoiceListenService:
                 )
             except Exception:
                 log.exception("Failed to clear self mute/deaf before soundboard")
-        sound = await self._resolve_uc_sound(guild)
+        sound = await self._resolve_uc_sound(guild, force=True)
         if sound is None:
+            log.warning("Sixseven: sound «%s» missing in guild %s", SOUNDBOARD_TRIGGER_NAME, guild_id)
             return
         if me is not None:
             perms = channel.permissions_for(me)
@@ -1011,17 +1044,42 @@ class VoiceListenService:
                     perms.use_soundboard,
                 )
                 return
-        try:
-            await channel.send_sound(sound)
-            self._sound_cooldown_until[guild_id] = now + SOUNDBOARD_COOLDOWN_SECONDS
-            log.info("Played soundboard «%s» in guild %s", sound.name, guild_id)
-        except discord.Forbidden:
-            log.warning(
-                "Forbidden soundboard in guild %s (need Speak + Use Soundboard, not mute/deaf)",
+        last_exc: BaseException | None = None
+        for attempt in range(1, 4):
+            try:
+                await channel.send_sound(sound)
+                self._sound_cooldown_until[guild_id] = (
+                    datetime.now(timezone.utc).timestamp() + SOUNDBOARD_COOLDOWN_SECONDS
+                )
+                log.info(
+                    "Played soundboard «%s» in guild %s (attempt=%s)",
+                    sound.name,
+                    guild_id,
+                    attempt,
+                )
+                return
+            except discord.Forbidden:
+                log.warning(
+                    "Forbidden soundboard in guild %s (need Speak + Use Soundboard, not mute/deaf)",
+                    guild_id,
+                )
+                return
+            except discord.HTTPException as exc:
+                last_exc = exc
+                log.warning(
+                    "Soundboard send failed guild=%s attempt=%s/%s: %s",
+                    guild_id,
+                    attempt,
+                    3,
+                    exc,
+                )
+                await asyncio.sleep(0.5 * attempt)
+        if last_exc is not None:
+            log.exception(
+                "Failed to send soundboard sound in guild %s",
                 guild_id,
+                exc_info=last_exc,
             )
-        except discord.HTTPException:
-            log.exception("Failed to send soundboard sound in guild %s", guild_id)
 
     async def process_daily_dossiers(self, bot: ErundaBot) -> None:
         """Once per guild local day: summarize pending snippets into dossier facts."""
