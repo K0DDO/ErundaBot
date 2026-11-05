@@ -125,65 +125,120 @@ def pcm_to_wav_bytes(pcm: bytes) -> bytes:
 
 
 def _patch_voice_recv() -> None:
-    """DAVE decrypt + keep listening on bad opus frames.
+    """DAVE decrypt (PR#54-style) + keep listening on bad opus frames.
 
-    Since ~Mar 2026 Discord mandates DAVE E2EE on voice. discord-ext-voice-recv
-    only opens the outer envelope; without decrypting the inner DAVE frame the
-    opus decoder sees ciphertext → silence/noise → Whisper hallucinations
-    («Субтитры сделал DimaTorzok»). Also PacketRouter.stop_listening() on any
-    OpusError, so we swallow those per-packet.
+    Discord mandates DAVE E2EE. Stock voice-recv only opens the outer envelope;
+    ciphertext → OpusError / Whisper hallucinations. We decrypt with discord.py's
+    dave_session before opus decode, enable passthrough while MLS keys settle,
+    and stop PacketRouter from killing the whole listen on one bad frame.
     """
     global _VOICE_RECV_PATCHED
     if _VOICE_RECV_PATCHED:
         return
 
     import davey
+    from davey import MediaType
     from discord.ext.voice_recv import opus as vr_opus
     from discord.ext.voice_recv import router as vr_router
-    from discord.ext.voice_recv.rtp import OPUS_SILENCE
+    from discord.opus import Decoder as OpusDecoder
 
-    orig_decode = vr_opus.PacketDecoder._decode_packet
+    orig_init = vr_opus.PacketDecoder.__init__
     dave_fails = {"n": 0}
     dave_ok = {"n": 0}
 
-    def _dave_decode_packet(self, packet):  # type: ignore[no-untyped-def]
-        data = getattr(packet, "decrypted_data", None) if packet else None
-        if packet and data and len(data) > 3:
+    def _init(self, router, ssrc):  # type: ignore[no-untyped-def]
+        orig_init(self, router, ssrc)
+        try:
             vc = self.sink.voice_client
-            state = getattr(vc, "_connection", None) if vc is not None else None
-            session = getattr(state, "dave_session", None) if state is not None else None
-            version = int(getattr(state, "dave_protocol_version", 0) or 0) if state else 0
-            if session is not None and version > 0:
-                user_id = self._cached_id
-                if user_id is None and vc is not None:
-                    getter = getattr(vc, "_get_id_from_ssrc", None)
-                    if callable(getter):
-                        try:
-                            user_id = getter(self.ssrc)
-                        except Exception:
-                            user_id = None
-                try:
-                    if not user_id:
-                        raise LookupError(f"no user mapped to ssrc {self.ssrc}")
-                    packet.decrypted_data = session.decrypt(
-                        int(user_id),
-                        davey.MediaType.audio,
-                        data,
+            session = getattr(getattr(vc, "_connection", None), "dave_session", None)
+            if session is not None:
+                session.set_passthrough_mode(True, 120)
+        except Exception:
+            log.exception("DAVE set_passthrough_mode on decoder init failed")
+
+    def _process_packet(self, packet):  # type: ignore[no-untyped-def]
+        # Mirrors imayhaveborkedit/discord-ext-voice-recv#54 with None-member guard.
+        pcm = None
+        member = self._get_cached_member()
+        if member is None:
+            try:
+                self._cached_id = self.sink.voice_client._get_id_from_ssrc(self.ssrc)
+            except Exception:
+                self._cached_id = None
+            member = self._get_cached_member()
+
+        vc = self.sink.voice_client
+        state = getattr(vc, "_connection", None)
+        session = getattr(state, "dave_session", None) if state is not None else None
+        silence = bool(getattr(packet, "is_silence", lambda: False)())
+        payload = getattr(packet, "payload_type", getattr(packet, "type", 120))
+        raw = getattr(packet, "decrypted_data", None)
+
+        if (
+            session is not None
+            and getattr(session, "ready", False)
+            and packet
+            and not silence
+            and raw is not None
+            and len(raw) > 3
+            and member is not None
+            and int(payload) == 120
+        ):
+            try:
+                packet.decrypted_data = session.decrypt(
+                    int(member.id),
+                    MediaType.audio,
+                    bytes(raw),
+                )
+                dave_ok["n"] += 1
+                if dave_ok["n"] == 1:
+                    users = []
+                    try:
+                        users = list(session.get_user_ids())
+                    except Exception:
+                        pass
+                    log.info(
+                        "DAVE decrypt ok (first) user=%s mls_users=%s",
+                        member.id,
+                        users,
                     )
-                    dave_ok["n"] += 1
-                    if dave_ok["n"] == 1:
-                        log.info("DAVE decrypt ok (first packet) user=%s", user_id)
-                except Exception as exc:
-                    packet.decrypted_data = OPUS_SILENCE
-                    dave_fails["n"] += 1
-                    if dave_fails["n"] in (1, 50, 200, 1000):
-                        log.warning(
-                            "DAVE decrypt failed (#%s, user=%s): %r",
-                            dave_fails["n"],
-                            user_id,
-                            exc,
-                        )
-        return orig_decode(self, packet)
+            except Exception as exc:
+                dave_fails["n"] += 1
+                if dave_fails["n"] in (1, 50, 200, 1000):
+                    users = []
+                    try:
+                        users = list(session.get_user_ids())
+                    except Exception:
+                        pass
+                    log.warning(
+                        "DAVE decrypt failed (#%s, user=%s, ready=%s, mls_users=%s): %r",
+                        dave_fails["n"],
+                        member.id if member else None,
+                        getattr(session, "ready", None),
+                        users,
+                        exc,
+                    )
+                # Drop frame as silence so opus/router stay alive.
+                self._last_seq = packet.sequence
+                self._last_ts = packet.timestamp
+                return vr_opus.VoiceData(packet, member, pcm=b"")
+
+        if not self.sink.wants_opus():
+            try:
+                packet, pcm = self._decode_packet(packet)
+            except OpusError:
+                try:
+                    self._decoder = OpusDecoder()
+                except Exception:
+                    self._decoder = None
+                self._last_seq = packet.sequence
+                self._last_ts = packet.timestamp
+                return vr_opus.VoiceData(packet, member, pcm=b"")
+
+        data = vr_opus.VoiceData(packet, member, pcm=pcm)
+        self._last_seq = packet.sequence
+        self._last_ts = packet.timestamp
+        return data
 
     def _do_run(self) -> None:  # type: ignore[no-untyped-def]
         while not self._end_thread.is_set():
@@ -211,10 +266,80 @@ def _patch_voice_recv() -> None:
                         except Exception:
                             log.exception("voice_recv sink.write failed")
 
-    vr_opus.PacketDecoder._decode_packet = _dave_decode_packet  # type: ignore[method-assign]
+    vr_opus.PacketDecoder.__init__ = _init  # type: ignore[method-assign]
+    vr_opus.PacketDecoder._process_packet = _process_packet  # type: ignore[method-assign]
     vr_router.PacketRouter._do_run = _do_run  # type: ignore[method-assign]
     _VOICE_RECV_PATCHED = True
     log.info("Patched voice_recv for DAVE decrypt + OpusError survival")
+
+
+async def _wait_for_dave(vc: discord.VoiceProtocol, *, timeout: float = 8.0) -> None:
+    """MLS keys arrive after connect; wait briefly and enable passthrough."""
+    # Log MLS binary opcodes so we can see whether Discord sends welcomes/commits.
+    ws = getattr(vc, "ws", None)
+    if ws is not None and not getattr(ws, "_erunda_mls_logged", False):
+        orig_bin = ws.received_binary_message
+
+        async def _logged_binary(msg: bytes) -> None:  # type: ignore[no-untyped-def]
+            op = msg[2] if len(msg) > 2 else None
+            await orig_bin(msg)
+            state = getattr(vc, "_connection", None)
+            session = getattr(state, "dave_session", None) if state is not None else None
+            users = []
+            try:
+                users = list(session.get_user_ids()) if session is not None else []
+            except Exception:
+                pass
+            log.info(
+                "Voice MLS binary op=%s ready=%s mls_users=%s",
+                op,
+                getattr(session, "ready", None),
+                users,
+            )
+
+        ws.received_binary_message = _logged_binary  # type: ignore[method-assign]
+        ws._erunda_mls_logged = True  # type: ignore[attr-defined]
+
+    deadline = datetime.now(timezone.utc).timestamp() + timeout
+    last_users: list[int] = []
+    while datetime.now(timezone.utc).timestamp() < deadline:
+        state = getattr(vc, "_connection", None)
+        session = getattr(state, "dave_session", None) if state is not None else None
+        version = int(getattr(state, "dave_protocol_version", 0) or 0) if state else 0
+        if session is None:
+            await asyncio.sleep(0.15)
+            continue
+        try:
+            session.set_passthrough_mode(True, 120)
+        except Exception:
+            pass
+        ready = bool(getattr(session, "ready", False))
+        try:
+            users = [int(u) for u in session.get_user_ids()]
+        except Exception:
+            users = []
+        if users != last_users or (ready and users):
+            log.info(
+                "DAVE state version=%s ready=%s mls_users=%s status=%s",
+                version,
+                ready,
+                users,
+                getattr(session, "status", None),
+            )
+            last_users = users
+        if ready and users:
+            return
+        await asyncio.sleep(0.15)
+    state = getattr(vc, "_connection", None)
+    session = getattr(state, "dave_session", None) if state is not None else None
+    log.warning(
+        "DAVE still not ready after %.1fs: version=%s ready=%s users=%s status=%s",
+        timeout,
+        getattr(state, "dave_protocol_version", None),
+        getattr(session, "ready", None),
+        list(session.get_user_ids()) if session is not None else None,
+        getattr(session, "status", None),
+    )
 
 
 class _UserBuffer:
@@ -320,6 +445,7 @@ class VoiceListenService:
                     guild.id,
                     announce_channel_id,
                 )
+            await _wait_for_dave(vc)
 
             def on_voice(user: discord.User | discord.Member | None, data) -> None:
                 user_id = self._resolve_speaker_id(vc, user, data)
