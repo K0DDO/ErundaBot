@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import discord
@@ -281,98 +280,6 @@ class FestivalCog(commands.Cog):
         text = self.bot.festival_service.ping_text(festival, config.timezone, role)
         await channel.send(text)
         await interaction.response.send_message(embed=success_embed("Напоминание отправлено"), ephemeral=True)
-
-    @fest.command(name="stats", description="Оценки и присутствие на сеансе")
-    @app_commands.describe(number="Номер кинофестиваля")
-    @app_commands.guild_only()
-    async def fest_stats(self, interaction: discord.Interaction, number: int) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        try:
-            await self.bot.festival_service.require_staff(interaction.user, config)
-            festival = await self.bot.festival_service.require_by_number(
-                interaction.guild.id,
-                number,
-            )
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        if interaction.guild is not None:
-            try:
-                await self.bot.festival_presence_service.sync_guild(interaction.guild)
-            except Exception:
-                log.exception("Festival presence sync before stats failed")
-        logs = await self.bot.db.list_festival_rating_logs(festival.id)
-        ratings = await self.bot.db.list_festival_ratings(festival.id)
-        now_iso = datetime.now(timezone.utc).isoformat()
-        voice_stats = await self.bot.db.festival_voice_stats(festival.id, now_iso)
-        text = self.bot.festival_service.format_fest_stats(
-            festival,
-            logs,
-            ratings,
-            voice_stats,
-            interaction.guild,
-        )
-        chunks = self._split_message(text, 3900)
-        await interaction.response.send_message(
-            embed=discord.Embed(description=chunks[0], color=0x7C9CFF),
-            ephemeral=True,
-        )
-        for chunk in chunks[1:]:
-            await interaction.followup.send(
-                embed=discord.Embed(description=chunk, color=0x7C9CFF),
-                ephemeral=True,
-            )
-
-    @fest_stats.autocomplete("number")
-    async def fest_stats_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[int]]:
-        if interaction.guild is None:
-            return []
-        festivals = await self.bot.db.list_guild_festivals(interaction.guild.id)
-        choices: list[app_commands.Choice[int]] = []
-        needle = current.strip().lower()
-        for festival in festivals:
-            label = f"#{festival.number}"
-            if festival.winner_film:
-                label += f" · {normalize_film_title(festival.winner_film)}"
-            elif festival.status == "open":
-                label += " · текущий"
-            hay = label.lower()
-            if needle and needle not in hay and needle not in str(festival.number):
-                continue
-            choices.append(app_commands.Choice(name=label[:100], value=festival.number))
-            if len(choices) >= 25:
-                break
-        return choices
-
-    @staticmethod
-    def _split_message(text: str, limit: int) -> list[str]:
-        if len(text) <= limit:
-            return [text]
-        chunks: list[str] = []
-        current = ""
-        for block in text.split("\n\n"):
-            piece = block if not current else f"{current}\n\n{block}"
-            if len(piece) <= limit:
-                current = piece
-                continue
-            if current:
-                chunks.append(current)
-            if len(block) <= limit:
-                current = block
-                continue
-            for start in range(0, len(block), limit):
-                chunks.append(block[start : start + limit])
-            current = ""
-        if current:
-            chunks.append(current)
-        return chunks or [text[:limit]]
-
 
 async def setup(bot: ErundaBot) -> None:
     await bot.add_cog(FestivalCog(bot))

@@ -22,6 +22,7 @@ CHANNEL_OPTIONS = (
     ("quotes_channel_id", "Цитаты"),
     ("fest_channel_id", "Кинофестиваль"),
     ("tgk_channel_id", "ТГК"),
+    ("santa_channel_id", "Тайный Санта"),
 )
 
 FLAG_OPTIONS = (
@@ -32,9 +33,9 @@ FLAG_OPTIONS = (
 )
 
 ROLE_OPTIONS = (
-    ("config_role_id", "Доступ к /config"),
+    ("config_role_id", "Доступ к /админ config"),
     ("fest_ping_role_id", "Пинг кинофестиваля"),
-    ("tgk_list_role_id", "Отладка /tgk debug-add"),
+    ("tgk_list_role_id", "Отладка /админ tgk_debug_add"),
 )
 
 
@@ -51,16 +52,17 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
             f"Ивенты: {channel_mention(config.events_channel_id)}\n"
             f"Цитаты: {channel_mention(config.quotes_channel_id)}\n"
             f"Кинофестиваль: {channel_mention(config.fest_channel_id)}\n"
-            f"ТГК: {channel_mention(config.tgk_channel_id)}"
+            f"ТГК: {channel_mention(config.tgk_channel_id)}\n"
+            f"Тайный Санта: {channel_mention(config.santa_channel_id)}"
         ),
         inline=False,
     )
     embed.add_field(
         name="Роли",
         value=(
-            f"Доступ к /config: {role_mention(config.config_role_id)}\n"
+            f"Доступ к /админ config: {role_mention(config.config_role_id)}\n"
             f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}\n"
-            f"Отладка /tgk debug-add: {role_mention(config.tgk_list_role_id)}"
+            f"Отладка /админ tgk_debug_add: {role_mention(config.tgk_list_role_id)}"
         ),
         inline=False,
     )

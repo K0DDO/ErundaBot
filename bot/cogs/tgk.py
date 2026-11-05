@@ -10,12 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.utils.embeds import error_embed, success_embed
-from bot.utils.permissions import (
-    can_use_tgk_debug,
-    find_member_by_nickname_async,
-    is_guild_admin,
-    tgk_debug_denied_reason,
-)
+from bot.utils.permissions import is_guild_admin
 from bot.views.tgk_views import TgkAddModal, refresh_tgk_board, register_tgk_board_views
 
 if TYPE_CHECKING:
@@ -47,46 +42,6 @@ class TgkCog(commands.Cog):
     @app_commands.guild_only()
     async def tgk_add(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(TgkAddModal(self.bot))
-
-    @tgk.command(name="debug-add", description="Добавить ТГК участнику по нику (отладка)")
-    @app_commands.describe(nickname="Ник на сервере", link="Ссылка на канал")
-    @app_commands.guild_only()
-    async def tgk_debug_add(
-        self,
-        interaction: discord.Interaction,
-        nickname: str,
-        link: str,
-    ) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_use_tgk_debug(interaction.user, config.tgk_list_role_id):
-            await interaction.response.send_message(
-                embed=error_embed("Недостаточно прав", tgk_debug_denied_reason(config.tgk_list_role_id)),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            target = await find_member_by_nickname_async(interaction.guild, nickname)
-            channel = await self.bot.tgk_service.add(
-                interaction.guild.id,
-                target.id,
-                link,
-            )
-        except ValueError as exc:
-            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        await refresh_tgk_board(self.bot, interaction.guild)
-        parts = [f"**{channel.title}**", f"Владелец: {target.display_name}"]
-        if channel.image_url:
-            parts.append("Картинка подтянулась.")
-        else:
-            parts.append("Название взял с t.me, картинку получить не удалось.")
-        await interaction.followup.send(
-            embed=success_embed(f"ТГК #{channel.number} добавлен", "\n".join(parts)),
-            ephemeral=True,
-        )
 
     @tgk.command(name="remove", description="Удалить ТГК по номеру")
     @app_commands.describe(number="Номер с доски")

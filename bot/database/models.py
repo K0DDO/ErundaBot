@@ -16,6 +16,7 @@ class GuildConfig:
     quotes_channel_id: int | None = None
     fest_channel_id: int | None = None
     tgk_channel_id: int | None = None
+    santa_channel_id: int | None = None
     statistics_enabled: bool = True
     personal_roles_enabled: bool = True
     rgb_enabled: bool = True
@@ -62,6 +63,7 @@ class GuildConfig:
             quotes_channel_id=row["quotes_channel_id"],
             fest_channel_id=row["fest_channel_id"] if "fest_channel_id" in row.keys() else None,
             tgk_channel_id=row["tgk_channel_id"] if "tgk_channel_id" in row.keys() else None,
+            santa_channel_id=row["santa_channel_id"] if "santa_channel_id" in row.keys() else None,
             statistics_enabled=bool(row["statistics_enabled"]),
             personal_roles_enabled=bool(row["personal_roles_enabled"]),
             rgb_enabled=bool(row["rgb_enabled"]),
@@ -388,6 +390,7 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "quotes_channel_id",
         "fest_channel_id",
         "tgk_channel_id",
+        "santa_channel_id",
         "statistics_enabled",
         "personal_roles_enabled",
         "rgb_enabled",
@@ -408,3 +411,60 @@ GUILD_CONFIG_FIELDS: frozenset[str] = frozenset(
         "tgk_list_role_id",
     }
 )
+
+
+@dataclass(slots=True)
+class SantaEvent:
+    id: int
+    guild_id: int
+    number: int
+    channel_id: int | None
+    message_id: int | None
+    drawn: bool
+    created_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> SantaEvent:
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            number=int(row["number"]),
+            channel_id=row["channel_id"],
+            message_id=row["message_id"],
+            drawn=bool(row["drawn"]),
+            created_at=row["created_at"] if "created_at" in row.keys() else None,
+        )
+
+
+@dataclass(slots=True)
+class SantaEntry:
+    event_id: int
+    user_id: int
+    address: str
+    wishlist_url: str
+    updated_at: str | None = None
+
+    @classmethod
+    def from_row(cls, row: Any) -> SantaEntry:
+        return cls(
+            event_id=row["event_id"],
+            user_id=row["user_id"],
+            address=row["address"],
+            wishlist_url=row["wishlist_url"],
+            updated_at=row["updated_at"] if "updated_at" in row.keys() else None,
+        )
+
+
+@dataclass(slots=True)
+class SantaAssignment:
+    event_id: int
+    giver_id: int
+    receiver_id: int
+
+    @classmethod
+    def from_row(cls, row: Any) -> SantaAssignment:
+        return cls(
+            event_id=row["event_id"],
+            giver_id=row["giver_id"],
+            receiver_id=row["receiver_id"],
+        )

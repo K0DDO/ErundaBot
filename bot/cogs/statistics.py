@@ -1,4 +1,4 @@
-"""Statistics listeners, /profile and /top."""
+"""Statistics listeners and /stats commands."""
 
 from __future__ import annotations
 
@@ -175,10 +175,12 @@ class StatisticsCog(commands.Cog):
                 tz_name,
             )
 
-    @app_commands.command(name="profile", description="Профиль активности участника")
+    stats = app_commands.Group(name="stats", description="Статистика активности")
+
+    @stats.command(name="profile", description="Профиль активности участника")
     @app_commands.describe(user="Участник (по умолчанию — вы)")
     @app_commands.guild_only()
-    async def profile(
+    async def stats_profile(
         self,
         interaction: discord.Interaction,
         user: discord.Member | None = None,
@@ -234,9 +236,9 @@ class StatisticsCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="top", description="Топы активности сервера")
+    @stats.command(name="top", description="Топы активности сервера")
     @app_commands.guild_only()
-    async def top(self, interaction: discord.Interaction) -> None:
+    async def stats_top(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             return
         config = await self.bot.config_service.get(interaction.guild.id)

@@ -26,6 +26,9 @@ from .models import (
     FestivalVoiceStats,
     GuildConfig,
     Quote,
+    SantaAssignment,
+    SantaEntry,
+    SantaEvent,
     TgChannel,
 )
 
@@ -43,6 +46,7 @@ CREATE TABLE IF NOT EXISTS guilds (
     quotes_channel_id INTEGER,
     fest_channel_id INTEGER,
     tgk_channel_id INTEGER,
+    santa_channel_id INTEGER,
     statistics_enabled INTEGER NOT NULL DEFAULT 1,
     personal_roles_enabled INTEGER NOT NULL DEFAULT 1,
     auto_execute_proposals INTEGER NOT NULL DEFAULT 0,
@@ -828,6 +832,53 @@ class Database:
                 """
             )
             await self._db.execute("PRAGMA user_version = 26")
+        if version < 27:
+            try:
+                await self._db.execute(
+                    "ALTER TABLE guilds ADD COLUMN santa_channel_id INTEGER"
+                )
+            except Exception:
+                pass
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS santa_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    number INTEGER NOT NULL,
+                    channel_id INTEGER,
+                    message_id INTEGER,
+                    drawn INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+                    UNIQUE (guild_id, number)
+                )
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS santa_entries (
+                    event_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    address TEXT NOT NULL,
+                    wishlist_url TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (event_id, user_id),
+                    FOREIGN KEY (event_id) REFERENCES santa_events(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS santa_assignments (
+                    event_id INTEGER NOT NULL,
+                    giver_id INTEGER NOT NULL,
+                    receiver_id INTEGER NOT NULL,
+                    PRIMARY KEY (event_id, giver_id),
+                    FOREIGN KEY (event_id) REFERENCES santa_events(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute("PRAGMA user_version = 27")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2534,3 +2585,153 @@ class Database:
             (json.dumps(cleaned), primary, guild_id),
         )
         await self.connection.commit()
+
+    async def get_santa_event(self, event_id: int) -> SantaEvent | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM santa_events WHERE id = ?",
+            (event_id,),
+        )
+        row = await cursor.fetchone()
+        return SantaEvent.from_row(row) if row else None
+
+    async def get_active_santa_event(self, guild_id: int) -> SantaEvent | None:
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM santa_events
+            WHERE guild_id = ?
+            ORDER BY number DESC
+            LIMIT 1
+            """,
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return SantaEvent.from_row(row) if row else None
+
+    async def list_open_santa_events(self) -> list[SantaEvent]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM santa_events WHERE drawn = 0 AND message_id IS NOT NULL"
+        )
+        rows = await cursor.fetchall()
+        return [SantaEvent.from_row(row) for row in rows]
+
+    async def next_santa_number(self, guild_id: int) -> int:
+        cursor = await self.connection.execute(
+            "SELECT COALESCE(MAX(number), 0) + 1 AS n FROM santa_events WHERE guild_id = ?",
+            (guild_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["n"]) if row else 1
+
+    async def create_santa_event(self, guild_id: int) -> SantaEvent:
+        number = await self.next_santa_number(guild_id)
+        cursor = await self.connection.execute(
+            """
+            INSERT INTO santa_events (guild_id, number)
+            VALUES (?, ?)
+            """,
+            (guild_id, number),
+        )
+        await self.connection.commit()
+        event = await self.get_santa_event(cursor.lastrowid)
+        assert event is not None
+        return event
+
+    async def set_santa_event_message(
+        self,
+        event_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        await self.connection.execute(
+            """
+            UPDATE santa_events
+            SET channel_id = ?, message_id = ?
+            WHERE id = ?
+            """,
+            (channel_id, message_id, event_id),
+        )
+        await self.connection.commit()
+
+    async def mark_santa_drawn(self, event_id: int) -> None:
+        await self.connection.execute(
+            "UPDATE santa_events SET drawn = 1 WHERE id = ?",
+            (event_id,),
+        )
+        await self.connection.commit()
+
+    async def upsert_santa_entry(
+        self,
+        event_id: int,
+        user_id: int,
+        address: str,
+        wishlist_url: str,
+    ) -> SantaEntry:
+        await self.connection.execute(
+            """
+            INSERT INTO santa_entries (event_id, user_id, address, wishlist_url, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(event_id, user_id) DO UPDATE SET
+                address = excluded.address,
+                wishlist_url = excluded.wishlist_url,
+                updated_at = datetime('now')
+            """,
+            (event_id, user_id, address, wishlist_url),
+        )
+        await self.connection.commit()
+        cursor = await self.connection.execute(
+            "SELECT * FROM santa_entries WHERE event_id = ? AND user_id = ?",
+            (event_id, user_id),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        return SantaEntry.from_row(row)
+
+    async def get_santa_entry(self, event_id: int, user_id: int) -> SantaEntry | None:
+        cursor = await self.connection.execute(
+            "SELECT * FROM santa_entries WHERE event_id = ? AND user_id = ?",
+            (event_id, user_id),
+        )
+        row = await cursor.fetchone()
+        return SantaEntry.from_row(row) if row else None
+
+    async def delete_santa_entry(self, event_id: int, user_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "DELETE FROM santa_entries WHERE event_id = ? AND user_id = ?",
+            (event_id, user_id),
+        )
+        await self.connection.commit()
+        return cursor.rowcount > 0
+
+    async def list_santa_entries(self, event_id: int) -> list[SantaEntry]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM santa_entries WHERE event_id = ? ORDER BY updated_at ASC",
+            (event_id,),
+        )
+        rows = await cursor.fetchall()
+        return [SantaEntry.from_row(row) for row in rows]
+
+    async def save_santa_assignments(
+        self,
+        event_id: int,
+        pairs: list[tuple[int, int]],
+    ) -> None:
+        await self.connection.execute(
+            "DELETE FROM santa_assignments WHERE event_id = ?",
+            (event_id,),
+        )
+        await self.connection.executemany(
+            """
+            INSERT INTO santa_assignments (event_id, giver_id, receiver_id)
+            VALUES (?, ?, ?)
+            """,
+            [(event_id, giver_id, receiver_id) for giver_id, receiver_id in pairs],
+        )
+        await self.connection.commit()
+
+    async def list_santa_assignments(self, event_id: int) -> list[SantaAssignment]:
+        cursor = await self.connection.execute(
+            "SELECT * FROM santa_assignments WHERE event_id = ?",
+            (event_id,),
+        )
+        rows = await cursor.fetchall()
+        return [SantaAssignment.from_row(row) for row in rows]

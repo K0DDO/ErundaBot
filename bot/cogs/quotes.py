@@ -181,37 +181,6 @@ class QuotesCog(commands.Cog):
             ephemeral=True,
         )
 
-    @quote.command(name="cleanup", description="Почистить канал цитат и переназначить номера")
-    @app_commands.guild_only()
-    async def quote_cleanup(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not config.quotes_channel_id:
-            await interaction.response.send_message(
-                embed=error_embed("Канал цитат не настроен в /config"),
-                ephemeral=True,
-            )
-            return
-        channel = interaction.guild.get_channel(config.quotes_channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(
-                embed=error_embed("Канал цитат недоступен"),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-        removed = await self.bot.quote_service.cleanup_channel(interaction.guild, channel)
-        numbered = await self.bot.quote_service.renumber_and_sync(interaction.guild)
-        self._cleaned_guilds.add(interaction.guild.id)
-        await interaction.followup.send(
-            embed=success_embed(
-                "Очистка завершена",
-                f"Удалено сообщений: **{removed}** в {channel.mention}\n"
-                f"Номера переназначены: **{numbered}**, старше — меньше номер.",
-            ),
-        )
-
     @quote.command(name="random", description="Случайная цитата")
     @app_commands.guild_only()
     async def quote_random(self, interaction: discord.Interaction) -> None:
@@ -225,43 +194,6 @@ class QuotesCog(commands.Cog):
             return
         await interaction.response.send_message(
             view=self.bot.quote_service.build_quote_card(quote, interaction.guild),
-        )
-
-    @quote.command(name="who", description="Кто добавил цитату (только роль Кино)")
-    @app_commands.describe(quote_id="Номер цитаты")
-    @app_commands.guild_only()
-    async def quote_who(self, interaction: discord.Interaction, quote_id: int) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        staff_role_id = config.fest_staff_role_id
-        if staff_role_id is None or not any(
-            role.id == staff_role_id for role in interaction.user.roles
-        ):
-            await interaction.response.send_message(
-                embed=error_embed("Нужна роль «Кино»"),
-                ephemeral=True,
-            )
-            return
-        quote = await self.bot.quote_service.get(interaction.guild.id, quote_id)
-        if quote is None:
-            await interaction.response.send_message(
-                embed=error_embed("Цитата не найдена"),
-                ephemeral=True,
-            )
-            return
-        adder = interaction.guild.get_member(quote.added_by)
-        if adder is not None:
-            who = f"{adder.mention} (`{adder.id}`)"
-        else:
-            who = f"<@{quote.added_by}> (`{quote.added_by}`)"
-        preview = self.bot.quote_service.preview_text(quote.content, 120)
-        await interaction.response.send_message(
-            embed=base_embed(
-                title=f"Цитата #{quote.number}",
-                description=f"Добавил: {who}\n«{preview}»",
-            ),
-            ephemeral=True,
         )
 
     @quote.command(name="user", description="Цитаты участника")

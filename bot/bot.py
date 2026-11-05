@@ -20,6 +20,7 @@ from bot.services.festival_presence_service import FestivalPresenceService
 from bot.services.quote_service import QuoteService
 from bot.services.role_service import RoleService
 from bot.services.statistics_service import StatisticsService
+from bot.services.santa_service import SantaService
 from bot.services.tarot_service import TarotService
 from bot.services.tgk_service import TgkService
 from bot.tasks.background import BackgroundTasks
@@ -28,12 +29,14 @@ log = logging.getLogger(__name__)
 
 COG_MODULES = (
     "bot.cogs.config",
+    "bot.cogs.admin",
     "bot.cogs.birthdays",
     "bot.cogs.statistics",
     "bot.cogs.events",
     "bot.cogs.festival",
     "bot.cogs.tgk",
     "bot.cogs.tarot",
+    "bot.cogs.santa",
     "bot.cogs.quotes",
     "bot.cogs.roles",
 )
@@ -72,6 +75,7 @@ class ErundaBot(commands.Bot):
         self.festival_service.presence = self.festival_presence_service
         self.tgk_service = TgkService(self.db)
         self.tarot_service = TarotService(self.db)
+        self.santa_service = SantaService(self.db)
         self.quote_service = QuoteService(self.db)
         self.role_service = RoleService(self.db)
         self.background = BackgroundTasks(self)

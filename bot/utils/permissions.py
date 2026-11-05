@@ -21,7 +21,7 @@ def can_edit_config(member: discord.Member, config_role_id: int | None = None) -
 def config_denied_reason(config_role_id: int | None) -> str:
     if config_role_id is None:
         return "Нужны права администратора или Manage Server."
-    return "Нужна роль доступа к /config или права администратора."
+    return "Нужна роль доступа к /админ config или права администратора."
 
 
 def can_use_tgk_debug(member: discord.Member, debug_role_id: int | None) -> bool:
@@ -32,7 +32,7 @@ def can_use_tgk_debug(member: discord.Member, debug_role_id: int | None) -> bool
 
 def tgk_debug_denied_reason(debug_role_id: int | None) -> str:
     if debug_role_id is None:
-        return "Настрой роль для /tgk debug-add в /config → Роли."
+        return "Настрой роль для /админ tgk_debug_add в /админ config → Роли."
     return f"Нужна <@&{debug_role_id}> или права администратора."
 
 
