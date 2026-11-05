@@ -531,7 +531,8 @@ class QuoteService:
         quotes = await self.db.list_quotes(guild.id, limit=10_000)
         migrated = 0
         for quote in quotes:
-            if await self.sync_posted_message(guild, quote):
+            # only_legacy: do NOT re-edit every V2 card on startup (71× PATCH → 429 storm)
+            if await self.sync_posted_message(guild, quote, only_legacy=True):
                 migrated += 1
         return migrated
 

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import discord
+from discord.opus import Decoder, OpusError
 
 from bot.database.database import Database
 from bot.services.ai_service import OpenRouterCreditsExhausted
@@ -100,6 +101,8 @@ class VoiceListenService:
         self._credits_shutdown = False
         self._sound_cache: dict[int, discord.SoundboardSound | None] = {}
         self._sound_cooldown_until: dict[int, float] = {}
+        # Decode opus ourselves: voice_recv PacketRouter stops listening on any OpusError.
+        self._decoders: dict[tuple[int, int], Decoder] = {}
 
     def is_listening(self, guild_id: int) -> bool:
         vc = self._clients.get(guild_id)
@@ -163,11 +166,17 @@ class VoiceListenService:
             )
             self._clients[guild.id] = vc
             self._buffers[guild.id] = {}
+            self._clear_decoders(guild.id)
 
             def on_voice(user: discord.User | discord.Member | None, data) -> None:
                 if user is None or getattr(user, "bot", False):
                     return
-                pcm = getattr(data, "pcm", None)
+                # decode=False → raw opus; we decode with OpusError isolation so one
+                # bad packet cannot kill PacketRouter (it always stop_listening()).
+                opus = getattr(data, "opus", None)
+                if not opus:
+                    return
+                pcm = self._decode_opus(guild.id, user.id, opus)
                 if not pcm:
                     return
                 loop = bot.loop
@@ -178,7 +187,7 @@ class VoiceListenService:
                     bytes(pcm),
                 )
 
-            vc.listen(voice_recv.BasicSink(on_voice))
+            vc.listen(voice_recv.BasicSink(on_voice, decode=False))
             await self.start(bot)
             tip = await self._soundboard_status(guild, channel)
             return f"Слушаю {channel.mention}\n{tip}"
@@ -202,6 +211,7 @@ class VoiceListenService:
                 pcm = bytes(buf.pcm)
                 buf.pcm.clear()
                 await self._transcribe_and_store(bot, guild_id, user_id, pcm, buf)
+        self._clear_decoders(guild_id)
         if vc is not None and vc.is_connected():
             try:
                 vc.stop_listening()
@@ -210,6 +220,26 @@ class VoiceListenService:
             await vc.disconnect(force=True)
             return "Вышел из войса"
         return "Бот не был в войсе"
+
+    def _clear_decoders(self, guild_id: int) -> None:
+        for key in [k for k in self._decoders if k[0] == guild_id]:
+            self._decoders.pop(key, None)
+
+    def _decode_opus(self, guild_id: int, user_id: int, opus: bytes) -> bytes | None:
+        key = (guild_id, user_id)
+        decoder = self._decoders.get(key)
+        if decoder is None:
+            decoder = Decoder()
+            self._decoders[key] = decoder
+        try:
+            return decoder.decode(opus, fec=False)
+        except OpusError:
+            # Drop frame and reset state; keep listening.
+            try:
+                self._decoders[key] = Decoder()
+            except Exception:
+                self._decoders.pop(key, None)
+            return None
 
     async def leave_all_credits_exhausted(self) -> None:
         """Stop listening everywhere after OpenRouter 402."""
