@@ -150,9 +150,10 @@ class ConfigPanel(discord.ui.View):
                 ephemeral=True,
             )
         elif value == "flags":
+            config = await self.bot.config_service.get(self.guild_id)
             await interaction.response.send_message(
                 "Выбери флаг, чтобы переключить его.",
-                view=FlagConfigView(self.bot, self.guild_id),
+                view=FlagConfigView(self.bot, self.guild_id, config),
                 ephemeral=True,
             )
         elif value == "timezone":
@@ -319,14 +320,21 @@ class RoleConfigView(discord.ui.View):
 
 
 class FlagSelect(discord.ui.Select):
-    def __init__(self, parent: "FlagConfigView") -> None:
-        super().__init__(
-            placeholder="Какой флаг изменить?",
-            options=[
-                discord.SelectOption(label=f"{label} — переключить", value=field)
-                for field, label in FLAG_OPTIONS
-            ],
-        )
+    def __init__(self, parent: "FlagConfigView", config: GuildConfig) -> None:
+        options: list[discord.SelectOption] = []
+        for field, label in FLAG_OPTIONS:
+            enabled = bool(getattr(config, field))
+            state = "вкл" if enabled else "выкл"
+            action = "выключить" if enabled else "включить"
+            options.append(
+                discord.SelectOption(
+                    label=f"{label} [{state}]",
+                    description=f"Сейчас {state} — нажми чтобы {action}",
+                    value=field,
+                    default=False,
+                )
+            )
+        super().__init__(placeholder="Какой флаг изменить?", options=options)
         self.parent_view = parent
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -339,21 +347,21 @@ class FlagSelect(discord.ui.Select):
             new_value,
         )
         label = dict(FLAG_OPTIONS).get(field, field)
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             embed=success_embed(
                 "Флаг обновлён",
                 f"{label}: **{bool_label(getattr(config, field))}**",
             ),
-            ephemeral=True,
+            view=FlagConfigView(self.parent_view.bot, self.parent_view.guild_id, config),
         )
 
 
 class FlagConfigView(discord.ui.View):
-    def __init__(self, bot: ErundaBot, guild_id: int) -> None:
+    def __init__(self, bot: ErundaBot, guild_id: int, config: GuildConfig) -> None:
         super().__init__(timeout=180)
         self.bot = bot
         self.guild_id = guild_id
-        self.add_item(FlagSelect(self))
+        self.add_item(FlagSelect(self, config))
 
 
 class TimezoneModal(discord.ui.Modal, title="Timezone сервера"):
