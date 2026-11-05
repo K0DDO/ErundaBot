@@ -211,11 +211,18 @@ class ChannelPicker(discord.ui.ChannelSelect):
             return
 
         field = self.parent_view.selected_field
-        config = await self.parent_view.bot.config_service.set_channel(
-            self.parent_view.guild_id,
-            field,
-            channel.id,
-        )
+        try:
+            config = await self.parent_view.bot.config_service.set_channel(
+                self.parent_view.guild_id,
+                field,
+                channel.id,
+            )
+        except ValueError as exc:
+            await interaction.response.send_message(
+                embed=error_embed(str(exc)),
+                ephemeral=True,
+            )
+            return
         label = dict(CHANNEL_OPTIONS).get(field, field)
         await interaction.response.send_message(
             embed=success_embed(

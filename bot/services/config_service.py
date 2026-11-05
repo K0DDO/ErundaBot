@@ -26,6 +26,7 @@ class ConfigService:
             "quotes_channel_id",
             "fest_channel_id",
             "tgk_channel_id",
+            "santa_channel_id",
         }
         if field not in allowed:
             raise ValueError(f"Invalid channel field: {field}")
