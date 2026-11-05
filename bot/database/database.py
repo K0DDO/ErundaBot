@@ -943,12 +943,15 @@ class Database:
             )
             await self._db.execute("PRAGMA user_version = 29")
         if version < 30:
-            await self._db.execute(
-                "ALTER TABLE guilds ADD COLUMN voice_listen_channel_id INTEGER"
-            )
-            await self._db.execute(
-                "ALTER TABLE guilds ADD COLUMN voice_announce_channel_id INTEGER"
-            )
+            for column in ("voice_listen_channel_id", "voice_announce_channel_id"):
+                try:
+                    await self._db.execute(
+                        f"ALTER TABLE guilds ADD COLUMN {column} INTEGER"
+                    )
+                except Exception as exc:
+                    # Seed/hotfix may have added the column before user_version bump.
+                    if "duplicate column" not in str(exc).lower():
+                        raise
             await self._db.execute("PRAGMA user_version = 30")
 
     async def close(self) -> None:
