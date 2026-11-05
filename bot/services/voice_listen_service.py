@@ -45,18 +45,27 @@ SWEAR_RE = re.compile(
     r"(бл[яа][дт]|бля|сука|хуй|хуя|хуе|пизд|ёб|еб[аоуы]|еба|ебл|муд[ае]|гандон|залуп|пидор|пидр)"
     r"[а-яёa-z]*"
 )
-# Whisper often mangles the meme: 6-7, 67, six7, сикс севен, сексаван, etc.
+# Whisper mangles the meme hard: 6-7, сек-севен, сексаван, sex seven, …
 SIXSEVEN_RE = re.compile(
-    r"(?i)(?:"
-    r"six\s*-?\s*seven|"
+    r"(?:"
+    r"six\s*[-–—./]?\s*seven|"
     r"six\s*7|"
-    r"(?<!\d)6\s*-?\s*7(?!\d)|"
-    r"сикс\s*-?\s*севен|"
-    r"сик\s*-?\s*севен|"
-    r"сикс[ае]?вен|"
-    r"секс?\s*-?\s*севен|"
-    r"секс[ао]?в[ае]н|"
-    r"шесть\s*-?\s*семь"
+    r"6\s*seven|"
+    r"sex\s*[-–—./]?\s*seven|"
+    r"(?<!\d)6\s*[-–—./]?\s*7(?!\d)|"
+    r"сикс\s*[-–—./]?\s*севен|"
+    r"сик\s*с?\s*[-–—./]?\s*севен|"
+    r"сикс[аеэ]?в[аеэ]?н|"
+    r"сикс[ао]?в[аеэ]н|"
+    r"сек\s*с?\s*[-–—./]?\s*севен|"
+    r"секс\s*[-–—./]?\s*севен|"
+    r"секс[ао]?в[аеэ]н|"
+    r"сексев[аеэ]н|"
+    r"сыкс\s*[-–—./]?\s*севен|"
+    r"сакс\s*[-–—./]?\s*севен|"
+    r"шесть\s*[-–—./]?\s*семь|"
+    r"6\s*семь|"
+    r"шесть\s*7"
     r")"
 )
 # Whisper noise / music hallucinations on bad / encrypted-as-noise audio.
@@ -85,7 +94,10 @@ def count_swears(text: str) -> int:
 
 
 def mentions_sixseven(text: str) -> bool:
-    return bool(SIXSEVEN_RE.search(text or ""))
+    cleaned = (text or "").casefold().replace("ё", "е")
+    # Whisper often sticks punctuation to digits/words: «6-7.», «Сек-севен?»
+    cleaned = re.sub(r"[\"'«»„“”]", "", cleaned)
+    return bool(SIXSEVEN_RE.search(cleaned))
 
 
 def is_useful_transcript(text: str) -> bool:
