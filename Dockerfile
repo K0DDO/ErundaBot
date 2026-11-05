@@ -12,6 +12,7 @@ RUN apt-get update \
         libnacl-dev \
         libopus0 \
         gcc \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
