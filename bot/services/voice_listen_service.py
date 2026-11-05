@@ -587,7 +587,6 @@ class VoiceListenService:
             return "Вышел из войса"
         return "Бот не был в войсе"
 
-    @staticmethod
     def _resolve_speaker_id(
         self,
         guild_id: int,
