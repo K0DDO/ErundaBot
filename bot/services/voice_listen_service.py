@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import audioop
 import io
 import logging
 import re
@@ -57,12 +58,22 @@ SIXSEVEN_RE = re.compile(
     r"шесть\s*-?\s*семь"
     r")"
 )
-# Whisper noise / music hallucinations on bad audio.
+# Whisper noise / music hallucinations on bad / encrypted-as-noise audio.
 JUNK_TRANSCRIPT_RE = re.compile(
     r"(?is)^(?:[\s\-–—*.,…·•]+|\*[^*]{0,40}\*|♪+|\[.*?\]|\(.*?\))$"
 )
+# Classic Whisper hallucinations when PCM is DAVE-ciphertext noise.
+HALLUCINATION_RE = re.compile(
+    r"(?i)"
+    r"субтитры\s+сделал|продолжение\s+следует|dimatorzok|"
+    r"редактор\s+субтитров|коррек(?:тор|ция)\s+субтитров|"
+    r"thanks?\s+for\s+watching|subscribe|like\s+and\s+subscribe|"
+    r"amara\.org|translated\s+by|caption(s|ed)?\s+by"
+)
 SOUNDBOARD_TRIGGER_NAME = "уц"
 SOUNDBOARD_COOLDOWN_SECONDS = 4.0
+# 16-bit PCM RMS below this ≈ silence / decrypt garbage.
+MIN_PCM_RMS = 250
 _VOICE_RECV_PATCHED = False
 
 
@@ -80,30 +91,99 @@ def is_useful_transcript(text: str) -> bool:
         return False
     if JUNK_TRANSCRIPT_RE.match(cleaned):
         return False
+    if HALLUCINATION_RE.search(cleaned):
+        return False
     letters = sum(1 for ch in cleaned if ch.isalpha())
     return letters >= 2
 
 
+def pcm_rms(pcm: bytes) -> int:
+    if len(pcm) < 4:
+        return 0
+    try:
+        return int(audioop.rms(pcm, PCM_SAMPLE_WIDTH))
+    except Exception:
+        return 0
+
+
 def pcm_to_wav_bytes(pcm: bytes) -> bytes:
+    # Whisper is happier with mono.
+    try:
+        mono = audioop.tomono(pcm, PCM_SAMPLE_WIDTH, 0.5, 0.5)
+    except Exception:
+        mono = pcm
+        channels = PCM_CHANNELS
+    else:
+        channels = 1
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wav:
-        wav.setnchannels(PCM_CHANNELS)
+        wav.setnchannels(channels)
         wav.setsampwidth(PCM_SAMPLE_WIDTH)
         wav.setframerate(PCM_RATE)
-        wav.writeframes(pcm)
+        wav.writeframes(mono)
     return buf.getvalue()
 
 
-def _patch_voice_recv_router() -> None:
-    """Keep listening when a single opus packet is corrupt.
+def _patch_voice_recv() -> None:
+    """DAVE decrypt + keep listening on bad opus frames.
 
-    discord-ext-voice-recv's PacketRouter.run() always stop_listening() on any
-    exception. Without this patch one bad frame kills the whole session.
+    Since ~Mar 2026 Discord mandates DAVE E2EE on voice. discord-ext-voice-recv
+    only opens the outer envelope; without decrypting the inner DAVE frame the
+    opus decoder sees ciphertext → silence/noise → Whisper hallucinations
+    («Субтитры сделал DimaTorzok»). Also PacketRouter.stop_listening() on any
+    OpusError, so we swallow those per-packet.
     """
     global _VOICE_RECV_PATCHED
     if _VOICE_RECV_PATCHED:
         return
+
+    import davey
+    from discord.ext.voice_recv import opus as vr_opus
     from discord.ext.voice_recv import router as vr_router
+    from discord.ext.voice_recv.rtp import OPUS_SILENCE
+
+    orig_decode = vr_opus.PacketDecoder._decode_packet
+    dave_fails = {"n": 0}
+    dave_ok = {"n": 0}
+
+    def _dave_decode_packet(self, packet):  # type: ignore[no-untyped-def]
+        data = getattr(packet, "decrypted_data", None) if packet else None
+        if packet and data and len(data) > 3:
+            vc = self.sink.voice_client
+            state = getattr(vc, "_connection", None) if vc is not None else None
+            session = getattr(state, "dave_session", None) if state is not None else None
+            version = int(getattr(state, "dave_protocol_version", 0) or 0) if state else 0
+            if session is not None and version > 0:
+                user_id = self._cached_id
+                if user_id is None and vc is not None:
+                    getter = getattr(vc, "_get_id_from_ssrc", None)
+                    if callable(getter):
+                        try:
+                            user_id = getter(self.ssrc)
+                        except Exception:
+                            user_id = None
+                try:
+                    if not user_id:
+                        raise LookupError(f"no user mapped to ssrc {self.ssrc}")
+                    packet.decrypted_data = session.decrypt(
+                        int(user_id),
+                        davey.MediaType.audio,
+                        data,
+                    )
+                    dave_ok["n"] += 1
+                    if dave_ok["n"] == 1:
+                        log.info("DAVE decrypt ok (first packet) user=%s", user_id)
+                except Exception as exc:
+                    packet.decrypted_data = OPUS_SILENCE
+                    dave_fails["n"] += 1
+                    if dave_fails["n"] in (1, 50, 200, 1000):
+                        log.warning(
+                            "DAVE decrypt failed (#%s, user=%s): %r",
+                            dave_fails["n"],
+                            user_id,
+                            exc,
+                        )
+        return orig_decode(self, packet)
 
     def _do_run(self) -> None:  # type: ignore[no-untyped-def]
         while not self._end_thread.is_set():
@@ -131,9 +211,10 @@ def _patch_voice_recv_router() -> None:
                         except Exception:
                             log.exception("voice_recv sink.write failed")
 
+    vr_opus.PacketDecoder._decode_packet = _dave_decode_packet  # type: ignore[method-assign]
     vr_router.PacketRouter._do_run = _do_run  # type: ignore[method-assign]
     _VOICE_RECV_PATCHED = True
-    log.info("Patched voice_recv PacketRouter to survive OpusError")
+    log.info("Patched voice_recv for DAVE decrypt + OpusError survival")
 
 
 class _UserBuffer:
@@ -189,7 +270,7 @@ class VoiceListenService:
         bot: ErundaBot,
         channel: discord.VoiceChannel | discord.StageChannel,
         *,
-        announce_channel: discord.abc.Messageable | None = None,
+        announce_channel_id: int | None = None,
     ) -> str:
         if self.ai.stt_credits_exhausted:
             raise ValueError(CREDITS_EXHAUSTED_MESSAGE)
@@ -204,7 +285,7 @@ class VoiceListenService:
                 "Пакет discord-ext-voice-recv не установлен на сервере"
             ) from exc
 
-        _patch_voice_recv_router()
+        _patch_voice_recv()
 
         guild = channel.guild
         async with self._lock:
@@ -213,8 +294,8 @@ class VoiceListenService:
                 if existing.channel and existing.channel.id == channel.id:
                     if guild.id not in self._clients:
                         self._clients[guild.id] = existing
-                    if announce_channel is not None and getattr(announce_channel, "id", None):
-                        self._announce_channels[guild.id] = int(announce_channel.id)
+                    if announce_channel_id is not None:
+                        self._announce_channels[guild.id] = int(announce_channel_id)
                     return f"Уже слушаю {channel.mention}"
                 await existing.disconnect(force=True)
 
@@ -232,8 +313,13 @@ class VoiceListenService:
             self._buffers[guild.id] = {}
             self._pcm_packets[guild.id] = 0
             self._unknown_speaker_packets[guild.id] = 0
-            if announce_channel is not None and getattr(announce_channel, "id", None):
-                self._announce_channels[guild.id] = int(announce_channel.id)
+            if announce_channel_id is not None:
+                self._announce_channels[guild.id] = int(announce_channel_id)
+                log.info(
+                    "Voice announce channel for guild %s → %s",
+                    guild.id,
+                    announce_channel_id,
+                )
 
             def on_voice(user: discord.User | discord.Member | None, data) -> None:
                 user_id = self._resolve_speaker_id(vc, user, data)
@@ -395,23 +481,35 @@ class VoiceListenService:
             if self.ai.stt_credits_exhausted:
                 return
             seconds = len(pcm) / BYTES_PER_SECOND
+            rms = pcm_rms(pcm)
+            if rms < MIN_PCM_RMS:
+                log.info(
+                    "STT skip quiet user=%s guild=%s audio=%.1fs rms=%s",
+                    user_id,
+                    guild_id,
+                    seconds,
+                    rms,
+                )
+                return
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
             if not is_useful_transcript(text):
                 log.info(
-                    "STT skip user=%s guild=%s audio=%.1fs text=%r",
+                    "STT skip user=%s guild=%s audio=%.1fs rms=%s text=%r",
                     user_id,
                     guild_id,
                     seconds,
+                    rms,
                     text[:80],
                 )
                 return
             log.info(
-                "STT user=%s guild=%s audio=%.1fs text=%r",
+                "STT user=%s guild=%s audio=%.1fs rms=%s text=%r",
                 user_id,
                 guild_id,
                 seconds,
+                rms,
                 text[:120],
             )
             await self.db.add_voice_snippet(guild_id, user_id, text[:2000])
@@ -451,15 +549,23 @@ class VoiceListenService:
     ) -> None:
         channel_id = self._announce_channels.get(guild_id)
         if channel_id is None:
+            log.info("Announce skipped: no channel set for guild %s", guild_id)
             return
         config = await self.db.get_guild(guild_id)
         if config is not None and not config.voice_chat_transcripts:
+            log.info("Announce skipped: voice_chat_transcripts off for guild %s", guild_id)
             return
         guild = bot.get_guild(guild_id)
         if guild is None:
             return
         channel = guild.get_channel(channel_id) or bot.get_channel(channel_id)
+        if channel is None and hasattr(bot, "fetch_channel"):
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except discord.HTTPException:
+                channel = None
         if channel is None or not hasattr(channel, "send"):
+            log.warning("Announce skipped: channel %s not found/sendable", channel_id)
             return
         member = guild.get_member(user_id)
         who = member.mention if member is not None else f"<@{user_id}>"
@@ -475,6 +581,7 @@ class VoiceListenService:
                     everyone=False,
                 ),
             )
+            log.info("Announced transcript in channel %s user=%s", channel_id, user_id)
         except discord.Forbidden:
             log.warning(
                 "Cannot post voice transcript in channel %s (missing Send Messages)",

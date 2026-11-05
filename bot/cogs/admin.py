@@ -390,14 +390,13 @@ class AdminCog(commands.Cog):
             )
             return
         await interaction.response.defer(ephemeral=True)
-        announce = None
-        if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
-            announce = interaction.channel
+        # channel_id works for text, threads, and text-in-voice.
+        announce_id = interaction.channel_id
         try:
             text = await self.bot.voice_listen_service.join(
                 self.bot,
                 channel,
-                announce_channel=announce,
+                announce_channel_id=announce_id,
             )
         except ValueError as exc:
             await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
@@ -411,10 +410,10 @@ class AdminCog(commands.Cog):
             return
         chat_note = (
             "Реплики в этот чат можно выключить в `/админ config` → флаги → «Войс → текст в чат»."
-            if announce is not None and config.voice_chat_transcripts
+            if announce_id is not None and config.voice_chat_transcripts
             else (
                 "Постинг в чат выключен флагом «Войс → текст в чат»."
-                if announce is not None
+                if announce_id is not None
                 else "Реплики только в «дело» (сюда писать некуда)."
             )
         )
