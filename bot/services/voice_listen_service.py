@@ -44,19 +44,20 @@ SIXSEVEN_CONTEXT_MAX_CHUNKS = 6
 # Auto-recover when SSRC/speaker map or listen sink dies (STT stops).
 VOICE_RECOVER_UNKNOWN_STREAK = 80
 VOICE_HARD_RECOVER_UNKNOWN_STREAK = 160
-VOICE_RECOVER_COOLDOWN_SECONDS = 20.0
-VOICE_STALE_PCM_SECONDS = 15.0
-VOICE_HEALTH_CHECK_EVERY = 5.0
-VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 12.0
+VOICE_RECOVER_COOLDOWN_SECONDS = 90.0
+VOICE_STALE_PCM_SECONDS = 25.0
+VOICE_HEALTH_CHECK_EVERY = 8.0
+VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 20.0
 # Soft-rebind alone rarely fixes DAVE/map death — escalate after N attempts.
 VOICE_SOFT_REBIND_ESCALATE_AFTER = 2
 VOICE_SOFT_REBIND_WINDOW_SECONDS = 180.0
 VOICE_HALLUCINATION_RECOVER_STREAK = 3
-# Intermittent DAVE NoValidCryptorFound keeps last_pcm fresh but STT dies.
-VOICE_USEFUL_STT_STALE_SECONDS = 45.0
-VOICE_USEFUL_STT_FORCE_SECONDS = 75.0
+# After leave+join, ignore health for a bit (last_pcm cleared → false recover loop).
+VOICE_RECOVER_GRACE_SECONDS = 60.0
+# Only when loud PCM is also unhealthy / DAVE is failing — not on quiet chat gaps.
+VOICE_USEFUL_STT_STALE_SECONDS = 120.0
 VOICE_DAVE_FAIL_WINDOW_SECONDS = 12.0
-VOICE_DAVE_FAIL_RECOVER_COUNT = 20
+VOICE_DAVE_FAIL_RECOVER_COUNT = 30
 
 # Rolling DAVE decrypt stats (updated from voice_recv patch).
 _DAVE_EVENTS: list[tuple[float, bool]] = []
@@ -580,6 +581,7 @@ class VoiceListenService:
         self._last_callback_at: dict[int, float] = {}
         self._last_useful_stt_at: dict[int, float] = {}
         self._last_recover_at: dict[int, float] = {}
+        self._recover_grace_until: dict[int, float] = {}
         self._last_soft_rebind_at: dict[int, float] = {}
         self._soft_rebind_times: dict[int, list[float]] = defaultdict(list)
         self._hallucination_streak: dict[int, int] = defaultdict(int)
@@ -727,6 +729,7 @@ class VoiceListenService:
             await _wait_for_dave(vc)
             self._bind_listen_sink(bot, guild, vc)
             self._ensure_watchdog(bot)
+            self._mark_voice_join_grace(guild.id)
             await self.db.update_guild(
                 guild.id,
                 voice_listen_channel_id=int(channel.id),
@@ -744,6 +747,14 @@ class VoiceListenService:
         self._unknown_streak[guild_id] = 0
         self._last_pcm_at.pop(guild_id, None)
         self._last_callback_at.pop(guild_id, None)
+
+    def _mark_voice_join_grace(self, guild_id: int) -> None:
+        """Avoid recover loops right after connect (empty RTP before loud PCM)."""
+        now = datetime.now(timezone.utc).timestamp()
+        self._recover_grace_until[guild_id] = now + VOICE_RECOVER_GRACE_SECONDS
+        self._last_pcm_at[guild_id] = now
+        self._last_callback_at[guild_id] = now
+        self._last_useful_stt_at.setdefault(guild_id, now)
 
     def _bind_listen_sink(
         self,
@@ -913,6 +924,7 @@ class VoiceListenService:
             await asyncio.sleep(1.2)
             await self.join(bot, channel, announce_channel_id=announce_id)
             _reset_dave_stats()
+            self._mark_voice_join_grace(guild_id)
             log.info("Voice listen recovered guild=%s", guild_id)
         except Exception:
             log.exception("Voice listen recover failed guild=%s", guild_id)
@@ -1122,6 +1134,8 @@ class VoiceListenService:
                 continue
             if guild_id in self._recovering:
                 continue
+            if now < self._recover_grace_until.get(guild_id, 0.0):
+                continue
             guild = bot.get_guild(guild_id)
             channel = self.listening_channel(guild_id)
             vc = self._clients.get(guild_id)
@@ -1181,28 +1195,25 @@ class VoiceListenService:
                 )
                 continue
 
-            # Had working STT, then it went dark while unmuted people remain.
-            # Intermittent DAVE success can keep last_pcm fresh without real STT.
-            if last_useful > 0 and useful_age >= VOICE_USEFUL_STT_STALE_SECONDS:
-                activity = (
-                    cb_age < 15.0
-                    or speaking
-                    or pcm_age < useful_age
-                    or dave_fails >= 5
+            # STT dark while loud PCM also unhealthy / DAVE failing — not on quiet gaps.
+            if (
+                last_useful > 0
+                and useful_age >= VOICE_USEFUL_STT_STALE_SECONDS
+                and (pcm_age >= VOICE_STALE_PCM_SECONDS or dave_fails >= 15)
+                and (cb_age < 10.0 or speaking or dave_fails >= 15)
+            ):
+                self._schedule_recover(
+                    guild_id,
+                    reason=(
+                        f"useful_stt_stale age={useful_age:.0f}s "
+                        f"pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s "
+                        f"dave_fail={dave_fails}"
+                    ),
                 )
-                if activity or useful_age >= VOICE_USEFUL_STT_FORCE_SECONDS:
-                    self._schedule_recover(
-                        guild_id,
-                        reason=(
-                            f"useful_stt_stale age={useful_age:.0f}s "
-                            f"pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s "
-                            f"dave_fail={dave_fails} speaking={speaking}"
-                        ),
-                    )
-                    continue
+                continue
 
             # People are marked speaking, but we get no usable PCM → map/decrypt dead.
-            if speaking and pcm_age >= 8.0:
+            if speaking and last_pcm > 0 and pcm_age >= 12.0:
                 if cb_age < 5.0 or streak >= 30:
                     self._schedule_recover(
                         guild_id,
@@ -1216,7 +1227,8 @@ class VoiceListenService:
                 continue
 
             # RTP callbacks flow, but nothing maps to usable (loud) PCM for too long.
-            if cb_age < 5.0 and pcm_age >= VOICE_STALE_PCM_SECONDS:
+            # Require prior real PCM so post-join empty frames don't loop recover.
+            if last_pcm > 0 and cb_age < 5.0 and pcm_age >= VOICE_STALE_PCM_SECONDS:
                 self._schedule_recover(
                     guild_id,
                     reason=f"callbacks_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
@@ -1227,8 +1239,9 @@ class VoiceListenService:
             if (
                 speaking
                 and cb_age < 5.0
-                and useful_age >= 45.0
-                and self._hallucination_streak.get(guild_id, 0) >= 2
+                and pcm_age < 8.0
+                and useful_age >= 90.0
+                and self._hallucination_streak.get(guild_id, 0) >= 3
             ):
                 self._schedule_recover(
                     guild_id,
@@ -1239,9 +1252,9 @@ class VoiceListenService:
                 )
                 continue
 
-            # Completely silent pipeline while unmuted users sit in VC — hard recover.
-            if last_pcm > 0 and pcm_age >= (VOICE_STALE_PCM_SECONDS * 3) and cb_age >= 25.0:
-                self._schedule_recover(
+            # Completely silent pipeline — soft rebind first, escalate via soft_rebind counter.
+            if last_pcm > 0 and pcm_age >= (VOICE_STALE_PCM_SECONDS * 4) and cb_age >= 40.0:
+                self._schedule_soft_rebind(
                     guild_id,
                     reason=f"pipeline_idle pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s",
                 )
