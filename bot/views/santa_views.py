@@ -1,4 +1,4 @@
-"""Secret Santa card UI (Components V2)."""
+"""Secret Santa card UI (classic embed + persistent buttons)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import logging
 from typing import TYPE_CHECKING
 
 import discord
-from discord import ui
 
 from bot.services.santa_service import SANTA_CARD_FILENAME, SANTA_COLOR
 from bot.utils.embeds import error_embed, success_embed
@@ -55,6 +54,24 @@ async def register_santa_views(bot: ErundaBot) -> None:
         bind_santa_view(bot, event, event.message_id)
 
 
+def build_santa_embed(
+    event: SantaEvent,
+    participant_lines: list[str],
+) -> discord.Embed:
+    status = "розыгрыш проведён" if event.drawn else "набор участников"
+    if participant_lines:
+        body = "**Участники:**\n" + "\n".join(participant_lines)
+    else:
+        body = "**Участники:**\nпока никого — жми «Присоединиться»"
+    embed = discord.Embed(
+        title=f"🎅 Тайный Санта #{event.number}",
+        description=f"{status}\n\n{body}"[:4090],
+        color=SANTA_COLOR,
+    )
+    embed.set_image(url=f"attachment://{SANTA_CARD_FILENAME}")
+    return embed
+
+
 async def publish_santa_message(
     bot: ErundaBot,
     guild: discord.Guild,
@@ -63,8 +80,14 @@ async def publish_santa_message(
     *,
     save: bool = True,
 ) -> discord.Message:
-    view = await santa_card(bot, guild, event)
-    message = await channel.send(view=view, file=bot.santa_service.card_file())
+    lines = await bot.santa_service.participant_lines(guild, event.id)
+    embed = build_santa_embed(event, lines)
+    view = None if event.drawn else SantaPersistentView(bot, event.id)
+    message = await channel.send(
+        embed=embed,
+        file=bot.santa_service.card_file(),
+        view=view,
+    )
     if save:
         await bot.db.set_santa_event_message(event.id, message.channel.id, message.id)
         event.channel_id = message.channel.id
@@ -82,6 +105,9 @@ async def refresh_santa_message(bot: ErundaBot, event: SantaEvent) -> None:
     channel = guild.get_channel(event.channel_id)
     if channel is None or not hasattr(channel, "fetch_message"):
         return
+    lines = await bot.santa_service.participant_lines(guild, event.id)
+    embed = build_santa_embed(event, lines)
+    view = None if event.drawn else SantaPersistentView(bot, event.id)
     try:
         message = await channel.fetch_message(event.message_id)
     except discord.NotFound:
@@ -96,25 +122,18 @@ async def refresh_santa_message(bot: ErundaBot, event: SantaEvent) -> None:
         return
     except discord.HTTPException:
         return
-    view = await santa_card(bot, guild, event)
     try:
         await message.edit(
-            view=view,
+            content=None,
+            embed=embed,
             attachments=[bot.santa_service.card_file()],
+            view=view,
         )
     except discord.HTTPException:
         log.exception("Failed to refresh santa card %s", event.id)
+        return
     if not event.drawn:
         bind_santa_view(bot, event, event.message_id)
-
-
-async def santa_card(
-    bot: ErundaBot,
-    guild: discord.Guild,
-    event: SantaEvent,
-) -> SantaCardView:
-    lines = await bot.santa_service.participant_lines(guild, event.id)
-    return SantaCardView(bot, event, lines)
 
 
 class SantaFormModal(discord.ui.Modal, title="Тайный Санта"):
@@ -169,7 +188,7 @@ class SantaFormModal(discord.ui.Modal, title="Тайный Санта"):
         )
 
 
-class SantaJoinButton(ui.Button):
+class SantaJoinButton(discord.ui.Button):
     def __init__(self, bot: ErundaBot, event_id: int) -> None:
         super().__init__(
             label="Присоединиться",
@@ -203,7 +222,7 @@ class SantaJoinButton(ui.Button):
         await interaction.response.send_modal(SantaFormModal(self.bot, self.event_id))
 
 
-class SantaEditButton(ui.Button):
+class SantaEditButton(discord.ui.Button):
     def __init__(self, bot: ErundaBot, event_id: int) -> None:
         super().__init__(
             label="Изменить",
@@ -239,7 +258,7 @@ class SantaEditButton(ui.Button):
         )
 
 
-class SantaLeaveButton(ui.Button):
+class SantaLeaveButton(discord.ui.Button):
     def __init__(self, bot: ErundaBot, event_id: int) -> None:
         super().__init__(
             label="Уйти",
@@ -265,40 +284,6 @@ class SantaLeaveButton(ui.Button):
             embed=success_embed("Ты вышел из тайного санты"),
             ephemeral=True,
         )
-
-
-class SantaCardView(ui.LayoutView):
-    def __init__(
-        self,
-        bot: ErundaBot,
-        event: SantaEvent,
-        participant_lines: list[str],
-    ) -> None:
-        super().__init__(timeout=None)
-        container = ui.Container(accent_color=SANTA_COLOR)
-        status = "розыгрыш проведён" if event.drawn else "набор участников"
-        container.add_item(ui.TextDisplay(f"## 🎅 Тайный Санта #{event.number}"))
-        container.add_item(ui.TextDisplay(f"-# {status}"))
-        if participant_lines:
-            body = "**Участники:**\n" + "\n".join(participant_lines)
-        else:
-            body = "**Участники:**\nпока никого — жми «Присоединиться»"
-        container.add_item(ui.TextDisplay(body[:3900]))
-        container.add_item(
-            ui.MediaGallery(
-                discord.MediaGalleryItem(
-                    f"attachment://{SANTA_CARD_FILENAME}",
-                    description="Тайный Санта",
-                )
-            )
-        )
-        if not event.drawn:
-            row = ui.ActionRow()
-            row.add_item(SantaJoinButton(bot, event.id))
-            row.add_item(SantaEditButton(bot, event.id))
-            row.add_item(SantaLeaveButton(bot, event.id))
-            container.add_item(row)
-        self.add_item(container)
 
 
 class SantaPersistentView(discord.ui.View):
