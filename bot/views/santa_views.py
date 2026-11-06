@@ -25,8 +25,34 @@ def bind_santa_view(bot: ErundaBot, event: SantaEvent, message_id: int) -> None:
 
 async def register_santa_views(bot: ErundaBot) -> None:
     for event in await bot.db.list_open_santa_events():
-        if event.message_id:
+        if event.message_id is None or event.channel_id is None:
+            continue
+        guild = bot.get_guild(event.guild_id)
+        if guild is None:
             bind_santa_view(bot, event, event.message_id)
+            continue
+        channel = guild.get_channel(event.channel_id)
+        if channel is None or not hasattr(channel, "fetch_message"):
+            bind_santa_view(bot, event, event.message_id)
+            continue
+        try:
+            await channel.fetch_message(event.message_id)
+        except discord.NotFound:
+            log.warning(
+                "Santa card missing in Discord (event=%s msg=%s) — republishing",
+                event.id,
+                event.message_id,
+            )
+            try:
+                await publish_santa_message(bot, guild, event, channel, save=True)
+            except Exception:
+                log.exception("Failed to republish santa card event=%s", event.id)
+            continue
+        except discord.HTTPException:
+            log.exception("Failed to fetch santa card event=%s", event.id)
+            bind_santa_view(bot, event, event.message_id)
+            continue
+        bind_santa_view(bot, event, event.message_id)
 
 
 async def publish_santa_message(
@@ -58,6 +84,16 @@ async def refresh_santa_message(bot: ErundaBot, event: SantaEvent) -> None:
         return
     try:
         message = await channel.fetch_message(event.message_id)
+    except discord.NotFound:
+        log.warning(
+            "Santa card gone during refresh (event=%s) — republishing",
+            event.id,
+        )
+        try:
+            await publish_santa_message(bot, guild, event, channel, save=True)
+        except Exception:
+            log.exception("Failed to republish santa card event=%s", event.id)
+        return
     except discord.HTTPException:
         return
     view = await santa_card(bot, guild, event)
