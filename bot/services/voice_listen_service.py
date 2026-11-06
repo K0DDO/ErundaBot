@@ -42,22 +42,22 @@ BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
 SIXSEVEN_CONTEXT_SECONDS = 6.0
 SIXSEVEN_CONTEXT_MAX_CHUNKS = 6
 # Auto-recover when SSRC/speaker map or listen sink dies (STT stops).
-VOICE_RECOVER_UNKNOWN_STREAK = 80
-VOICE_HARD_RECOVER_UNKNOWN_STREAK = 160
-VOICE_RECOVER_COOLDOWN_SECONDS = 90.0
-VOICE_STALE_PCM_SECONDS = 25.0
+VOICE_RECOVER_UNKNOWN_STREAK = 100
+VOICE_HARD_RECOVER_UNKNOWN_STREAK = 250
+VOICE_RECOVER_COOLDOWN_SECONDS = 120.0
+VOICE_STALE_PCM_SECONDS = 30.0
 VOICE_HEALTH_CHECK_EVERY = 8.0
-VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 20.0
-# Soft-rebind alone rarely fixes DAVE/map death — escalate after N attempts.
+VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 25.0
 VOICE_SOFT_REBIND_ESCALATE_AFTER = 2
 VOICE_SOFT_REBIND_WINDOW_SECONDS = 180.0
 VOICE_HALLUCINATION_RECOVER_STREAK = 3
-# After leave+join, ignore health for a bit (last_pcm cleared → false recover loop).
-VOICE_RECOVER_GRACE_SECONDS = 60.0
-# Only when loud PCM is also unhealthy / DAVE is failing — not on quiet chat gaps.
-VOICE_USEFUL_STT_STALE_SECONDS = 120.0
+# After connect: wait for real RTP before trusting health checks.
+VOICE_RECOVER_GRACE_SECONDS = 45.0
+VOICE_RTP_WAIT_SECONDS = 20.0
+VOICE_USEFUL_STT_STALE_SECONDS = 150.0
 VOICE_DAVE_FAIL_WINDOW_SECONDS = 12.0
-VOICE_DAVE_FAIL_RECOVER_COUNT = 30
+VOICE_DAVE_FAIL_RECOVER_COUNT = 40
+VOICE_NO_RTP_RECOVER_SECONDS = 50.0
 
 # Rolling DAVE decrypt stats (updated from voice_recv patch).
 _DAVE_EVENTS: list[tuple[float, bool]] = []
@@ -406,31 +406,40 @@ def _patch_voice_recv() -> None:
                         users,
                     )
             except Exception as exc:
-                dave_fails["n"] += 1
-                _note_dave_result(False)
-                if dave_fails["n"] in (1, 25, 50, 200, 1000):
-                    users = []
-                    try:
-                        users = list(session.get_user_ids())
-                    except Exception:
-                        pass
-                    log.warning(
-                        "DAVE decrypt failed (#%s, user=%s, ready=%s, mls_users=%s): %r",
-                        dave_fails["n"],
-                        member.id if member else None,
-                        getattr(session, "ready", None),
-                        users,
-                        exc,
-                    )
-                    # Keys often go stale; re-open passthrough window.
+                exc_text = repr(exc)
+                # Epoch transitions: payload is already transport-decrypted Opus.
+                if "UnencryptedWhenPassthroughDisabled" in exc_text:
+                    _note_dave_result(True)
                     try:
                         session.set_passthrough_mode(True, 120)
                     except Exception:
                         pass
-                # Drop frame as silence so opus/router stay alive.
-                self._last_seq = packet.sequence
-                self._last_ts = packet.timestamp
-                return vr_opus.VoiceData(packet, member, pcm=b"")
+                    # Fall through to opus decode with existing decrypted_data.
+                else:
+                    dave_fails["n"] += 1
+                    _note_dave_result(False)
+                    if dave_fails["n"] in (1, 25, 50, 200, 1000):
+                        users = []
+                        try:
+                            users = list(session.get_user_ids())
+                        except Exception:
+                            pass
+                        log.warning(
+                            "DAVE decrypt failed (#%s, user=%s, ready=%s, mls_users=%s): %r",
+                            dave_fails["n"],
+                            member.id if member else None,
+                            getattr(session, "ready", None),
+                            users,
+                            exc,
+                        )
+                        try:
+                            session.set_passthrough_mode(True, 120)
+                        except Exception:
+                            pass
+                    # Drop frame as silence so opus/router stay alive.
+                    self._last_seq = packet.sequence
+                    self._last_ts = packet.timestamp
+                    return vr_opus.VoiceData(packet, member, pcm=b"")
 
         if not self.sink.wants_opus():
             try:
@@ -582,6 +591,7 @@ class VoiceListenService:
         self._last_useful_stt_at: dict[int, float] = {}
         self._last_recover_at: dict[int, float] = {}
         self._recover_grace_until: dict[int, float] = {}
+        self._session_started_at: dict[int, float] = {}
         self._last_soft_rebind_at: dict[int, float] = {}
         self._soft_rebind_times: dict[int, list[float]] = defaultdict(list)
         self._hallucination_streak: dict[int, int] = defaultdict(int)
@@ -726,10 +736,15 @@ class VoiceListenService:
                     guild.id,
                     announce_channel_id,
                 )
-            await _wait_for_dave(vc)
+            # Grace/session clock BEFORE bind so early RTP counts as real traffic.
+            self._mark_voice_join_grace(guild.id)
+            # Start listener first so Discord begins RTP, then wait for MLS keys.
+            self._bind_listen_sink(bot, guild, vc)
+            await _wait_for_dave(vc, timeout=10.0)
+            await asyncio.sleep(0.8)
+            # Rebind after DAVE ready — first bind can miss the key window.
             self._bind_listen_sink(bot, guild, vc)
             self._ensure_watchdog(bot)
-            self._mark_voice_join_grace(guild.id)
             await self.db.update_guild(
                 guild.id,
                 voice_listen_channel_id=int(channel.id),
@@ -749,12 +764,29 @@ class VoiceListenService:
         self._last_callback_at.pop(guild_id, None)
 
     def _mark_voice_join_grace(self, guild_id: int) -> None:
-        """Avoid recover loops right after connect (empty RTP before loud PCM)."""
+        """Start a session clock; do NOT fake last_pcm (that caused recover loops)."""
         now = datetime.now(timezone.utc).timestamp()
+        self._session_started_at[guild_id] = now
         self._recover_grace_until[guild_id] = now + VOICE_RECOVER_GRACE_SECONDS
-        self._last_pcm_at[guild_id] = now
-        self._last_callback_at[guild_id] = now
-        self._last_useful_stt_at.setdefault(guild_id, now)
+        self._last_pcm_at.pop(guild_id, None)
+        self._last_callback_at.pop(guild_id, None)
+
+    async def _wait_for_rtp(self, guild_id: int, *, timeout: float = VOICE_RTP_WAIT_SECONDS) -> bool:
+        """Return True once a real voice callback arrives after session start."""
+        started = self._session_started_at.get(guild_id, 0.0)
+        deadline = datetime.now(timezone.utc).timestamp() + timeout
+        while datetime.now(timezone.utc).timestamp() < deadline:
+            cb = self._last_callback_at.get(guild_id, 0.0)
+            if cb >= started and started > 0:
+                log.info(
+                    "Voice RTP confirmed guild=%s after %.1fs",
+                    guild_id,
+                    cb - started,
+                )
+                return True
+            await asyncio.sleep(0.4)
+        log.warning("No voice RTP within %.0fs after join guild=%s", timeout, guild_id)
+        return False
 
     def _bind_listen_sink(
         self,
@@ -814,10 +846,17 @@ class VoiceListenService:
         vc.listen(voice_recv.BasicSink(on_voice, decode=True))
 
     def _schedule_soft_rebind(self, guild_id: int, *, reason: str) -> None:
+        """Rebind sink only when RTP is still flowing. No RTP → hard recover."""
         bot = self._bot
         if bot is None or guild_id in self._recovering:
             return
         now = datetime.now(timezone.utc).timestamp()
+        last_cb = self._last_callback_at.get(guild_id, 0.0)
+        cb_age = (now - last_cb) if last_cb > 0 else 1e9
+        # Soft-rebind with a dead UDP path just breaks is_listening and loops.
+        if cb_age >= 15.0 or "pipeline_idle" in reason:
+            self._schedule_recover(guild_id, reason=f"skip_soft_rebind:{reason}")
+            return
         recent = [
             ts
             for ts in self._soft_rebind_times[guild_id]
@@ -858,17 +897,22 @@ class VoiceListenService:
         except Exception:
             log.exception("DAVE wait during soft rebind failed guild=%s", guild_id)
         self._bind_listen_sink(bot, guild, vc)
-        # Soft-rebind often leaves DAVE wedged — if RTP still flows without loud PCM, hard recover.
-        await asyncio.sleep(12.0)
+        await asyncio.sleep(8.0)
         if guild_id in self._recovering:
             return
+        try:
+            listening = bool(getattr(vc, "is_listening", lambda: False)())
+        except Exception:
+            listening = False
         now = datetime.now(timezone.utc).timestamp()
         last_pcm = self._last_pcm_at.get(guild_id, 0.0)
         last_cb = self._last_callback_at.get(guild_id, 0.0)
-        if (now - last_cb) < 5.0 and (now - last_pcm) > 10.0:
+        if not listening or (
+            last_cb > 0 and (now - last_cb) < 5.0 and (now - last_pcm if last_pcm else 1e9) > 10.0
+        ):
             self._schedule_recover(
                 guild_id,
-                reason=f"soft_rebind_no_pcm_followup:{reason}",
+                reason=f"soft_rebind_failed:{reason} listening={listening}",
             )
 
     def _schedule_recover(self, guild_id: int, *, reason: str) -> None:
@@ -919,17 +963,54 @@ class VoiceListenService:
                 channel.id,
                 reason,
             )
-            _reset_dave_stats()
-            await self.leave(guild_id, flush=False, clear_resume=False)
-            await asyncio.sleep(1.2)
-            await self.join(bot, channel, announce_channel_id=announce_id)
-            _reset_dave_stats()
-            self._mark_voice_join_grace(guild_id)
-            log.info("Voice listen recovered guild=%s", guild_id)
+            ok = await self._reconnect_voice(
+                bot,
+                guild_id,
+                channel,
+                announce_id=announce_id,
+                settle_seconds=3.0,
+            )
+            if not ok:
+                log.warning(
+                    "Voice RTP still dead after recover guild=%s — second attempt",
+                    guild_id,
+                )
+                ok = await self._reconnect_voice(
+                    bot,
+                    guild_id,
+                    channel,
+                    announce_id=announce_id,
+                    settle_seconds=6.0,
+                )
+            if ok:
+                log.info("Voice listen recovered guild=%s", guild_id)
+            else:
+                log.error(
+                    "Voice listen recover failed to get RTP guild=%s — will retry later",
+                    guild_id,
+                )
         except Exception:
             log.exception("Voice listen recover failed guild=%s", guild_id)
         finally:
             self._recovering.discard(guild_id)
+
+    async def _reconnect_voice(
+        self,
+        bot: ErundaBot,
+        guild_id: int,
+        channel: discord.VoiceChannel | discord.StageChannel,
+        *,
+        announce_id: int | None,
+        settle_seconds: float,
+    ) -> bool:
+        _reset_dave_stats()
+        await self.leave(guild_id, flush=False, clear_resume=False)
+        await asyncio.sleep(settle_seconds)
+        # join() already marks grace before bind — do NOT remake it after
+        # (that wiped real RTP timestamps and falsely failed _wait_for_rtp).
+        await self.join(bot, channel, announce_channel_id=announce_id)
+        _reset_dave_stats()
+        return await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
 
     async def leave(self, guild_id: int, *, flush: bool = True, clear_resume: bool = True) -> str:
         async with self._lock:
@@ -957,6 +1038,8 @@ class VoiceListenService:
         self._last_pcm_at.pop(guild_id, None)
         self._last_callback_at.pop(guild_id, None)
         self._last_useful_stt_at.pop(guild_id, None)
+        self._session_started_at.pop(guild_id, None)
+        self._recover_grace_until.pop(guild_id, None)
         self._soft_rebind_times.pop(guild_id, None)
         self._hallucination_streak.pop(guild_id, None)
         self._ssrc_users.pop(guild_id, None)
@@ -1252,11 +1335,21 @@ class VoiceListenService:
                 )
                 continue
 
-            # Completely silent pipeline — soft rebind first, escalate via soft_rebind counter.
-            if last_pcm > 0 and pcm_age >= (VOICE_STALE_PCM_SECONDS * 4) and cb_age >= 40.0:
-                self._schedule_soft_rebind(
+            # Quiet unmuted people ≠ dead voice. Old pipeline_idle soft-rebind→recover
+            # on silence killed the UDP path for ~15 minutes. Only recover when RTP
+            # never arrived after join, or died while Discord marks someone speaking.
+            session_started = self._session_started_at.get(guild_id, 0.0)
+            session_age = (now - session_started) if session_started > 0 else 0.0
+            if last_cb <= 0 and session_age >= VOICE_NO_RTP_RECOVER_SECONDS:
+                self._schedule_recover(
                     guild_id,
-                    reason=f"pipeline_idle pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s",
+                    reason=f"no_rtp_after_join session_age={session_age:.0f}s",
+                )
+                continue
+            if speaking and last_cb > 0 and cb_age >= VOICE_NO_RTP_RECOVER_SECONDS:
+                self._schedule_recover(
+                    guild_id,
+                    reason=f"rtp_dead_while_speaking cb_age={cb_age:.0f}s",
                 )
 
     async def _transcribe_and_store(
