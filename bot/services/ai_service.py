@@ -282,8 +282,9 @@ class AIService:
             "model": self.stt_model,
             "response_format": "json",
             "prompt": (
-                "six seven, 6-7, 67, сикс севен, сек севен, сексаван, "
-                "sex seven, шесть семь."
+                "six seven, 6-7, 67, сикс севен, сек севен, сексаван, сексеон, "
+                "sex seven, sick seven, шесть семь. "
+                "блядь, блять, нахуй, сука, пиздец, ебать, хуй."
             ),
             "input_audio": {
                 "data": base64.b64encode(wav_bytes).decode("ascii"),

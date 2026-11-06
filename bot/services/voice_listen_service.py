@@ -39,8 +39,8 @@ MIN_AUDIO_SECONDS = 0.6
 MAX_BUFFER_SECONDS = 12.0
 BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
 # Join nearby STT chunks so "сикс" + "севен" across a short pause still match.
-SIXSEVEN_CONTEXT_SECONDS = 3.5
-SIXSEVEN_CONTEXT_MAX_CHUNKS = 4
+SIXSEVEN_CONTEXT_SECONDS = 6.0
+SIXSEVEN_CONTEXT_MAX_CHUNKS = 6
 # Auto-recover when SSRC/speaker map or listen sink dies (STT stops).
 VOICE_RECOVER_UNKNOWN_STREAK = 120
 VOICE_RECOVER_COOLDOWN_SECONDS = 30.0
@@ -59,7 +59,7 @@ SWEAR_RE = re.compile(
     r"сука|суки|сучк|сучар|"
     # хуй*
     r"хуй|хуя|хуе|хуё|хуи|хули|хуйн|хуяк|"
-    r"нахуй|нахуя|нихуя|похуй|охуе|охуи|охуел|ахуе|ахуи|"
+    r"нахуй|нахуя|нихуя|похуй|охуе|охуи|охуел|ахуе|ахуи|охер|"
     # пизд*
     r"пизд|"
     # еб*/ёб* + prefixed
@@ -78,8 +78,9 @@ SWEAR_RE = re.compile(
     r"ссат|срат|сран|срун|"
     r"шлюх|блядун|блядин|блядск|"
     r"чмо|мраз|тварь|падл|ублюд|выбляд|сволоч|дрян|гнид|"
-    # EN (Whisper sometimes latinizes)
-    r"fuck|fucking|motherfucker|shit|bitch|asshole|dickhead|cunt|bastard"
+    # EN + latinized RU (Whisper often transliterates)
+    r"fuck|fucking|motherfucker|shit|bitch|asshole|dickhead|cunt|bastard|"
+    r"blyat|blyad|blya|suka|suchka|nahui|nahuy|pizd|ebat|yobanu|huy|xyu"
     r")"
     r"[а-яёa-z]*"
 )
@@ -88,19 +89,26 @@ _SIX_SEP = r"[\s\-–—./,;:…]*"
 SIXSEVEN_RE = re.compile(
     r"(?:"
     rf"six{_SIX_SEP}seven|"
+    rf"sick{_SIX_SEP}seven|"
+    rf"see{_SIX_SEP}seven|"
+    rf"c{_SIX_SEP}seven|"
     r"six\s*7|"
     rf"6{_SIX_SEP}seven|"
     rf"sex{_SIX_SEP}seven|"
+    r"sexon|sixon|sexion|sixion|"
     rf"(?<!\d)6{_SIX_SEP}7(?!\d)|"
     rf"сикс{_SIX_SEP}севен|"
     rf"сик\s*с?{_SIX_SEP}севен|"
     r"сикс[аеэ]?в[аеэ]?н|"
     r"сикс[ао]?в[аеэ]н|"
+    # Whisper: «Сексеон», «сексион», «сиксеон»…
+    r"сикс[еёиыао]?[оае]?н|"
     rf"сек\s*с?{_SIX_SEP}севен|"
     rf"секс{_SIX_SEP}севен|"
     r"секс[ао]?в[аеэ]н|"
     r"сексев[аеэ]н|"
-    r"сексон|циксон|сиксон|сексан|"
+    r"секс[еёиыао]?[оае]?н|"
+    r"сексон|циксон|сиксон|сексан|сексеон|сексион|сиксеон|"
     r"экс[еэ]в[еэ]н|exseven|x\s*seven|"
     rf"сыкс{_SIX_SEP}севен|"
     rf"сакс{_SIX_SEP}севен|"
@@ -151,6 +159,20 @@ def mentions_sixseven(text: str) -> bool:
     return bool(SIXSEVEN_RE.search(cleaned))
 
 
+def maybe_sixseven_near_miss(text: str) -> bool:
+    """Cheap hint that Whisper mangled the meme — worth a no-lang retry."""
+    cleaned = (text or "").casefold().replace("ё", "е")
+    if not cleaned or mentions_sixseven(cleaned):
+        return False
+    return bool(
+        re.search(
+            r"(?:секс|сикс|сыкс|сакс|шесть|six|sex|sick|67|"
+            r"(?<!\d)6\D{0,4}7(?!\d)|(?<!\d)6\b)",
+            cleaned,
+        )
+    )
+
+
 def is_hallucination_heavy(text: str) -> bool:
     cleaned = (text or "").strip()
     if not cleaned:
@@ -176,7 +198,13 @@ def is_useful_transcript(text: str) -> bool:
         return False
     if HALLUCINATION_RE.search(cleaned):
         return False
-    if DOSSIER_JUNK_RE.search(cleaned):
+    # Whole-utterance filler only (substring «thank you» must not kill swears).
+    if re.fullmatch(
+        r"(?i)(?:(?:спасибо|thanks?|thank\s+you|ty)[.!,…]*\s*)+",
+        cleaned,
+    ):
+        return False
+    if re.fullmatch(r"(?i)(?:toot\s*)+", cleaned):
         return False
     letters = sum(1 for ch in cleaned if ch.isalpha())
     if letters < 2:
@@ -185,20 +213,6 @@ def is_useful_transcript(text: str) -> bool:
     if _cyrillic_letters(cleaned) == 0 and letters < 12:
         return False
     return True
-
-
-def is_dossier_worthy(text: str) -> bool:
-    """Stricter than STT store: drop meme-only / Latin filler before «дело»."""
-    cleaned = (text or "").strip()
-    if not is_useful_transcript(cleaned):
-        return False
-    if DOSSIER_JUNK_RE.search(cleaned):
-        return False
-    if mentions_sixseven(cleaned) and len(cleaned) < 24:
-        return False
-    if _cyrillic_letters(cleaned) < 4:
-        return False
-    return len(cleaned) >= 8
 
 
 def is_dossier_worthy(text: str) -> bool:
@@ -1098,11 +1112,17 @@ class VoiceListenService:
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
-            # RU-locked Whisper often drops the meme into «Продолжение следует».
-            # Retry without language is ONLY for sixseven detection — Latin filler
-            # («Thank you», game UI) must not replace RU hallucination in snippets.
+            # RU Whisper often mangled the meme («Сексеон», «Продолжение следует»).
+            # Retry no-lang for hallucination / near-miss / short shout / empty.
             sixseven_source = text
-            if text and is_hallucination_heavy(text) and not mentions_sixseven(text):
+            need_retry = not mentions_sixseven(text) and (
+                not text
+                or is_hallucination_heavy(text)
+                or maybe_sixseven_near_miss(text)
+                # Short loud shout is usually the meme; skip quiet «да/ок».
+                or (seconds <= 3.5 and rms >= 700 and len(text) <= 32)
+            )
+            if need_retry:
                 retry = await self.ai.transcribe_wav(wav, language=None)
                 retry = (retry or "").strip()
                 if retry and retry != text:
@@ -1134,6 +1154,24 @@ class VoiceListenService:
                     matched[:120],
                 )
                 await self._play_sixseven_sound(bot, guild_id)
+            # Count swears even when we skip storing junk (e.g. thank-you + мат).
+            swears = max(count_swears(text), count_swears(sixseven_source))
+            if swears:
+                guild = bot.get_guild(guild_id)
+                tz_name = "Europe/Moscow"
+                if guild is not None:
+                    config = await self.db.get_guild(guild_id)
+                    if config is not None:
+                        tz_name = config.timezone
+                day = datetime.now(ZoneInfo(tz_name)).date().isoformat()
+                await self.db.increment_voice_swears(guild_id, user_id, day, swears)
+                log.info(
+                    "Swears +%s user=%s guild=%s text=%r",
+                    swears,
+                    user_id,
+                    guild_id,
+                    (text or sixseven_source)[:80],
+                )
             if is_hallucination_heavy(text) or not is_useful_transcript(text):
                 log.info(
                     "STT skip user=%s guild=%s audio=%.1fs rms=%s text=%r",
@@ -1154,16 +1192,6 @@ class VoiceListenService:
             )
             await self.db.add_voice_snippet(guild_id, user_id, text[:2000])
             await self._announce_transcript(bot, guild_id, user_id, text)
-            swears = count_swears(text)
-            if swears:
-                guild = bot.get_guild(guild_id)
-                tz_name = "Europe/Moscow"
-                if guild is not None:
-                    config = await self.db.get_guild(guild_id)
-                    if config is not None:
-                        tz_name = config.timezone
-                day = datetime.now(ZoneInfo(tz_name)).date().isoformat()
-                await self.db.increment_voice_swears(guild_id, user_id, day, swears)
         except OpenRouterCreditsExhausted:
             log.warning("OpenRouter 402 — leaving voice and disabling listen")
             await self.leave_all_credits_exhausted()
