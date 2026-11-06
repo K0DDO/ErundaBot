@@ -42,11 +42,16 @@ BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
 SIXSEVEN_CONTEXT_SECONDS = 6.0
 SIXSEVEN_CONTEXT_MAX_CHUNKS = 6
 # Auto-recover when SSRC/speaker map or listen sink dies (STT stops).
-VOICE_RECOVER_UNKNOWN_STREAK = 120
-VOICE_RECOVER_COOLDOWN_SECONDS = 30.0
-VOICE_STALE_PCM_SECONDS = 25.0
-VOICE_HEALTH_CHECK_EVERY = 10.0
-VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 20.0
+VOICE_RECOVER_UNKNOWN_STREAK = 80
+VOICE_HARD_RECOVER_UNKNOWN_STREAK = 160
+VOICE_RECOVER_COOLDOWN_SECONDS = 25.0
+VOICE_STALE_PCM_SECONDS = 18.0
+VOICE_HEALTH_CHECK_EVERY = 8.0
+VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 15.0
+# Soft-rebind alone rarely fixes DAVE/map death — escalate after N attempts.
+VOICE_SOFT_REBIND_ESCALATE_AFTER = 2
+VOICE_SOFT_REBIND_WINDOW_SECONDS = 180.0
+VOICE_HALLUCINATION_RECOVER_STREAK = 3
 
 # RU (+ EN Whisper) swear stems; count after STT for /stats later.
 # Word-start only; include common prefixes (заеб/нахуй/…) as separate alts.
@@ -180,6 +185,25 @@ def is_hallucination_heavy(text: str) -> bool:
     if HALLUCINATION_RE.search(cleaned):
         return True
     return False
+
+
+_HALLUCINATION_PHRASE_RE = re.compile(
+    r"(?i)"
+    r"(?:субтитры\s+(?:сделал|создавал)\s*\S*)|"
+    r"(?:продолжение\s+следует[.…]*)|"
+    r"(?:редактор\s+субтитров[^.…]*)|"
+    r"(?:коррек(?:тор|ция)\s+субтитров[^.…]*)|"
+    r"(?:dimatorzok)|"
+    r"(?:thanks?\s+for\s+watching[^.…]*)|"
+    r"(?:toot(?:\s+toot)*)"
+)
+
+
+def strip_hallucination_phrases(text: str) -> str:
+    """Keep real speech when Whisper prepends subtitle junk."""
+    cleaned = _HALLUCINATION_PHRASE_RE.sub(" ", text or "")
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" .-–—,;:")
+    return cleaned
 
 
 def _cyrillic_letters(text: str) -> int:
@@ -506,8 +530,11 @@ class VoiceListenService:
         self._unknown_streak: dict[int, int] = defaultdict(int)
         self._last_pcm_at: dict[int, float] = {}
         self._last_callback_at: dict[int, float] = {}
+        self._last_useful_stt_at: dict[int, float] = {}
         self._last_recover_at: dict[int, float] = {}
         self._last_soft_rebind_at: dict[int, float] = {}
+        self._soft_rebind_times: dict[int, list[float]] = defaultdict(list)
+        self._hallucination_streak: dict[int, int] = defaultdict(int)
         self._recovering: set[int] = set()
         self._health_tick: float = 0.0
         # guild_id -> ssrc -> user_id (survives brief speaking-map gaps)
@@ -693,7 +720,7 @@ class VoiceListenService:
                 self._unknown_streak[guild.id] += 1
                 streak = self._unknown_streak[guild.id]
                 total = self._unknown_speaker_packets[guild.id]
-                if streak in (1, 50, 120, 300, 800) or total in (200, 1000):
+                if streak in (1, 40, 80, 160, 400) or total in (200, 1000):
                     log.warning(
                         "Voice packets without speaker map in guild %s (streak=%s total=%s)",
                         guild.id,
@@ -702,22 +729,27 @@ class VoiceListenService:
                     )
                 if streak == VOICE_RECOVER_UNKNOWN_STREAK:
                     self._schedule_soft_rebind(guild.id, reason=f"unknown_streak={streak}")
-                elif streak == 400:
+                elif streak == VOICE_HARD_RECOVER_UNKNOWN_STREAK:
                     self._schedule_recover(guild.id, reason=f"unknown_streak={streak}")
                 return
-            self._unknown_streak[guild.id] = 0
+            # Decay instead of hard reset — flapping known/unknown must still escalate.
+            self._unknown_streak[guild.id] = max(0, self._unknown_streak[guild.id] - 8)
             pcm = getattr(data, "pcm", None)
             if not pcm:
                 return
-            self._pcm_packets[guild.id] += 1
-            self._last_pcm_at[guild.id] = now
-            if self._pcm_packets[guild.id] == 1:
-                log.info("First voice PCM packet in guild %s user=%s", guild.id, user_id)
+            pcm_bytes = bytes(pcm)
+            rms = pcm_rms(pcm_bytes)
+            # DAVE garbage still yields PCM; only loud frames count as healthy audio.
+            if rms >= MIN_PCM_RMS:
+                self._pcm_packets[guild.id] += 1
+                self._last_pcm_at[guild.id] = now
+                if self._pcm_packets[guild.id] == 1:
+                    log.info("First voice PCM packet in guild %s user=%s", guild.id, user_id)
             bot.loop.call_soon_threadsafe(
                 self._append_pcm,
                 guild.id,
                 user_id,
-                bytes(pcm),
+                pcm_bytes,
             )
 
         vc.listen(voice_recv.BasicSink(on_voice, decode=True))
@@ -727,9 +759,22 @@ class VoiceListenService:
         if bot is None or guild_id in self._recovering:
             return
         now = datetime.now(timezone.utc).timestamp()
+        recent = [
+            ts
+            for ts in self._soft_rebind_times[guild_id]
+            if now - ts < VOICE_SOFT_REBIND_WINDOW_SECONDS
+        ]
+        self._soft_rebind_times[guild_id] = recent
+        if len(recent) >= VOICE_SOFT_REBIND_ESCALATE_AFTER:
+            self._schedule_recover(
+                guild_id,
+                reason=f"soft_rebind_escalate:{reason} n={len(recent)}",
+            )
+            return
         if now - self._last_soft_rebind_at.get(guild_id, 0.0) < VOICE_SOFT_REBIND_COOLDOWN_SECONDS:
             return
         self._last_soft_rebind_at[guild_id] = now
+        self._soft_rebind_times[guild_id].append(now)
         log.warning("Scheduling voice soft rebind guild=%s (%s)", guild_id, reason)
 
         def _go() -> None:
@@ -754,6 +799,18 @@ class VoiceListenService:
         except Exception:
             log.exception("DAVE wait during soft rebind failed guild=%s", guild_id)
         self._bind_listen_sink(bot, guild, vc)
+        # Soft-rebind often leaves DAVE wedged — if RTP still flows without loud PCM, hard recover.
+        await asyncio.sleep(12.0)
+        if guild_id in self._recovering:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        last_pcm = self._last_pcm_at.get(guild_id, 0.0)
+        last_cb = self._last_callback_at.get(guild_id, 0.0)
+        if (now - last_cb) < 5.0 and (now - last_pcm) > 10.0:
+            self._schedule_recover(
+                guild_id,
+                reason=f"soft_rebind_no_pcm_followup:{reason}",
+            )
 
     def _schedule_recover(self, guild_id: int, *, reason: str) -> None:
         bot = self._bot
@@ -837,6 +894,9 @@ class VoiceListenService:
         self._unknown_streak.pop(guild_id, None)
         self._last_pcm_at.pop(guild_id, None)
         self._last_callback_at.pop(guild_id, None)
+        self._last_useful_stt_at.pop(guild_id, None)
+        self._soft_rebind_times.pop(guild_id, None)
+        self._hallucination_streak.pop(guild_id, None)
         self._ssrc_users.pop(guild_id, None)
         for key in [k for k in self._recent_stt if k[0] == guild_id]:
             self._recent_stt.pop(key, None)
@@ -1071,11 +1131,29 @@ class VoiceListenService:
                     )
                 continue
 
-            # RTP callbacks flow, but nothing maps to PCM for too long.
+            # RTP callbacks flow, but nothing maps to usable (loud) PCM for too long.
             if cb_age < 5.0 and pcm_age >= VOICE_STALE_PCM_SECONDS:
                 self._schedule_recover(
                     guild_id,
                     reason=f"callbacks_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
+                )
+                continue
+
+            # Decrypt/map half-dead: callbacks + loud PCM exist but STT is only Whisper junk.
+            last_useful = self._last_useful_stt_at.get(guild_id, 0.0)
+            useful_age = (now - last_useful) if last_useful > 0 else 1e9
+            if (
+                speaking
+                and cb_age < 5.0
+                and useful_age >= 45.0
+                and self._hallucination_streak.get(guild_id, 0) >= 2
+            ):
+                self._schedule_recover(
+                    guild_id,
+                    reason=(
+                        f"speaking_hallucination_only useful_age={useful_age:.0f}s "
+                        f"hallu={self._hallucination_streak.get(guild_id, 0)}"
+                    ),
                 )
                 continue
 
@@ -1154,6 +1232,29 @@ class VoiceListenService:
                     matched[:120],
                 )
                 await self._play_sixseven_sound(bot, guild_id)
+            if is_hallucination_heavy(text):
+                stripped = strip_hallucination_phrases(text)
+                if is_useful_transcript(stripped) and not is_hallucination_heavy(stripped):
+                    text = stripped
+                else:
+                    self._hallucination_streak[guild_id] += 1
+                    hallu = self._hallucination_streak[guild_id]
+                    log.info(
+                        "STT skip user=%s guild=%s audio=%.1fs rms=%s text=%r hallu=%s",
+                        user_id,
+                        guild_id,
+                        seconds,
+                        rms,
+                        text[:80],
+                        hallu,
+                    )
+                    if hallu >= VOICE_HALLUCINATION_RECOVER_STREAK:
+                        self._hallucination_streak[guild_id] = 0
+                        self._schedule_recover(
+                            guild_id,
+                            reason=f"hallucination_streak={hallu}",
+                        )
+                    return
             # Count swears even when we skip storing junk (e.g. thank-you + мат).
             swears = max(count_swears(text), count_swears(sixseven_source))
             if swears:
@@ -1172,7 +1273,7 @@ class VoiceListenService:
                     guild_id,
                     (text or sixseven_source)[:80],
                 )
-            if is_hallucination_heavy(text) or not is_useful_transcript(text):
+            if not is_useful_transcript(text):
                 log.info(
                     "STT skip user=%s guild=%s audio=%.1fs rms=%s text=%r",
                     user_id,
@@ -1182,6 +1283,9 @@ class VoiceListenService:
                     text[:80],
                 )
                 return
+            self._hallucination_streak[guild_id] = 0
+            self._soft_rebind_times[guild_id] = []
+            self._last_useful_stt_at[guild_id] = datetime.now(timezone.utc).timestamp()
             log.info(
                 "STT user=%s guild=%s audio=%.1fs rms=%s text=%r",
                 user_id,
