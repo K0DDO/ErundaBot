@@ -41,11 +41,12 @@ BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
 # Join nearby STT chunks so "сикс" + "севен" across a short pause still match.
 SIXSEVEN_CONTEXT_SECONDS = 3.5
 SIXSEVEN_CONTEXT_MAX_CHUNKS = 4
-# Auto-recover when SSRC/speaker map dies (bot stays connected but STT stops).
-VOICE_RECOVER_UNKNOWN_THRESHOLD = 200
-VOICE_RECOVER_COOLDOWN_SECONDS = 45.0
-VOICE_STALE_PCM_SECONDS = 50.0
-VOICE_HEALTH_CHECK_EVERY = 20.0
+# Auto-recover when SSRC/speaker map or listen sink dies (STT stops).
+VOICE_RECOVER_UNKNOWN_STREAK = 120
+VOICE_RECOVER_COOLDOWN_SECONDS = 30.0
+VOICE_STALE_PCM_SECONDS = 25.0
+VOICE_HEALTH_CHECK_EVERY = 10.0
+VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 20.0
 
 # RU (+ EN Whisper) swear stems; count after STT for /stats later.
 # Word-start only; include common prefixes (заеб/нахуй/…) as separate alts.
@@ -433,8 +434,11 @@ class VoiceListenService:
         self._announce_channels: dict[int, int] = {}
         self._pcm_packets: dict[int, int] = defaultdict(int)
         self._unknown_speaker_packets: dict[int, int] = defaultdict(int)
+        self._unknown_streak: dict[int, int] = defaultdict(int)
         self._last_pcm_at: dict[int, float] = {}
+        self._last_callback_at: dict[int, float] = {}
         self._last_recover_at: dict[int, float] = {}
+        self._last_soft_rebind_at: dict[int, float] = {}
         self._recovering: set[int] = set()
         self._health_tick: float = 0.0
         # guild_id -> ssrc -> user_id (survives brief speaking-map gaps)
@@ -568,9 +572,7 @@ class VoiceListenService:
             )
             self._clients[guild.id] = vc
             self._buffers[guild.id] = {}
-            self._pcm_packets[guild.id] = 0
-            self._unknown_speaker_packets[guild.id] = 0
-            self._last_pcm_at.pop(guild.id, None)
+            self._reset_voice_counters(guild.id)
             if announce_channel_id is not None:
                 self._announce_channels[guild.id] = int(announce_channel_id)
                 log.info(
@@ -592,6 +594,13 @@ class VoiceListenService:
                 where = f"\nРеплики пишу в <#{self._announce_channels[guild.id]}>"
             return f"Слушаю {channel.mention}\n{tip}{where}"
 
+    def _reset_voice_counters(self, guild_id: int) -> None:
+        self._pcm_packets[guild_id] = 0
+        self._unknown_speaker_packets[guild_id] = 0
+        self._unknown_streak[guild_id] = 0
+        self._last_pcm_at.pop(guild_id, None)
+        self._last_callback_at.pop(guild_id, None)
+
     def _bind_listen_sink(
         self,
         bot: ErundaBot,
@@ -607,27 +616,32 @@ class VoiceListenService:
             pass
 
         def on_voice(user: discord.User | discord.Member | None, data) -> None:
+            now = datetime.now(timezone.utc).timestamp()
+            self._last_callback_at[guild.id] = now
             user_id = self._resolve_speaker_id(guild.id, vc, user, data)
             if user_id is None:
                 self._unknown_speaker_packets[guild.id] += 1
-                n = self._unknown_speaker_packets[guild.id]
-                if n in (1, 50, 200, 500, 1000):
+                self._unknown_streak[guild.id] += 1
+                streak = self._unknown_streak[guild.id]
+                total = self._unknown_speaker_packets[guild.id]
+                if streak in (1, 50, 120, 300, 800) or total in (200, 1000):
                     log.warning(
-                        "Voice packets without speaker map in guild %s (n=%s)",
+                        "Voice packets without speaker map in guild %s (streak=%s total=%s)",
                         guild.id,
-                        n,
+                        streak,
+                        total,
                     )
-                if n == VOICE_RECOVER_UNKNOWN_THRESHOLD or n == 1000:
-                    self._schedule_recover(guild.id, reason=f"unknown_ssrc={n}")
+                if streak == VOICE_RECOVER_UNKNOWN_STREAK:
+                    self._schedule_soft_rebind(guild.id, reason=f"unknown_streak={streak}")
+                elif streak == 400:
+                    self._schedule_recover(guild.id, reason=f"unknown_streak={streak}")
                 return
+            self._unknown_streak[guild.id] = 0
             pcm = getattr(data, "pcm", None)
             if not pcm:
                 return
             self._pcm_packets[guild.id] += 1
-            self._last_pcm_at[guild.id] = datetime.now(timezone.utc).timestamp()
-            # Successful map — don't let old unknown counter force recover forever.
-            if self._unknown_speaker_packets[guild.id] > 0:
-                self._unknown_speaker_packets[guild.id] = 0
+            self._last_pcm_at[guild.id] = now
             if self._pcm_packets[guild.id] == 1:
                 log.info("First voice PCM packet in guild %s user=%s", guild.id, user_id)
             bot.loop.call_soon_threadsafe(
@@ -638,6 +652,39 @@ class VoiceListenService:
             )
 
         vc.listen(voice_recv.BasicSink(on_voice, decode=True))
+
+    def _schedule_soft_rebind(self, guild_id: int, *, reason: str) -> None:
+        bot = self._bot
+        if bot is None or guild_id in self._recovering:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        if now - self._last_soft_rebind_at.get(guild_id, 0.0) < VOICE_SOFT_REBIND_COOLDOWN_SECONDS:
+            return
+        self._last_soft_rebind_at[guild_id] = now
+        log.warning("Scheduling voice soft rebind guild=%s (%s)", guild_id, reason)
+
+        def _go() -> None:
+            asyncio.create_task(self._soft_rebind_listen(guild_id, reason=reason))
+
+        bot.loop.call_soon_threadsafe(_go)
+
+    async def _soft_rebind_listen(self, guild_id: int, *, reason: str) -> None:
+        bot = self._bot
+        if bot is None or guild_id in self._recovering:
+            return
+        guild = bot.get_guild(guild_id)
+        vc = self._clients.get(guild_id)
+        if guild is None or vc is None or not vc.is_connected():
+            self._schedule_recover(guild_id, reason=f"soft_rebind_no_vc:{reason}")
+            return
+        log.warning("Soft-rebind voice sink guild=%s (%s)", guild_id, reason)
+        self._ssrc_users.pop(guild_id, None)
+        self._unknown_streak[guild_id] = 0
+        try:
+            await _wait_for_dave(vc, timeout=4.0)
+        except Exception:
+            log.exception("DAVE wait during soft rebind failed guild=%s", guild_id)
+        self._bind_listen_sink(bot, guild, vc)
 
     def _schedule_recover(self, guild_id: int, *, reason: str) -> None:
         bot = self._bot
@@ -718,7 +765,9 @@ class VoiceListenService:
         self._announce_channels.pop(guild_id, None)
         self._pcm_packets.pop(guild_id, None)
         self._unknown_speaker_packets.pop(guild_id, None)
+        self._unknown_streak.pop(guild_id, None)
         self._last_pcm_at.pop(guild_id, None)
+        self._last_callback_at.pop(guild_id, None)
         self._ssrc_users.pop(guild_id, None)
         for key in [k for k in self._recent_stt if k[0] == guild_id]:
             self._recent_stt.pop(key, None)
@@ -793,13 +842,16 @@ class VoiceListenService:
                 if user_id is not None:
                     self._ssrc_users[guild_id][int(ssrc)] = int(user_id)
                     return int(user_id)
-        # Speaking-map sometimes lags; prefer a single unmuted human.
+        # Speaking-map sometimes lags; prefer unmuted / actively speaking humans.
         channel = getattr(vc, "channel", None)
         members = getattr(channel, "members", None) or []
         humans = [m for m in members if not getattr(m, "bot", False)]
         if len(humans) == 1:
-            return int(humans[0].id)
-        live = []
+            user_id = int(humans[0].id)
+            if ssrc is not None:
+                self._ssrc_users[guild_id][int(ssrc)] = user_id
+            return user_id
+        live: list[discord.Member] = []
         for member in humans:
             state = getattr(member, "voice", None)
             if state is None:
@@ -808,7 +860,24 @@ class VoiceListenService:
                 continue
             live.append(member)
         if len(live) == 1:
-            return int(live[0].id)
+            user_id = int(live[0].id)
+            if ssrc is not None:
+                self._ssrc_users[guild_id][int(ssrc)] = user_id
+            return user_id
+        get_speaking = getattr(vc, "get_speaking", None)
+        if callable(get_speaking) and live:
+            speaking_members = []
+            for member in live:
+                try:
+                    if get_speaking(member):
+                        speaking_members.append(member)
+                except Exception:
+                    continue
+            if len(speaking_members) == 1:
+                user_id = int(speaking_members[0].id)
+                if ssrc is not None:
+                    self._ssrc_users[guild_id][int(ssrc)] = user_id
+                return user_id
         return None
 
     async def leave_all_credits_exhausted(self) -> None:
@@ -876,30 +945,77 @@ class VoiceListenService:
                 continue
             guild = bot.get_guild(guild_id)
             channel = self.listening_channel(guild_id)
-            if guild is None or not isinstance(channel, discord.VoiceChannel):
+            vc = self._clients.get(guild_id)
+            if guild is None or vc is None or not isinstance(channel, discord.VoiceChannel):
                 continue
-            humans = [
-                m
-                for m in channel.members
-                if not getattr(m, "bot", False)
-            ]
+            # Sink dropped while vc stayed connected.
+            try:
+                listening = bool(getattr(vc, "is_listening", lambda: True)())
+            except Exception:
+                listening = True
+            if not listening:
+                self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
+                continue
+
+            humans = [m for m in channel.members if not getattr(m, "bot", False)]
             if not humans:
                 continue
+            unmuted = []
+            for member in humans:
+                state = getattr(member, "voice", None)
+                if state is None:
+                    continue
+                if getattr(state, "self_mute", False) or getattr(state, "mute", False):
+                    continue
+                unmuted.append(member)
+            if not unmuted:
+                continue
+
+            speaking = False
+            get_speaking = getattr(vc, "get_speaking", None)
+            if callable(get_speaking):
+                for member in unmuted:
+                    try:
+                        if get_speaking(member):
+                            speaking = True
+                            break
+                    except Exception:
+                        pass
+
             last_pcm = self._last_pcm_at.get(guild_id, 0.0)
-            unknown = self._unknown_speaker_packets.get(guild_id, 0)
-            stale = last_pcm > 0 and (now - last_pcm) >= VOICE_STALE_PCM_SECONDS
-            # Someone is in VC, packets arrive unmapped, and no good PCM for a while.
-            if stale and unknown >= 50:
+            last_cb = self._last_callback_at.get(guild_id, 0.0)
+            streak = self._unknown_streak.get(guild_id, 0)
+            pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
+            cb_age = (now - last_cb) if last_cb > 0 else 1e9
+
+            # People are marked speaking, but we get no usable PCM → map/decrypt dead.
+            if speaking and pcm_age >= 8.0:
+                if cb_age < 5.0 or streak >= 30:
+                    self._schedule_recover(
+                        guild_id,
+                        reason=f"speaking_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
+                    )
+                else:
+                    self._schedule_soft_rebind(
+                        guild_id,
+                        reason=f"speaking_no_callback pcm_age={pcm_age:.0f}s",
+                    )
+                continue
+
+            # RTP callbacks flow, but nothing maps to PCM for too long.
+            if cb_age < 5.0 and pcm_age >= VOICE_STALE_PCM_SECONDS:
                 self._schedule_recover(
                     guild_id,
-                    reason=f"stale_pcm={now - last_pcm:.0f}s unknown={unknown}",
+                    reason=f"callbacks_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
                 )
                 continue
-            # Never got PCM after join but unknowns pile up.
-            if last_pcm <= 0 and unknown >= VOICE_RECOVER_UNKNOWN_THRESHOLD:
-                self._schedule_recover(
+
+            # Completely silent pipeline while unmuted users sit in VC for a while
+            # after we previously had audio — sink likely wedged.
+            if last_pcm > 0 and pcm_age >= (VOICE_STALE_PCM_SECONDS * 3) and cb_age >= 30.0:
+                self._schedule_soft_rebind(
                     guild_id,
-                    reason=f"no_pcm unknown={unknown}",
+                    reason=f"pipeline_idle pcm_age={pcm_age:.0f}s",
                 )
 
     async def _transcribe_and_store(
