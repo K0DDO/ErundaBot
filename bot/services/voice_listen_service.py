@@ -121,8 +121,16 @@ HALLUCINATION_RE = re.compile(
     r"редактор\s+субтитров|коррек(?:тор|ция)\s+субтитров|"
     r"thanks?\s+for\s+watching|subscribe|like\s+and\s+subscribe|"
     r"amara\.org|translated\s+by|caption(s|ed)?\s+by|"
-    # Empty-room / noise often becomes only «Спасибо» spam.
-    r"^(?:спасибо[.!]?\s*)+$"
+    r"toot\s+toot|pewds|"
+    # Empty-room / noise often becomes only thanks spam (RU/EN).
+    r"^(?:(?:спасибо|thanks?|thank\s+you|ty)[.!,…]*\s*)+$"
+)
+# Filler that should never enter voice «дело».
+DOSSIER_JUNK_RE = re.compile(
+    r"(?i)"
+    r"субтитры|продолжение\s+следует|dimatorzok|"
+    r"thank\s+you|thanks\s+for|toot\s+toot|"
+    r"редактор\s+субтитров|коррек(?:тор|ция)"
 )
 SOUNDBOARD_TRIGGER_NAME = "67"
 SOUNDBOARD_COOLDOWN_SECONDS = 2.0
@@ -152,6 +160,14 @@ def is_hallucination_heavy(text: str) -> bool:
     return False
 
 
+def _cyrillic_letters(text: str) -> int:
+    return sum(
+        1
+        for ch in text
+        if ("а" <= ch.lower() <= "я") or ch.lower() == "ё"
+    )
+
+
 def is_useful_transcript(text: str) -> bool:
     cleaned = (text or "").strip()
     if len(cleaned) < 2:
@@ -160,8 +176,47 @@ def is_useful_transcript(text: str) -> bool:
         return False
     if HALLUCINATION_RE.search(cleaned):
         return False
+    if DOSSIER_JUNK_RE.search(cleaned):
+        return False
     letters = sum(1 for ch in cleaned if ch.isalpha())
-    return letters >= 2
+    if letters < 2:
+        return False
+    # Latin-only filler from no-lang Whisper on RU VC noise.
+    if _cyrillic_letters(cleaned) == 0 and letters < 12:
+        return False
+    return True
+
+
+def is_dossier_worthy(text: str) -> bool:
+    """Stricter than STT store: drop meme-only / Latin filler before «дело»."""
+    cleaned = (text or "").strip()
+    if not is_useful_transcript(cleaned):
+        return False
+    if DOSSIER_JUNK_RE.search(cleaned):
+        return False
+    if mentions_sixseven(cleaned) and len(cleaned) < 24:
+        return False
+    if _cyrillic_letters(cleaned) < 4:
+        return False
+    return len(cleaned) >= 8
+
+
+def is_dossier_worthy(text: str) -> bool:
+    """Snippets safe to feed into daily «дело» summarizer."""
+    cleaned = (text or "").strip()
+    if not is_useful_transcript(cleaned):
+        return False
+    if DOSSIER_JUNK_RE.search(cleaned):
+        return False
+    if _cyrillic_letters(cleaned) < 6:
+        return False
+    letters = sum(1 for ch in cleaned if ch.isalpha())
+    if letters < 10:
+        return False
+    # Lone meme trigger is not a personality fact.
+    if mentions_sixseven(cleaned) and letters < 24:
+        return False
+    return True
 
 
 def pcm_rms(pcm: bytes) -> int:
@@ -1044,6 +1099,9 @@ class VoiceListenService:
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
             # RU-locked Whisper often drops the meme into «Продолжение следует».
+            # Retry without language is ONLY for sixseven detection — Latin filler
+            # («Thank you», game UI) must not replace RU hallucination in snippets.
+            sixseven_source = text
             if text and is_hallucination_heavy(text) and not mentions_sixseven(text):
                 retry = await self.ai.transcribe_wav(wav, language=None)
                 retry = (retry or "").strip()
@@ -1055,19 +1113,28 @@ class VoiceListenService:
                         text[:80],
                         retry[:80],
                     )
-                    if mentions_sixseven(retry) or not is_hallucination_heavy(retry):
+                    if mentions_sixseven(retry):
+                        sixseven_source = retry
+                    elif (
+                        not is_hallucination_heavy(retry)
+                        and is_useful_transcript(retry)
+                        and _cyrillic_letters(retry) >= 4
+                    ):
                         text = retry
-            hit, matched = self._sixseven_from_context(guild_id, user_id, text)
+                        sixseven_source = retry
+            hit, matched = self._sixseven_from_context(
+                guild_id, user_id, sixseven_source
+            )
             if hit:
                 log.info(
                     "Sixseven trigger user=%s guild=%s text=%r matched=%r",
                     user_id,
                     guild_id,
-                    text[:120],
+                    sixseven_source[:120],
                     matched[:120],
                 )
                 await self._play_sixseven_sound(bot, guild_id)
-            if not is_useful_transcript(text):
+            if is_hallucination_heavy(text) or not is_useful_transcript(text):
                 log.info(
                     "STT skip user=%s guild=%s audio=%.1fs rms=%s text=%r",
                     user_id,
@@ -1387,7 +1454,13 @@ class VoiceListenService:
                 continue
             member = guild.get_member(user_id)
             name = member.display_name if member else f"user {user_id}"
-            joined = "\n".join(f"- {item.text}" for item in snippets[:60])
+            worthy = [item for item in snippets if is_dossier_worthy(item.text)]
+            if not worthy:
+                await self.db.mark_voice_snippets_processed(
+                    [item.id for item in snippets]
+                )
+                continue
+            joined = "\n".join(f"- {item.text}" for item in worthy[:60])
             facts = await self.ai.summarize_voice_dossier(
                 display_name=name,
                 lines=joined,

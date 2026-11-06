@@ -34,6 +34,9 @@ FILM_TITLE_TIMEOUT_SECONDS = 20
 VOICE_DOSSIER_PROMPT = (
     "Ты помощник Discord-бота. По репликам человека из голосового чата "
     "выпиши до 3 коротких нейтральных фактов для «дела» (привычки, шутки, темы). "
+    "Бери ТОЛЬКО то, что явно сказано в репликах — ничего не выдумывай и не додумывай. "
+    "Игнорируй мусор Whisper: «спасибо», thank you, субтитры, продолжение следует, "
+    "toot, обрывки без смысла, чистые мемы вроде 6-7 / six seven без контекста. "
     "Без матов, оскорблений, NSFW, политики и личных тайн. "
     "Каждый факт — одно короткое предложение на русском. "
     "Если полезного нет — верни пустой JSON-массив []. "
@@ -363,11 +366,16 @@ class AIService:
             return []
         if not isinstance(data, list):
             return []
+        junk = re.compile(
+            r"(?i)dimatorzok|субтитры|продолжение\s+следует|благодар|"
+            r"pewds|следующ(?:ему|ее)\s+видео|непонятн|"
+            r"говорит на русском|разговорный русский|thank\s*you"
+        )
         facts: list[str] = []
         for item in data:
             if isinstance(item, str):
                 cleaned = " ".join(item.split()).strip()
-                if cleaned:
+                if cleaned and not junk.search(cleaned):
                     facts.append(cleaned[:240])
         return facts[:5]
 
