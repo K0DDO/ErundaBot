@@ -22,17 +22,41 @@ def bind_santa_view(bot: ErundaBot, event: SantaEvent, message_id: int) -> None:
         bot.add_view(SantaPersistentView(bot, event.id), message_id=message_id)
 
 
+async def _santa_channel_for_event(
+    bot: ErundaBot,
+    guild: discord.Guild,
+    event: SantaEvent,
+) -> discord.abc.Messageable | None:
+    channel_id = event.channel_id
+    if channel_id is None:
+        config = await bot.db.get_guild(guild.id)
+        channel_id = config.santa_channel_id if config is not None else None
+    if channel_id is None:
+        return None
+    channel = guild.get_channel(channel_id)
+    if channel is None or not hasattr(channel, "send"):
+        return None
+    return channel
+
+
 async def register_santa_views(bot: ErundaBot) -> None:
     for event in await bot.db.list_open_santa_events():
-        if event.message_id is None or event.channel_id is None:
-            continue
         guild = bot.get_guild(event.guild_id)
         if guild is None:
-            bind_santa_view(bot, event, event.message_id)
+            if event.message_id is not None:
+                bind_santa_view(bot, event, event.message_id)
             continue
-        channel = guild.get_channel(event.channel_id)
-        if channel is None or not hasattr(channel, "fetch_message"):
-            bind_santa_view(bot, event, event.message_id)
+        channel = await _santa_channel_for_event(bot, guild, event)
+        if channel is None:
+            if event.message_id is not None:
+                bind_santa_view(bot, event, event.message_id)
+            continue
+        if event.message_id is None:
+            log.warning("Santa card has no message_id (event=%s) — publishing", event.id)
+            try:
+                await publish_santa_message(bot, guild, event, channel, save=True)
+            except Exception:
+                log.exception("Failed to publish santa card event=%s", event.id)
             continue
         try:
             await channel.fetch_message(event.message_id)

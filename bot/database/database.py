@@ -2683,7 +2683,7 @@ class Database:
 
     async def list_open_santa_events(self) -> list[SantaEvent]:
         cursor = await self.connection.execute(
-            "SELECT * FROM santa_events WHERE drawn = 0 AND message_id IS NOT NULL"
+            "SELECT * FROM santa_events WHERE drawn = 0"
         )
         rows = await cursor.fetchall()
         return [SantaEvent.from_row(row) for row in rows]
