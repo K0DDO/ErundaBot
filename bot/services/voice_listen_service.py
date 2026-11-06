@@ -44,14 +44,22 @@ SIXSEVEN_CONTEXT_MAX_CHUNKS = 6
 # Auto-recover when SSRC/speaker map or listen sink dies (STT stops).
 VOICE_RECOVER_UNKNOWN_STREAK = 80
 VOICE_HARD_RECOVER_UNKNOWN_STREAK = 160
-VOICE_RECOVER_COOLDOWN_SECONDS = 25.0
-VOICE_STALE_PCM_SECONDS = 18.0
-VOICE_HEALTH_CHECK_EVERY = 8.0
-VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 15.0
+VOICE_RECOVER_COOLDOWN_SECONDS = 20.0
+VOICE_STALE_PCM_SECONDS = 15.0
+VOICE_HEALTH_CHECK_EVERY = 5.0
+VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 12.0
 # Soft-rebind alone rarely fixes DAVE/map death — escalate after N attempts.
 VOICE_SOFT_REBIND_ESCALATE_AFTER = 2
 VOICE_SOFT_REBIND_WINDOW_SECONDS = 180.0
 VOICE_HALLUCINATION_RECOVER_STREAK = 3
+# Intermittent DAVE NoValidCryptorFound keeps last_pcm fresh but STT dies.
+VOICE_USEFUL_STT_STALE_SECONDS = 45.0
+VOICE_USEFUL_STT_FORCE_SECONDS = 75.0
+VOICE_DAVE_FAIL_WINDOW_SECONDS = 12.0
+VOICE_DAVE_FAIL_RECOVER_COUNT = 20
+
+# Rolling DAVE decrypt stats (updated from voice_recv patch).
+_DAVE_EVENTS: list[tuple[float, bool]] = []
 
 # RU (+ EN Whisper) swear stems; count after STT for /stats later.
 # Word-start only; include common prefixes (заеб/нахуй/…) as separate alts.
@@ -284,6 +292,39 @@ def pcm_to_wav_bytes(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 
+def _note_dave_result(ok: bool) -> None:
+    now = datetime.now(timezone.utc).timestamp()
+    _DAVE_EVENTS.append((now, ok))
+    # Keep ~30s of history.
+    cutoff = now - 30.0
+    while _DAVE_EVENTS and _DAVE_EVENTS[0][0] < cutoff:
+        _DAVE_EVENTS.pop(0)
+
+
+def _dave_fail_counts(*, window: float = VOICE_DAVE_FAIL_WINDOW_SECONDS) -> tuple[int, int]:
+    now = datetime.now(timezone.utc).timestamp()
+    cutoff = now - window
+    fails = 0
+    oks = 0
+    for ts, ok in _DAVE_EVENTS:
+        if ts < cutoff:
+            continue
+        if ok:
+            oks += 1
+        else:
+            fails += 1
+    return fails, oks
+
+
+def _dave_cryptor_broken() -> bool:
+    fails, oks = _dave_fail_counts()
+    return fails >= VOICE_DAVE_FAIL_RECOVER_COUNT and fails > oks * 3
+
+
+def _reset_dave_stats() -> None:
+    _DAVE_EVENTS.clear()
+
+
 def _patch_voice_recv() -> None:
     """DAVE decrypt (PR#54-style) + keep listening on bad opus frames.
 
@@ -351,6 +392,7 @@ def _patch_voice_recv() -> None:
                     bytes(raw),
                 )
                 dave_ok["n"] += 1
+                _note_dave_result(True)
                 if dave_ok["n"] == 1:
                     users = []
                     try:
@@ -364,7 +406,8 @@ def _patch_voice_recv() -> None:
                     )
             except Exception as exc:
                 dave_fails["n"] += 1
-                if dave_fails["n"] in (1, 50, 200, 1000):
+                _note_dave_result(False)
+                if dave_fails["n"] in (1, 25, 50, 200, 1000):
                     users = []
                     try:
                         users = list(session.get_user_ids())
@@ -378,6 +421,11 @@ def _patch_voice_recv() -> None:
                         users,
                         exc,
                     )
+                    # Keys often go stale; re-open passthrough window.
+                    try:
+                        session.set_passthrough_mode(True, 120)
+                    except Exception:
+                        pass
                 # Drop frame as silence so opus/router stay alive.
                 self._last_seq = packet.sequence
                 self._last_ts = packet.timestamp
@@ -860,9 +908,11 @@ class VoiceListenService:
                 channel.id,
                 reason,
             )
+            _reset_dave_stats()
             await self.leave(guild_id, flush=False, clear_resume=False)
             await asyncio.sleep(1.2)
             await self.join(bot, channel, announce_channel_id=announce_id)
+            _reset_dave_stats()
             log.info("Voice listen recovered guild=%s", guild_id)
         except Exception:
             log.exception("Voice listen recover failed guild=%s", guild_id)
@@ -1075,7 +1125,9 @@ class VoiceListenService:
             guild = bot.get_guild(guild_id)
             channel = self.listening_channel(guild_id)
             vc = self._clients.get(guild_id)
-            if guild is None or vc is None or not isinstance(channel, discord.VoiceChannel):
+            if guild is None or vc is None:
+                continue
+            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
                 continue
             # Sink dropped while vc stayed connected.
             try:
@@ -1113,9 +1165,41 @@ class VoiceListenService:
 
             last_pcm = self._last_pcm_at.get(guild_id, 0.0)
             last_cb = self._last_callback_at.get(guild_id, 0.0)
+            last_useful = self._last_useful_stt_at.get(guild_id, 0.0)
             streak = self._unknown_streak.get(guild_id, 0)
             pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
             cb_age = (now - last_cb) if last_cb > 0 else 1e9
+            useful_age = (now - last_useful) if last_useful > 0 else 1e9
+            dave_broken = _dave_cryptor_broken()
+            dave_fails, dave_oks = _dave_fail_counts()
+
+            # MLS cryptors stale: decrypt fails in a burst while RTP still flows.
+            if dave_broken:
+                self._schedule_recover(
+                    guild_id,
+                    reason=f"dave_cryptor_broken fails={dave_fails} oks={dave_oks}",
+                )
+                continue
+
+            # Had working STT, then it went dark while unmuted people remain.
+            # Intermittent DAVE success can keep last_pcm fresh without real STT.
+            if last_useful > 0 and useful_age >= VOICE_USEFUL_STT_STALE_SECONDS:
+                activity = (
+                    cb_age < 15.0
+                    or speaking
+                    or pcm_age < useful_age
+                    or dave_fails >= 5
+                )
+                if activity or useful_age >= VOICE_USEFUL_STT_FORCE_SECONDS:
+                    self._schedule_recover(
+                        guild_id,
+                        reason=(
+                            f"useful_stt_stale age={useful_age:.0f}s "
+                            f"pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s "
+                            f"dave_fail={dave_fails} speaking={speaking}"
+                        ),
+                    )
+                    continue
 
             # People are marked speaking, but we get no usable PCM → map/decrypt dead.
             if speaking and pcm_age >= 8.0:
@@ -1140,8 +1224,6 @@ class VoiceListenService:
                 continue
 
             # Decrypt/map half-dead: callbacks + loud PCM exist but STT is only Whisper junk.
-            last_useful = self._last_useful_stt_at.get(guild_id, 0.0)
-            useful_age = (now - last_useful) if last_useful > 0 else 1e9
             if (
                 speaking
                 and cb_age < 5.0
@@ -1157,12 +1239,11 @@ class VoiceListenService:
                 )
                 continue
 
-            # Completely silent pipeline while unmuted users sit in VC for a while
-            # after we previously had audio — sink likely wedged.
-            if last_pcm > 0 and pcm_age >= (VOICE_STALE_PCM_SECONDS * 3) and cb_age >= 30.0:
-                self._schedule_soft_rebind(
+            # Completely silent pipeline while unmuted users sit in VC — hard recover.
+            if last_pcm > 0 and pcm_age >= (VOICE_STALE_PCM_SECONDS * 3) and cb_age >= 25.0:
+                self._schedule_recover(
                     guild_id,
-                    reason=f"pipeline_idle pcm_age={pcm_age:.0f}s",
+                    reason=f"pipeline_idle pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s",
                 )
 
     async def _transcribe_and_store(
