@@ -44,7 +44,7 @@ SIXSEVEN_CONTEXT_MAX_CHUNKS = 6
 # Auto-recover when SSRC/speaker map or listen sink dies (STT stops).
 VOICE_RECOVER_UNKNOWN_STREAK = 100
 VOICE_HARD_RECOVER_UNKNOWN_STREAK = 250
-VOICE_HEAL_COOLDOWN_SECONDS = 45.0
+VOICE_HEAL_COOLDOWN_SECONDS = 60.0
 VOICE_STALE_PCM_SECONDS = 30.0
 VOICE_HEALTH_CHECK_EVERY = 8.0
 VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 25.0
@@ -58,8 +58,8 @@ VOICE_USEFUL_STT_STALE_SECONDS = 150.0
 VOICE_DAVE_FAIL_WINDOW_SECONDS = 12.0
 VOICE_DAVE_FAIL_RECOVER_COUNT = 40
 VOICE_NO_RTP_RECOVER_SECONDS = 50.0
-# Leave+join only if the voice websocket itself is gone — never for DAVE/STT glitches.
-VOICE_HARD_RECONNECT_COOLDOWN_SECONDS = 300.0
+# Leave+join only when the voice websocket/UDP path is actually dead.
+VOICE_HARD_RECONNECT_COOLDOWN_SECONDS = 180.0
 
 # Rolling DAVE decrypt stats (updated from voice_recv patch).
 _DAVE_EVENTS: list[tuple[float, bool]] = []
@@ -803,6 +803,25 @@ class VoiceListenService:
         self._last_pcm_at.pop(guild_id, None)
         self._last_callback_at.pop(guild_id, None)
 
+    def _mark_heal_grace(self, guild_id: int) -> None:
+        """Pause health checks without wiping RTP timestamps / session clock."""
+        now = datetime.now(timezone.utc).timestamp()
+        self._recover_grace_until[guild_id] = now + 20.0
+
+    @staticmethod
+    def _voice_ws_alive(vc: discord.VoiceProtocol) -> bool:
+        if not getattr(vc, "is_connected", lambda: False)():
+            return False
+        ws = getattr(vc, "ws", None)
+        if ws is None:
+            return False
+        if getattr(ws, "closed", False):
+            return False
+        raw = getattr(ws, "ws", None) or getattr(ws, "_ws", None)
+        if raw is not None and getattr(raw, "closed", False):
+            return False
+        return True
+
     async def _wait_for_rtp(self, guild_id: int, *, timeout: float = VOICE_RTP_WAIT_SECONDS) -> bool:
         """Return True once a real voice callback arrives after session start."""
         started = self._session_started_at.get(guild_id, 0.0)
@@ -886,7 +905,8 @@ class VoiceListenService:
         last_cb = self._last_callback_at.get(guild_id, 0.0)
         cb_age = (now - last_cb) if last_cb > 0 else 1e9
         if cb_age >= 15.0:
-            self._schedule_heal(guild_id, reason=f"skip_soft_rebind:{reason}")
+            # No RTP at all — sink rebind won't help; voice transport is dead.
+            self._schedule_hard_reconnect(guild_id, reason=f"no_rtp:{reason}")
             return
         recent = [
             ts
@@ -963,6 +983,9 @@ class VoiceListenService:
         bot.loop.call_soon_threadsafe(_go)
 
     async def _heal_listen(self, guild_id: int, *, reason: str) -> None:
+        """In-place: passthrough + sink rebind. Never call reinit_dave_session here —
+        it nukes MLS keys and often fails with 'closing transport', then loops forever.
+        """
         if guild_id in self._healing:
             return
         bot = self._bot
@@ -977,41 +1000,25 @@ class VoiceListenService:
         try:
             guild = bot.get_guild(guild_id)
             vc = self._clients.get(guild_id)
-            if guild is None or vc is None or not vc.is_connected():
-                self._schedule_hard_reconnect(guild_id, reason=f"heal_no_vc:{reason}")
+            if guild is None or vc is None or not self._voice_ws_alive(vc):
+                self._schedule_hard_reconnect(guild_id, reason=f"heal_dead_ws:{reason}")
                 return
             log.warning(
                 "Healing voice listen in place guild=%s (%s)",
                 guild_id,
                 reason,
             )
-            _reset_dave_stats()
             state = getattr(vc, "_connection", None)
-            reinit = getattr(state, "reinit_dave_session", None) if state is not None else None
-            if callable(reinit):
-                try:
-                    await reinit()
-                    log.info("DAVE session reinit sent guild=%s", guild_id)
-                except Exception:
-                    log.exception("DAVE reinit_dave_session failed guild=%s", guild_id)
             session = getattr(state, "dave_session", None) if state is not None else None
             if session is not None:
                 try:
                     session.set_passthrough_mode(True, 120)
                 except Exception:
-                    pass
-            try:
-                await _wait_for_dave(vc, timeout=8.0)
-            except Exception:
-                log.exception("DAVE wait during heal failed guild=%s", guild_id)
+                    log.exception("DAVE passthrough during heal failed guild=%s", guild_id)
             self._unknown_streak[guild_id] = 0
             self._hallucination_streak[guild_id] = 0
             self._bind_listen_sink(bot, guild, vc)
-            # Brief settle so MLS welcome/commit can land; stay in channel.
-            await asyncio.sleep(2.0)
-            self._bind_listen_sink(bot, guild, vc)
-            self._mark_voice_join_grace(guild_id)
-            _reset_dave_stats()
+            self._mark_heal_grace(guild_id)
             log.info("Voice listen healed in place guild=%s", guild_id)
         except Exception:
             log.exception("Voice listen heal failed guild=%s", guild_id)
@@ -1409,18 +1416,18 @@ class VoiceListenService:
                 )
                 continue
 
-            # Quiet unmuted people ≠ dead voice. Heal sink/DAVE in place if RTP died
-            # while someone is speaking; never leave+join for silence.
+            # No audio callbacks after join / while speaking ⇒ UDP/WS dead.
+            # Hard reconnect is correct here (heal cannot recreate the transport).
             session_started = self._session_started_at.get(guild_id, 0.0)
             session_age = (now - session_started) if session_started > 0 else 0.0
             if last_cb <= 0 and session_age >= VOICE_NO_RTP_RECOVER_SECONDS:
-                self._schedule_heal(
+                self._schedule_hard_reconnect(
                     guild_id,
                     reason=f"no_rtp_after_join session_age={session_age:.0f}s",
                 )
                 continue
             if speaking and last_cb > 0 and cb_age >= VOICE_NO_RTP_RECOVER_SECONDS:
-                self._schedule_heal(
+                self._schedule_hard_reconnect(
                     guild_id,
                     reason=f"rtp_dead_while_speaking cb_age={cb_age:.0f}s",
                 )
