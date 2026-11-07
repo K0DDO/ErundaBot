@@ -100,8 +100,19 @@ SWEAR_RE = re.compile(
     r")"
     r"[а-яёa-z]*"
 )
-# Whisper mangles the meme hard: «6, 7», сексон, сексаван, sex seven, …
+# Whisper mangles the meme hard: «6, 7», сексон, «Зигг сервон», Zick servon…
 _SIX_SEP = r"[\s\-–—./,;:…]*"
+# First half of the meme as Whisper hears it.
+_SIX_STEM = (
+    r"(?:сикс|сик\s*с?|секс|сек\s*с?|сыкс|сакс|цикс|"
+    r"six|sick|sik|sex|see|zick|zigg?|zik|"
+    r"зигг+|зиг|зик)"
+)
+# Second half.
+_SEVEN_STEM = (
+    r"(?:севен|севон|сервон|серван|саван|семь|"
+    r"seven|sevon|servon|servan|sevan)"
+)
 SIXSEVEN_RE = re.compile(
     r"(?:"
     rf"six{_SIX_SEP}seven|"
@@ -131,7 +142,9 @@ SIXSEVEN_RE = re.compile(
     rf"шесть{_SIX_SEP}семь|"
     rf"6{_SIX_SEP}семь|"
     rf"6{_SIX_SEP}саван|"
-    r"шесть\s*7"
+    r"шесть\s*7|"
+    # Live Whisper mangling observed 2026-11-07: «Зигг, сервон!» / «Zick, servon!»
+    rf"{_SIX_STEM}{_SIX_SEP}{_SEVEN_STEM}"
     r")"
 )
 # Whisper noise / music hallucinations on bad / encrypted-as-noise audio.
@@ -167,22 +180,47 @@ def count_swears(text: str) -> int:
     return len(SWEAR_RE.findall(text or ""))
 
 
-def mentions_sixseven(text: str) -> bool:
+def _normalize_sixseven_text(text: str) -> str:
     cleaned = (text or "").casefold().replace("ё", "е")
-    # Whisper often sticks punctuation to digits/words: «6-7.», «6, 7», «Сек-севен?»
-    cleaned = re.sub(r"[\"'«»„“”]", "", cleaned)
+    cleaned = re.sub(r"[\"'«»„“”!?]", " ", cleaned)
+    # Whisper often sticks punctuation to digits/words: «6-7.», «6, 7».
     cleaned = re.sub(r"(?<!\d)6[\s\-–—./,;:…]+7(?!\d)", "67", cleaned)
+    # Collapse observed RU/EN mangling toward canonical stems before regex.
+    replacements = (
+        (r"зигг+", "сикс"),
+        (r"\bзиг\b", "сикс"),
+        (r"\bзик\b", "сикс"),
+        (r"\bzick\b", "six"),
+        (r"\bzigg+\b", "six"),
+        (r"\bzig\b", "six"),
+        (r"\bzik\b", "six"),
+        (r"сервон", "севен"),
+        (r"серван", "севен"),
+        (r"севон", "севен"),
+        (r"\bservon\b", "seven"),
+        (r"\bservan\b", "seven"),
+        (r"\bsevon\b", "seven"),
+        (r"\bsevan\b", "seven"),
+    )
+    for pattern, repl in replacements:
+        cleaned = re.sub(pattern, repl, cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def mentions_sixseven(text: str) -> bool:
+    cleaned = _normalize_sixseven_text(text)
     return bool(SIXSEVEN_RE.search(cleaned))
 
 
 def maybe_sixseven_near_miss(text: str) -> bool:
     """Cheap hint that Whisper mangled the meme — worth a no-lang retry."""
-    cleaned = (text or "").casefold().replace("ё", "е")
+    cleaned = _normalize_sixseven_text(text)
     if not cleaned or mentions_sixseven(cleaned):
         return False
     return bool(
         re.search(
-            r"(?:секс|сикс|сыкс|сакс|шесть|six|sex|sick|67|"
+            rf"(?:{_SIX_STEM}|{_SEVEN_STEM}|шесть|67|"
             r"(?<!\d)6\D{0,4}7(?!\d)|(?<!\d)6\b)",
             cleaned,
         )
