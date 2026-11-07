@@ -44,11 +44,11 @@ SIXSEVEN_CONTEXT_MAX_CHUNKS = 6
 # Auto-recover when SSRC/speaker map or listen sink dies (STT stops).
 VOICE_RECOVER_UNKNOWN_STREAK = 100
 VOICE_HARD_RECOVER_UNKNOWN_STREAK = 250
-VOICE_RECOVER_COOLDOWN_SECONDS = 120.0
+VOICE_HEAL_COOLDOWN_SECONDS = 45.0
 VOICE_STALE_PCM_SECONDS = 30.0
 VOICE_HEALTH_CHECK_EVERY = 8.0
 VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 25.0
-VOICE_SOFT_REBIND_ESCALATE_AFTER = 2
+VOICE_SOFT_REBIND_ESCALATE_AFTER = 3
 VOICE_SOFT_REBIND_WINDOW_SECONDS = 180.0
 VOICE_HALLUCINATION_RECOVER_STREAK = 3
 # After connect: wait for real RTP before trusting health checks.
@@ -58,6 +58,8 @@ VOICE_USEFUL_STT_STALE_SECONDS = 150.0
 VOICE_DAVE_FAIL_WINDOW_SECONDS = 12.0
 VOICE_DAVE_FAIL_RECOVER_COUNT = 40
 VOICE_NO_RTP_RECOVER_SECONDS = 50.0
+# Leave+join only if the voice websocket itself is gone — never for DAVE/STT glitches.
+VOICE_HARD_RECONNECT_COOLDOWN_SECONDS = 300.0
 
 # Rolling DAVE decrypt stats (updated from voice_recv patch).
 _DAVE_EVENTS: list[tuple[float, bool]] = []
@@ -326,6 +328,29 @@ def _reset_dave_stats() -> None:
     _DAVE_EVENTS.clear()
 
 
+def _looks_dave_frame(raw: bytes) -> bool:
+    """DAVE ciphertext usually carries the 0xFAFA marker near the end."""
+    if len(raw) < 4:
+        return False
+    return raw[-2:] == b"\xfa\xfa" or b"\xfa\xfa" in raw[-6:]
+
+
+def _strip_rtp_padding(raw: bytes, *, padding: bool) -> bytes:
+    """voice_recv leaves RTP padding in place (TODO in library); DAVE hates it."""
+    if not raw:
+        return raw
+    if padding:
+        n = raw[-1]
+        if 0 < n < len(raw):
+            return raw[:-n]
+    # Heuristic: trailing run of identical pad-count bytes (e.g. 05 05 05 05).
+    if len(raw) >= 4:
+        n = raw[-1]
+        if 2 <= n <= 32 and n < len(raw) and raw[-n:] == bytes([n]) * n:
+            return raw[:-n]
+    return raw
+
+
 def _patch_voice_recv() -> None:
     """DAVE decrypt (PR#54-style) + keep listening on bad opus frames.
 
@@ -386,11 +411,13 @@ def _patch_voice_recv() -> None:
             and member is not None
             and int(payload) == 120
         ):
+            padding = bool(getattr(packet, "padding", False))
+            cleaned = _strip_rtp_padding(bytes(raw), padding=padding)
             try:
                 packet.decrypted_data = session.decrypt(
                     int(member.id),
                     MediaType.audio,
-                    bytes(raw),
+                    cleaned,
                 )
                 dave_ok["n"] += 1
                 _note_dave_result(True)
@@ -407,14 +434,18 @@ def _patch_voice_recv() -> None:
                     )
             except Exception as exc:
                 exc_text = repr(exc)
-                # Epoch transitions: payload is already transport-decrypted Opus.
-                if "UnencryptedWhenPassthroughDisabled" in exc_text:
+                # Epoch transitions / non-DAVE frames: already transport-decrypted Opus.
+                if (
+                    "UnencryptedWhenPassthroughDisabled" in exc_text
+                    or not _looks_dave_frame(cleaned)
+                ):
                     _note_dave_result(True)
+                    packet.decrypted_data = cleaned
                     try:
                         session.set_passthrough_mode(True, 120)
                     except Exception:
                         pass
-                    # Fall through to opus decode with existing decrypted_data.
+                    # Fall through to opus decode.
                 else:
                     dave_fails["n"] += 1
                     _note_dave_result(False)
@@ -589,13 +620,14 @@ class VoiceListenService:
         self._last_pcm_at: dict[int, float] = {}
         self._last_callback_at: dict[int, float] = {}
         self._last_useful_stt_at: dict[int, float] = {}
-        self._last_recover_at: dict[int, float] = {}
+        self._last_heal_at: dict[int, float] = {}
+        self._last_hard_reconnect_at: dict[int, float] = {}
         self._recover_grace_until: dict[int, float] = {}
         self._session_started_at: dict[int, float] = {}
         self._last_soft_rebind_at: dict[int, float] = {}
         self._soft_rebind_times: dict[int, list[float]] = defaultdict(list)
         self._hallucination_streak: dict[int, int] = defaultdict(int)
-        self._recovering: set[int] = set()
+        self._healing: set[int] = set()
         self._health_tick: float = 0.0
         # guild_id -> ssrc -> user_id (survives brief speaking-map gaps)
         self._ssrc_users: dict[int, dict[int, int]] = defaultdict(dict)
@@ -821,7 +853,7 @@ class VoiceListenService:
                 if streak == VOICE_RECOVER_UNKNOWN_STREAK:
                     self._schedule_soft_rebind(guild.id, reason=f"unknown_streak={streak}")
                 elif streak == VOICE_HARD_RECOVER_UNKNOWN_STREAK:
-                    self._schedule_recover(guild.id, reason=f"unknown_streak={streak}")
+                    self._schedule_heal(guild.id, reason=f"unknown_streak={streak}")
                 return
             # Decay instead of hard reset — flapping known/unknown must still escalate.
             self._unknown_streak[guild.id] = max(0, self._unknown_streak[guild.id] - 8)
@@ -846,16 +878,15 @@ class VoiceListenService:
         vc.listen(voice_recv.BasicSink(on_voice, decode=True))
 
     def _schedule_soft_rebind(self, guild_id: int, *, reason: str) -> None:
-        """Rebind sink only when RTP is still flowing. No RTP → hard recover."""
+        """Rebind sink in place. Escalate to DAVE heal — never leave+join."""
         bot = self._bot
-        if bot is None or guild_id in self._recovering:
+        if bot is None or guild_id in self._healing:
             return
         now = datetime.now(timezone.utc).timestamp()
         last_cb = self._last_callback_at.get(guild_id, 0.0)
         cb_age = (now - last_cb) if last_cb > 0 else 1e9
-        # Soft-rebind with a dead UDP path just breaks is_listening and loops.
-        if cb_age >= 15.0 or "pipeline_idle" in reason:
-            self._schedule_recover(guild_id, reason=f"skip_soft_rebind:{reason}")
+        if cb_age >= 15.0:
+            self._schedule_heal(guild_id, reason=f"skip_soft_rebind:{reason}")
             return
         recent = [
             ts
@@ -864,7 +895,7 @@ class VoiceListenService:
         ]
         self._soft_rebind_times[guild_id] = recent
         if len(recent) >= VOICE_SOFT_REBIND_ESCALATE_AFTER:
-            self._schedule_recover(
+            self._schedule_heal(
                 guild_id,
                 reason=f"soft_rebind_escalate:{reason} n={len(recent)}",
             )
@@ -882,68 +913,143 @@ class VoiceListenService:
 
     async def _soft_rebind_listen(self, guild_id: int, *, reason: str) -> None:
         bot = self._bot
-        if bot is None or guild_id in self._recovering:
+        if bot is None or guild_id in self._healing:
             return
         guild = bot.get_guild(guild_id)
         vc = self._clients.get(guild_id)
         if guild is None or vc is None or not vc.is_connected():
-            self._schedule_recover(guild_id, reason=f"soft_rebind_no_vc:{reason}")
+            self._schedule_hard_reconnect(guild_id, reason=f"soft_rebind_no_vc:{reason}")
             return
         log.warning("Soft-rebind voice sink guild=%s (%s)", guild_id, reason)
-        self._ssrc_users.pop(guild_id, None)
+        # Keep SSRC map — wiping it caused "without speaker map" storms.
         self._unknown_streak[guild_id] = 0
         try:
-            await _wait_for_dave(vc, timeout=4.0)
+            state = getattr(vc, "_connection", None)
+            session = getattr(state, "dave_session", None) if state is not None else None
+            if session is not None:
+                session.set_passthrough_mode(True, 120)
         except Exception:
-            log.exception("DAVE wait during soft rebind failed guild=%s", guild_id)
+            pass
         self._bind_listen_sink(bot, guild, vc)
-        await asyncio.sleep(8.0)
-        if guild_id in self._recovering:
+        await asyncio.sleep(6.0)
+        if guild_id in self._healing:
             return
         try:
             listening = bool(getattr(vc, "is_listening", lambda: False)())
         except Exception:
             listening = False
-        now = datetime.now(timezone.utc).timestamp()
-        last_pcm = self._last_pcm_at.get(guild_id, 0.0)
-        last_cb = self._last_callback_at.get(guild_id, 0.0)
-        if not listening or (
-            last_cb > 0 and (now - last_cb) < 5.0 and (now - last_pcm if last_pcm else 1e9) > 10.0
-        ):
-            self._schedule_recover(
+        if not listening:
+            self._schedule_heal(
                 guild_id,
                 reason=f"soft_rebind_failed:{reason} listening={listening}",
             )
 
-    def _schedule_recover(self, guild_id: int, *, reason: str) -> None:
+    def _schedule_heal(self, guild_id: int, *, reason: str) -> None:
+        """In-place fix: reinit MLS/DAVE + rebind sink. Does not leave the channel."""
         bot = self._bot
         if bot is None:
             return
         now = datetime.now(timezone.utc).timestamp()
-        if guild_id in self._recovering:
+        if guild_id in self._healing:
             return
-        last = self._last_recover_at.get(guild_id, 0.0)
-        if now - last < VOICE_RECOVER_COOLDOWN_SECONDS:
+        last = self._last_heal_at.get(guild_id, 0.0)
+        if now - last < VOICE_HEAL_COOLDOWN_SECONDS:
             return
-        log.warning("Scheduling voice listen recover guild=%s (%s)", guild_id, reason)
+        log.warning("Scheduling voice heal (no leave) guild=%s (%s)", guild_id, reason)
 
         def _go() -> None:
-            asyncio.create_task(self._recover_listen(guild_id, reason=reason))
+            asyncio.create_task(self._heal_listen(guild_id, reason=reason))
 
         bot.loop.call_soon_threadsafe(_go)
 
-    async def _recover_listen(self, guild_id: int, *, reason: str) -> None:
-        if guild_id in self._recovering:
+    async def _heal_listen(self, guild_id: int, *, reason: str) -> None:
+        if guild_id in self._healing:
             return
         bot = self._bot
         if bot is None or self.ai.stt_credits_exhausted:
             return
         now = datetime.now(timezone.utc).timestamp()
-        last = self._last_recover_at.get(guild_id, 0.0)
-        if now - last < VOICE_RECOVER_COOLDOWN_SECONDS:
+        last = self._last_heal_at.get(guild_id, 0.0)
+        if now - last < VOICE_HEAL_COOLDOWN_SECONDS:
             return
-        self._recovering.add(guild_id)
-        self._last_recover_at[guild_id] = now
+        self._healing.add(guild_id)
+        self._last_heal_at[guild_id] = now
+        try:
+            guild = bot.get_guild(guild_id)
+            vc = self._clients.get(guild_id)
+            if guild is None or vc is None or not vc.is_connected():
+                self._schedule_hard_reconnect(guild_id, reason=f"heal_no_vc:{reason}")
+                return
+            log.warning(
+                "Healing voice listen in place guild=%s (%s)",
+                guild_id,
+                reason,
+            )
+            _reset_dave_stats()
+            state = getattr(vc, "_connection", None)
+            reinit = getattr(state, "reinit_dave_session", None) if state is not None else None
+            if callable(reinit):
+                try:
+                    await reinit()
+                    log.info("DAVE session reinit sent guild=%s", guild_id)
+                except Exception:
+                    log.exception("DAVE reinit_dave_session failed guild=%s", guild_id)
+            session = getattr(state, "dave_session", None) if state is not None else None
+            if session is not None:
+                try:
+                    session.set_passthrough_mode(True, 120)
+                except Exception:
+                    pass
+            try:
+                await _wait_for_dave(vc, timeout=8.0)
+            except Exception:
+                log.exception("DAVE wait during heal failed guild=%s", guild_id)
+            self._unknown_streak[guild_id] = 0
+            self._hallucination_streak[guild_id] = 0
+            self._bind_listen_sink(bot, guild, vc)
+            # Brief settle so MLS welcome/commit can land; stay in channel.
+            await asyncio.sleep(2.0)
+            self._bind_listen_sink(bot, guild, vc)
+            self._mark_voice_join_grace(guild_id)
+            _reset_dave_stats()
+            log.info("Voice listen healed in place guild=%s", guild_id)
+        except Exception:
+            log.exception("Voice listen heal failed guild=%s", guild_id)
+        finally:
+            self._healing.discard(guild_id)
+
+    def _schedule_hard_reconnect(self, guild_id: int, *, reason: str) -> None:
+        """Last resort only when the voice client is gone. Prefer heal for everything else."""
+        bot = self._bot
+        if bot is None:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        if guild_id in self._healing:
+            return
+        last = self._last_hard_reconnect_at.get(guild_id, 0.0)
+        if now - last < VOICE_HARD_RECONNECT_COOLDOWN_SECONDS:
+            return
+        log.warning(
+            "Scheduling hard voice reconnect guild=%s (%s)",
+            guild_id,
+            reason,
+        )
+
+        def _go() -> None:
+            asyncio.create_task(self._hard_reconnect(guild_id, reason=reason))
+
+        bot.loop.call_soon_threadsafe(_go)
+
+    async def _hard_reconnect(self, guild_id: int, *, reason: str) -> None:
+        bot = self._bot
+        if bot is None or self.ai.stt_credits_exhausted:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        last = self._last_hard_reconnect_at.get(guild_id, 0.0)
+        if now - last < VOICE_HARD_RECONNECT_COOLDOWN_SECONDS:
+            return
+        self._healing.add(guild_id)
+        self._last_hard_reconnect_at[guild_id] = now
         try:
             announce_id = self._announce_channels.get(guild_id)
             channel = self.listening_channel(guild_id)
@@ -955,62 +1061,28 @@ class VoiceListenService:
                 guild = bot.get_guild(guild_id)
                 channel = guild.get_channel(channel_id) if guild and channel_id else None
             if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-                log.warning("Voice recover aborted: no channel guild=%s", guild_id)
+                log.warning("Hard reconnect aborted: no channel guild=%s", guild_id)
                 return
-            log.warning(
-                "Recovering voice listen guild=%s channel=%s (%s)",
+            log.error(
+                "Hard reconnect (voice client lost) guild=%s channel=%s (%s)",
                 guild_id,
                 channel.id,
                 reason,
             )
-            ok = await self._reconnect_voice(
-                bot,
-                guild_id,
-                channel,
-                announce_id=announce_id,
-                settle_seconds=3.0,
-            )
-            if not ok:
-                log.warning(
-                    "Voice RTP still dead after recover guild=%s — second attempt",
-                    guild_id,
-                )
-                ok = await self._reconnect_voice(
-                    bot,
-                    guild_id,
-                    channel,
-                    announce_id=announce_id,
-                    settle_seconds=6.0,
-                )
+            _reset_dave_stats()
+            await self.leave(guild_id, flush=False, clear_resume=False)
+            await asyncio.sleep(2.0)
+            await self.join(bot, channel, announce_channel_id=announce_id)
+            _reset_dave_stats()
+            ok = await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
             if ok:
-                log.info("Voice listen recovered guild=%s", guild_id)
+                log.info("Hard reconnect got RTP guild=%s", guild_id)
             else:
-                log.error(
-                    "Voice listen recover failed to get RTP guild=%s — will retry later",
-                    guild_id,
-                )
+                log.error("Hard reconnect still no RTP guild=%s", guild_id)
         except Exception:
-            log.exception("Voice listen recover failed guild=%s", guild_id)
+            log.exception("Hard voice reconnect failed guild=%s", guild_id)
         finally:
-            self._recovering.discard(guild_id)
-
-    async def _reconnect_voice(
-        self,
-        bot: ErundaBot,
-        guild_id: int,
-        channel: discord.VoiceChannel | discord.StageChannel,
-        *,
-        announce_id: int | None,
-        settle_seconds: float,
-    ) -> bool:
-        _reset_dave_stats()
-        await self.leave(guild_id, flush=False, clear_resume=False)
-        await asyncio.sleep(settle_seconds)
-        # join() already marks grace before bind — do NOT remake it after
-        # (that wiped real RTP timestamps and falsely failed _wait_for_rtp).
-        await self.join(bot, channel, announce_channel_id=announce_id)
-        _reset_dave_stats()
-        return await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
+            self._healing.discard(guild_id)
 
     async def leave(self, guild_id: int, *, flush: bool = True, clear_resume: bool = True) -> str:
         async with self._lock:
@@ -1215,7 +1287,7 @@ class VoiceListenService:
         for guild_id in list(self._clients):
             if not self.is_listening(guild_id):
                 continue
-            if guild_id in self._recovering:
+            if guild_id in self._healing:
                 continue
             if now < self._recover_grace_until.get(guild_id, 0.0):
                 continue
@@ -1223,6 +1295,9 @@ class VoiceListenService:
             channel = self.listening_channel(guild_id)
             vc = self._clients.get(guild_id)
             if guild is None or vc is None:
+                continue
+            if not vc.is_connected():
+                self._schedule_hard_reconnect(guild_id, reason="vc_disconnected")
                 continue
             if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
                 continue
@@ -1270,9 +1345,9 @@ class VoiceListenService:
             dave_broken = _dave_cryptor_broken()
             dave_fails, dave_oks = _dave_fail_counts()
 
-            # MLS cryptors stale: decrypt fails in a burst while RTP still flows.
+            # MLS cryptors stale → reinit DAVE in place (leave+join only resynced keys).
             if dave_broken:
-                self._schedule_recover(
+                self._schedule_heal(
                     guild_id,
                     reason=f"dave_cryptor_broken fails={dave_fails} oks={dave_oks}",
                 )
@@ -1285,7 +1360,7 @@ class VoiceListenService:
                 and (pcm_age >= VOICE_STALE_PCM_SECONDS or dave_fails >= 15)
                 and (cb_age < 10.0 or speaking or dave_fails >= 15)
             ):
-                self._schedule_recover(
+                self._schedule_heal(
                     guild_id,
                     reason=(
                         f"useful_stt_stale age={useful_age:.0f}s "
@@ -1298,7 +1373,7 @@ class VoiceListenService:
             # People are marked speaking, but we get no usable PCM → map/decrypt dead.
             if speaking and last_pcm > 0 and pcm_age >= 12.0:
                 if cb_age < 5.0 or streak >= 30:
-                    self._schedule_recover(
+                    self._schedule_heal(
                         guild_id,
                         reason=f"speaking_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
                     )
@@ -1310,15 +1385,14 @@ class VoiceListenService:
                 continue
 
             # RTP callbacks flow, but nothing maps to usable (loud) PCM for too long.
-            # Require prior real PCM so post-join empty frames don't loop recover.
             if last_pcm > 0 and cb_age < 5.0 and pcm_age >= VOICE_STALE_PCM_SECONDS:
-                self._schedule_recover(
+                self._schedule_heal(
                     guild_id,
                     reason=f"callbacks_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
                 )
                 continue
 
-            # Decrypt/map half-dead: callbacks + loud PCM exist but STT is only Whisper junk.
+            # Decrypt/map half-dead: loud PCM but STT is only Whisper junk.
             if (
                 speaking
                 and cb_age < 5.0
@@ -1326,7 +1400,7 @@ class VoiceListenService:
                 and useful_age >= 90.0
                 and self._hallucination_streak.get(guild_id, 0) >= 3
             ):
-                self._schedule_recover(
+                self._schedule_heal(
                     guild_id,
                     reason=(
                         f"speaking_hallucination_only useful_age={useful_age:.0f}s "
@@ -1335,19 +1409,18 @@ class VoiceListenService:
                 )
                 continue
 
-            # Quiet unmuted people ≠ dead voice. Old pipeline_idle soft-rebind→recover
-            # on silence killed the UDP path for ~15 minutes. Only recover when RTP
-            # never arrived after join, or died while Discord marks someone speaking.
+            # Quiet unmuted people ≠ dead voice. Heal sink/DAVE in place if RTP died
+            # while someone is speaking; never leave+join for silence.
             session_started = self._session_started_at.get(guild_id, 0.0)
             session_age = (now - session_started) if session_started > 0 else 0.0
             if last_cb <= 0 and session_age >= VOICE_NO_RTP_RECOVER_SECONDS:
-                self._schedule_recover(
+                self._schedule_heal(
                     guild_id,
                     reason=f"no_rtp_after_join session_age={session_age:.0f}s",
                 )
                 continue
             if speaking and last_cb > 0 and cb_age >= VOICE_NO_RTP_RECOVER_SECONDS:
-                self._schedule_recover(
+                self._schedule_heal(
                     guild_id,
                     reason=f"rtp_dead_while_speaking cb_age={cb_age:.0f}s",
                 )
@@ -1437,7 +1510,7 @@ class VoiceListenService:
                     )
                     if hallu >= VOICE_HALLUCINATION_RECOVER_STREAK:
                         self._hallucination_streak[guild_id] = 0
-                        self._schedule_recover(
+                        self._schedule_heal(
                             guild_id,
                             reason=f"hallucination_streak={hallu}",
                         )
