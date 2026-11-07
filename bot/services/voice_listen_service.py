@@ -989,6 +989,7 @@ class VoiceListenService:
         except Exception:
             pass
         self._bind_listen_sink(bot, guild, vc)
+        self._mark_heal_grace(guild_id)
         await asyncio.sleep(6.0)
         if guild_id in self._healing:
             return
@@ -997,7 +998,7 @@ class VoiceListenService:
         except Exception:
             listening = False
         if not listening:
-            self._schedule_heal(
+            self._schedule_hard_reconnect(
                 guild_id,
                 reason=f"soft_rebind_failed:{reason} listening={listening}",
             )
@@ -1346,15 +1347,6 @@ class VoiceListenService:
                 continue
             if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
                 continue
-            # Sink dropped while vc stayed connected.
-            try:
-                listening = bool(getattr(vc, "is_listening", lambda: True)())
-            except Exception:
-                listening = True
-            if not listening:
-                self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
-                continue
-
             humans = [m for m in channel.members if not getattr(m, "bot", False)]
             if not humans:
                 continue
@@ -1390,37 +1382,67 @@ class VoiceListenService:
             dave_broken = _dave_cryptor_broken()
             dave_fails, dave_oks = _dave_fail_counts()
 
-            # MLS cryptors stale → reinit DAVE in place (leave+join only resynced keys).
+            # Sink dropped while vc stayed connected.
+            try:
+                listening = bool(getattr(vc, "is_listening", lambda: True)())
+            except Exception:
+                listening = True
+            if not listening:
+                # Soft-rebind cannot fix dead MLS cryptors — it just flaps the sink.
+                if dave_broken or dave_fails >= VOICE_DAVE_FAIL_RECOVER_COUNT:
+                    self._schedule_hard_reconnect(
+                        guild_id,
+                        reason=(
+                            f"sink_not_listening+dave fails={dave_fails} oks={dave_oks}"
+                        ),
+                    )
+                else:
+                    self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
+                continue
+
+            # MLS keys out of sync (NoValidCryptorFound storm). Passthrough/rebind
+            # does not create new cryptors — only a fresh voice session does.
             if dave_broken:
-                self._schedule_heal(
+                self._schedule_hard_reconnect(
                     guild_id,
                     reason=f"dave_cryptor_broken fails={dave_fails} oks={dave_oks}",
                 )
                 continue
 
-            # STT dark while loud PCM also unhealthy / DAVE failing — not on quiet gaps.
+            # STT dark while PCM/DAVE unhealthy — escalate to reconnect when DAVE fails.
             if (
                 last_useful > 0
                 and useful_age >= VOICE_USEFUL_STT_STALE_SECONDS
                 and (pcm_age >= VOICE_STALE_PCM_SECONDS or dave_fails >= 15)
                 and (cb_age < 10.0 or speaking or dave_fails >= 15)
             ):
-                self._schedule_heal(
-                    guild_id,
-                    reason=(
-                        f"useful_stt_stale age={useful_age:.0f}s "
-                        f"pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s "
-                        f"dave_fail={dave_fails}"
-                    ),
-                )
+                if dave_fails >= 15:
+                    self._schedule_hard_reconnect(
+                        guild_id,
+                        reason=(
+                            f"useful_stt_stale+dave age={useful_age:.0f}s "
+                            f"dave_fail={dave_fails}"
+                        ),
+                    )
+                else:
+                    self._schedule_heal(
+                        guild_id,
+                        reason=(
+                            f"useful_stt_stale age={useful_age:.0f}s "
+                            f"pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s"
+                        ),
+                    )
                 continue
 
             # People are marked speaking, but we get no usable PCM → map/decrypt dead.
             if speaking and last_pcm > 0 and pcm_age >= 12.0:
-                if cb_age < 5.0 or streak >= 30:
-                    self._schedule_heal(
+                if dave_fails >= 15 or cb_age < 5.0 or streak >= 30:
+                    self._schedule_hard_reconnect(
                         guild_id,
-                        reason=f"speaking_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
+                        reason=(
+                            f"speaking_without_pcm pcm_age={pcm_age:.0f}s "
+                            f"streak={streak} dave_fail={dave_fails}"
+                        ),
                     )
                 else:
                     self._schedule_soft_rebind(
@@ -1431,10 +1453,19 @@ class VoiceListenService:
 
             # RTP callbacks flow, but nothing maps to usable (loud) PCM for too long.
             if last_pcm > 0 and cb_age < 5.0 and pcm_age >= VOICE_STALE_PCM_SECONDS:
-                self._schedule_heal(
-                    guild_id,
-                    reason=f"callbacks_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
-                )
+                if dave_fails >= 15:
+                    self._schedule_hard_reconnect(
+                        guild_id,
+                        reason=(
+                            f"callbacks_without_pcm pcm_age={pcm_age:.0f}s "
+                            f"dave_fail={dave_fails}"
+                        ),
+                    )
+                else:
+                    self._schedule_heal(
+                        guild_id,
+                        reason=f"callbacks_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
+                    )
                 continue
 
             # Decrypt/map half-dead: loud PCM but STT is only Whisper junk.
