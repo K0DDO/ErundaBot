@@ -62,6 +62,13 @@ VOICE_DAVE_FAIL_RECOVER_COUNT = 40
 VOICE_NO_RTP_RECOVER_SECONDS = 50.0
 # Resume join only if Discord already dropped us — never leave+join while connected.
 VOICE_RESUME_JOIN_COOLDOWN_SECONDS = 180.0
+# Connected but deaf: RTP/callbacks still flow (empty PCM after DAVE/Opus fail),
+# while loud PCM stalls. Soft remount desyncs DAVE — only full leave+join resets MLS.
+VOICE_DEAF_PCM_SECONDS = 45.0
+VOICE_DEAF_CB_FRESH_SECONDS = 15.0
+VOICE_DEAF_EMPTY_STREAK = 40
+VOICE_HARD_RECONNECT_COOLDOWN_SECONDS = 240.0
+VOICE_HEALTH_STATUS_EVERY = 60.0
 
 # Rolling DAVE decrypt stats (updated from voice_recv patch).
 _DAVE_EVENTS: list[tuple[float, bool]] = []
@@ -739,6 +746,8 @@ class VoiceListenService:
         self._hallucination_streak: dict[int, int] = defaultdict(int)
         self._healing: set[int] = set()
         self._health_tick: float = 0.0
+        self._health_status_tick: float = 0.0
+        self._empty_pcm_streak: dict[int, int] = defaultdict(int)
         # guild_id -> ssrc -> user_id (survives brief speaking-map gaps)
         self._ssrc_users: dict[int, dict[int, int]] = defaultdict(dict)
         # (guild_id, user_id) -> recent STT chunks for cross-pause sixseven
@@ -902,6 +911,7 @@ class VoiceListenService:
         self._pcm_packets[guild_id] = 0
         self._unknown_speaker_packets[guild_id] = 0
         self._unknown_streak[guild_id] = 0
+        self._empty_pcm_streak[guild_id] = 0
         self._last_pcm_at.pop(guild_id, None)
         self._last_callback_at.pop(guild_id, None)
 
@@ -1000,7 +1010,18 @@ class VoiceListenService:
             self._unknown_streak[guild.id] = max(0, self._unknown_streak[guild.id] - 8)
             pcm = getattr(data, "pcm", None)
             if not pcm:
+                # DAVE/Opus failure returns empty VoiceData while RTP still flows.
+                streak = self._empty_pcm_streak[guild.id] + 1
+                self._empty_pcm_streak[guild.id] = streak
+                if streak in (1, 40, 100, 400, 1000):
+                    log.warning(
+                        "Empty PCM streak=%s guild=%s user=%s (DAVE/Opus likely broken)",
+                        streak,
+                        guild.id,
+                        user_id,
+                    )
                 return
+            self._empty_pcm_streak[guild.id] = 0
             pcm_bytes = bytes(pcm)
             rms = pcm_rms(pcm_bytes)
             # DAVE garbage still yields PCM; only loud frames count as healthy audio.
@@ -1278,6 +1299,7 @@ class VoiceListenService:
         self._recover_grace_until.pop(guild_id, None)
         self._soft_rebind_times.pop(guild_id, None)
         self._hallucination_streak.pop(guild_id, None)
+        self._empty_pcm_streak.pop(guild_id, None)
         self._ssrc_users.pop(guild_id, None)
         for key in [k for k in self._recent_stt if k[0] == guild_id]:
             self._recent_stt.pop(key, None)
@@ -1448,11 +1470,15 @@ class VoiceListenService:
                 log.exception("Voice silence watchdog failed")
 
     async def _check_voice_health(self, bot: ErundaBot, now: float) -> None:
-        """Health monitor: only resume if Discord already dropped the bot.
+        """Health monitor: resume if Discord dropped us; hard-reconnect if deaf.
 
         Mid-call soft-rebind / stop_listening / sink remount desyncs DAVE
-        (NoValidCryptorFound). Do not "heal" a live session.
+        (NoValidCryptorFound). Connected-but-deaf (live RTP, empty PCM) needs
+        a full leave+join to reset MLS — never a soft remount.
         """
+        status_due = now - self._health_status_tick >= VOICE_HEALTH_STATUS_EVERY
+        if status_due:
+            self._health_status_tick = now
         for guild_id in list(self._clients):
             if not self.is_listening(guild_id):
                 continue
@@ -1474,6 +1500,103 @@ class VoiceListenService:
                     session.set_passthrough_mode(True, 600)
             except Exception:
                 pass
+
+            last_cb = self._last_callback_at.get(guild_id, 0.0)
+            last_pcm = self._last_pcm_at.get(guild_id, 0.0)
+            cb_age = (now - last_cb) if last_cb > 0 else 1e9
+            pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
+            empty = self._empty_pcm_streak.get(guild_id, 0)
+            fails, oks = _dave_fail_counts()
+            if status_due:
+                log.info(
+                    "Voice health guild=%s cb_age=%.0fs pcm_age=%.0fs empty=%s "
+                    "dave_fail=%s dave_ok=%s",
+                    guild_id,
+                    cb_age if cb_age < 1e8 else -1,
+                    pcm_age if pcm_age < 1e8 else -1,
+                    empty,
+                    fails,
+                    oks,
+                )
+
+            # Live RTP → empty/corrupt frames, no loud PCM: silent deafness.
+            deaf = (
+                cb_age < VOICE_DEAF_CB_FRESH_SECONDS
+                and pcm_age > VOICE_DEAF_PCM_SECONDS
+                and empty >= VOICE_DEAF_EMPTY_STREAK
+            )
+            if deaf or _dave_cryptor_broken():
+                reason = "dave_broken" if _dave_cryptor_broken() else "deaf_live_rtp"
+                self._schedule_hard_reconnect(guild_id, reason=reason)
+
+    def _schedule_hard_reconnect(self, guild_id: int, *, reason: str) -> None:
+        """Full leave+join to reset DAVE/MLS. Rate-limited; never soft-remount."""
+        bot = self._bot
+        if bot is None or guild_id in self._healing:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        last = self._last_hard_reconnect_at.get(guild_id, 0.0)
+        if now - last < VOICE_HARD_RECONNECT_COOLDOWN_SECONDS:
+            return
+        log.warning(
+            "Scheduling voice hard reconnect guild=%s (%s)",
+            guild_id,
+            reason,
+        )
+
+        def _go() -> None:
+            asyncio.create_task(self._hard_reconnect(guild_id, reason=reason))
+
+        bot.loop.call_soon_threadsafe(_go)
+
+    async def _hard_reconnect(self, guild_id: int, *, reason: str) -> None:
+        bot = self._bot
+        if bot is None or self.ai.stt_credits_exhausted:
+            return
+        if guild_id in self._healing:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        last = self._last_hard_reconnect_at.get(guild_id, 0.0)
+        if now - last < VOICE_HARD_RECONNECT_COOLDOWN_SECONDS:
+            return
+        vc = self._clients.get(guild_id)
+        channel = None
+        if vc is not None:
+            channel = getattr(vc, "channel", None)
+        announce_id = self._announce_channels.get(guild_id)
+        config = await self.db.get_guild(guild_id)
+        if announce_id is None and config is not None:
+            announce_id = config.voice_announce_channel_id
+        if channel is None and config is not None and config.voice_listen_channel_id:
+            guild = bot.get_guild(guild_id)
+            if guild is not None:
+                channel = guild.get_channel(config.voice_listen_channel_id)
+        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+            log.warning("Hard reconnect aborted: no channel guild=%s (%s)", guild_id, reason)
+            return
+        self._healing.add(guild_id)
+        self._last_hard_reconnect_at[guild_id] = now
+        try:
+            log.warning(
+                "Hard reconnect voice guild=%s channel=%s (%s)",
+                guild_id,
+                channel.id,
+                reason,
+            )
+            _reset_dave_stats()
+            await self.leave(guild_id, flush=False, clear_resume=False)
+            await asyncio.sleep(1.2)
+            await self.join(bot, channel, announce_channel_id=announce_id)
+            _reset_dave_stats()
+            ok = await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
+            if ok:
+                log.info("Hard reconnect got RTP guild=%s", guild_id)
+            else:
+                log.error("Hard reconnect still no RTP guild=%s", guild_id)
+        except Exception:
+            log.exception("Voice hard reconnect failed guild=%s", guild_id)
+        finally:
+            self._healing.discard(guild_id)
 
     async def _transcribe_and_store(
         self,
