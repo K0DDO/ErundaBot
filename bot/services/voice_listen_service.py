@@ -47,9 +47,10 @@ VOICE_HARD_RECOVER_UNKNOWN_STREAK = 250
 VOICE_HEAL_COOLDOWN_SECONDS = 60.0
 VOICE_STALE_PCM_SECONDS = 30.0
 VOICE_HEALTH_CHECK_EVERY = 8.0
-VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 25.0
-VOICE_SOFT_REBIND_ESCALATE_AFTER = 3
-VOICE_SOFT_REBIND_WINDOW_SECONDS = 180.0
+VOICE_SOFT_REBIND_COOLDOWN_SECONDS = 120.0
+VOICE_SOFT_REBIND_ESCALATE_AFTER = 2
+VOICE_SOFT_REBIND_WINDOW_SECONDS = 300.0
+VOICE_SINK_DEAD_CONFIRM = 3
 VOICE_HALLUCINATION_RECOVER_STREAK = 3
 # After connect: wait for real RTP before trusting health checks.
 VOICE_RECOVER_GRACE_SECONDS = 45.0
@@ -104,14 +105,14 @@ SWEAR_RE = re.compile(
 _SIX_SEP = r"[\s\-–—./,;:…]*"
 # First half of the meme as Whisper hears it.
 _SIX_STEM = (
-    r"(?:сикс|сик\s*с?|секс|сек\s*с?|сыкс|сакс|цикс|"
+    r"(?:сикс|сик\s*с?|секс|сек\s*с?|сыкс|сакс|цикс|сигг?|"
     r"six|sick|sik|sex|see|zick|zigg?|zik|"
     r"зигг+|зиг|зик)"
 )
 # Second half.
 _SEVEN_STEM = (
-    r"(?:севен|севон|сервон|серван|саван|семь|"
-    r"seven|sevon|servon|servan|sevan)"
+    r"(?:севен|севон|сервон|серван|саван|сайон|саён|семь|"
+    r"seven|sevon|servon|servan|sevan|sion)"
 )
 SIXSEVEN_RE = re.compile(
     r"(?:"
@@ -192,6 +193,8 @@ def _normalize_sixseven_text(text: str) -> str:
         (r"зигг+", "сикс"),
         (r"\bзиг\b", "сикс"),
         (r"\bзик\b", "сикс"),
+        (r"\bсигг+\b", "сикс"),
+        (r"\bсиг\b", "сикс"),
         (r"\bzick\b", "six"),
         (r"\bzigg+\b", "six"),
         (r"\bzig\b", "six"),
@@ -199,10 +202,13 @@ def _normalize_sixseven_text(text: str) -> str:
         (r"сервон", "севен"),
         (r"серван", "севен"),
         (r"севон", "севен"),
+        (r"сайон", "севен"),
+        (r"саён", "севен"),
         (r"\bservon\b", "seven"),
         (r"\bservan\b", "seven"),
         (r"\bsevon\b", "seven"),
         (r"\bsevan\b", "seven"),
+        (r"\bsion\b", "seven"),
     )
     for pattern, repl in replacements:
         cleaned = re.sub(pattern, repl, cleaned)
@@ -699,6 +705,7 @@ class VoiceListenService:
         self._session_started_at: dict[int, float] = {}
         self._last_soft_rebind_at: dict[int, float] = {}
         self._soft_rebind_times: dict[int, list[float]] = defaultdict(list)
+        self._sink_dead_streak: dict[int, int] = defaultdict(int)
         self._hallucination_streak: dict[int, int] = defaultdict(int)
         self._healing: set[int] = set()
         self._health_tick: float = 0.0
@@ -917,14 +924,23 @@ class VoiceListenService:
         bot: ErundaBot,
         guild: discord.Guild,
         vc: discord.VoiceProtocol,
+        *,
+        restart: bool = True,
     ) -> None:
         from discord.ext import voice_recv
 
         try:
-            if getattr(vc, "is_listening", lambda: False)():
-                vc.stop_listening()
+            listening = bool(getattr(vc, "is_listening", lambda: False)())
         except Exception:
-            pass
+            listening = False
+        if listening and not restart:
+            # Mid-call stop/start desyncs DAVE nonce windows — leave sink alone.
+            return
+        if listening and restart:
+            try:
+                vc.stop_listening()
+            except Exception:
+                pass
 
         def on_voice(user: discord.User | discord.Member | None, data) -> None:
             now = datetime.now(timezone.utc).timestamp()
@@ -1016,7 +1032,6 @@ class VoiceListenService:
             )
             return
         log.warning("Soft-rebind voice sink guild=%s (%s)", guild_id, reason)
-        # Keep SSRC map — wiping it caused "without speaker map" storms.
         self._unknown_streak[guild_id] = 0
         try:
             state = getattr(vc, "_connection", None)
@@ -1025,8 +1040,12 @@ class VoiceListenService:
                 session.set_passthrough_mode(True, 600)
         except Exception:
             pass
-        self._bind_listen_sink(bot, guild, vc)
-        self._mark_heal_grace(guild_id)
+        # Never stop_listening mid-call — only start if sink is actually dead.
+        self._bind_listen_sink(bot, guild, vc, restart=False)
+        _reset_dave_stats()
+        self._recover_grace_until[guild_id] = (
+            datetime.now(timezone.utc).timestamp() + VOICE_RECOVER_GRACE_SECONDS
+        )
         await asyncio.sleep(6.0)
         if guild_id in self._healing:
             return
@@ -1035,10 +1054,10 @@ class VoiceListenService:
         except Exception:
             listening = False
         if not listening:
-            self._schedule_heal(
-                guild_id,
-                reason=f"soft_rebind_failed:{reason} listening={listening}",
-            )
+            # Last resort in-place: forced restart without leaving the channel.
+            self._bind_listen_sink(bot, guild, vc, restart=True)
+            _reset_dave_stats()
+            self._mark_heal_grace(guild_id)
 
     def _schedule_heal(self, guild_id: int, *, reason: str) -> None:
         """In-place fix: reinit MLS/DAVE + rebind sink. Does not leave the channel."""
@@ -1101,7 +1120,8 @@ class VoiceListenService:
             except Exception:
                 listening = False
             if not listening:
-                self._bind_listen_sink(bot, guild, vc)
+                self._bind_listen_sink(bot, guild, vc, restart=False)
+                _reset_dave_stats()
             self._mark_heal_grace(guild_id)
             log.info(
                 "Voice listen healed in place guild=%s listening=%s",
@@ -1441,14 +1461,19 @@ class VoiceListenService:
             dave_broken = _dave_cryptor_broken()
             dave_fails, dave_oks = _dave_fail_counts()
 
-            # Sink dropped while vc stayed connected — rebind in place, never leave.
+            # Sink dropped while vc stayed connected — confirm before rebind;
+            # a single false "not listening" + stop/start desyncs DAVE.
             try:
                 listening = bool(getattr(vc, "is_listening", lambda: True)())
             except Exception:
                 listening = True
             if not listening:
-                self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
+                self._sink_dead_streak[guild_id] += 1
+                if self._sink_dead_streak[guild_id] >= VOICE_SINK_DEAD_CONFIRM:
+                    self._sink_dead_streak[guild_id] = 0
+                    self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
                 continue
+            self._sink_dead_streak[guild_id] = 0
 
             # DAVE desync / stale STT / speaking without PCM → heal in place only.
             if dave_broken:
