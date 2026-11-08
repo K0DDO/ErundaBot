@@ -23,6 +23,7 @@ from bot.services.statistics_service import StatisticsService
 from bot.services.santa_service import SantaService
 from bot.services.tarot_service import TarotService
 from bot.services.tgk_service import TgkService
+from bot.services.dossier_service import DossierService
 from bot.services.voice_listen_service import VoiceListenService
 from bot.tasks.background import BackgroundTasks
 
@@ -80,6 +81,8 @@ class ErundaBot(commands.Bot):
         self.quote_service = QuoteService(self.db)
         self.role_service = RoleService(self.db)
         self.voice_listen_service = VoiceListenService(self.db, self.ai_service)
+        self.dossier_service = DossierService(self.db, self.ai_service)
+        self.voice_listen_service.dossier_service = self.dossier_service
         self.background = BackgroundTasks(self)
         self._synced = False
 

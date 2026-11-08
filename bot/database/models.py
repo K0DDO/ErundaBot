@@ -507,6 +507,31 @@ class VoiceSnippet:
 
 
 @dataclass(slots=True)
+class DailyTextLog:
+    id: int
+    guild_id: int
+    user_id: int
+    channel_id: int
+    source: str
+    text: str
+    day: str
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: Any) -> DailyTextLog:
+        return cls(
+            id=row["id"],
+            guild_id=row["guild_id"],
+            user_id=row["user_id"],
+            channel_id=int(row["channel_id"] or 0),
+            source=row["source"],
+            text=row["text"],
+            day=row["day"],
+            created_at=row["created_at"],
+        )
+
+
+@dataclass(slots=True)
 class VoiceDossierEntry:
     id: int
     guild_id: int

@@ -44,6 +44,14 @@ class StatisticsCog(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
             return
+        try:
+            await self.bot.dossier_service.record_chat_message(message)
+        except Exception:
+            log.exception(
+                "Failed to record chat dossier log guild=%s user=%s",
+                message.guild.id,
+                message.author.id,
+            )
         enabled, tz_name = await self._stats_enabled(message.guild.id)
         if not enabled:
             return

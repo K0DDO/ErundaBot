@@ -318,7 +318,7 @@ class BackgroundTasks:
     @tasks.loop(minutes=1)
     async def voice_dossier_loop(self) -> None:
         await self.bot.wait_until_ready()
-        await self.bot.voice_listen_service.process_daily_dossiers(self.bot)
+        await self.bot.dossier_service.process_daily_and_weekly(self.bot)
 
     @voice_dossier_loop.before_loop
     async def before_voice_dossier_loop(self) -> None:

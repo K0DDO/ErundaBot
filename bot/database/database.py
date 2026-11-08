@@ -30,6 +30,7 @@ from .models import (
     SantaEntry,
     SantaEvent,
     TgChannel,
+    DailyTextLog,
     VoiceDossierEntry,
     VoiceSnippet,
 )
@@ -953,6 +954,29 @@ class Database:
                     if "duplicate column" not in str(exc).lower():
                         raise
             await self._db.execute("PRAGMA user_version = 30")
+        if version < 31:
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS daily_text_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL CHECK (source IN ('chat', 'voice')),
+                    text TEXT NOT NULL,
+                    day TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_daily_text_logs_guild_day_user
+                ON daily_text_logs(guild_id, day, user_id)
+                """
+            )
+            await self._db.execute("PRAGMA user_version = 31")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2820,6 +2844,89 @@ class Database:
         )
         await self.connection.commit()
 
+    async def add_daily_text_log(
+        self,
+        guild_id: int,
+        user_id: int,
+        channel_id: int,
+        source: str,
+        text: str,
+        day: str,
+    ) -> None:
+        await self.connection.execute(
+            """
+            INSERT INTO daily_text_logs
+                (guild_id, user_id, channel_id, source, text, day)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, user_id, int(channel_id or 0), source, text, day),
+        )
+        await self.connection.commit()
+
+    async def list_daily_text_log_users(self, guild_id: int, day: str) -> list[int]:
+        cursor = await self.connection.execute(
+            """
+            SELECT DISTINCT user_id FROM daily_text_logs
+            WHERE guild_id = ? AND day = ?
+            """,
+            (guild_id, day),
+        )
+        rows = await cursor.fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    async def list_daily_text_log_days(
+        self,
+        guild_id: int,
+        *,
+        before_day: str,
+    ) -> list[str]:
+        cursor = await self.connection.execute(
+            """
+            SELECT DISTINCT day FROM daily_text_logs
+            WHERE guild_id = ? AND day < ?
+            ORDER BY day ASC
+            """,
+            (guild_id, before_day),
+        )
+        rows = await cursor.fetchall()
+        return [str(row["day"]) for row in rows]
+
+    async def list_daily_text_logs(
+        self,
+        guild_id: int,
+        user_id: int,
+        day: str,
+        *,
+        limit: int = 400,
+    ) -> list[DailyTextLog]:
+        cursor = await self.connection.execute(
+            """
+            SELECT * FROM daily_text_logs
+            WHERE guild_id = ? AND user_id = ? AND day = ?
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (guild_id, user_id, day, limit),
+        )
+        rows = await cursor.fetchall()
+        return [DailyTextLog.from_row(row) for row in rows]
+
+    async def delete_daily_text_logs(
+        self,
+        guild_id: int,
+        user_id: int,
+        day: str,
+    ) -> int:
+        cursor = await self.connection.execute(
+            """
+            DELETE FROM daily_text_logs
+            WHERE guild_id = ? AND user_id = ? AND day = ?
+            """,
+            (guild_id, user_id, day),
+        )
+        await self.connection.commit()
+        return cursor.rowcount
+
     async def list_pending_voice_snippet_users(
         self,
         guild_id: int,
@@ -2879,6 +2986,39 @@ class Database:
             """,
             [(guild_id, user_id, fact, source_date) for fact in facts],
         )
+        await self.connection.commit()
+
+    async def list_voice_dossier_users(self, guild_id: int) -> list[int]:
+        cursor = await self.connection.execute(
+            """
+            SELECT DISTINCT user_id FROM voice_dossier
+            WHERE guild_id = ?
+            """,
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    async def replace_voice_dossier(
+        self,
+        guild_id: int,
+        user_id: int,
+        facts: list[str],
+        *,
+        source_date: str,
+    ) -> None:
+        await self.connection.execute(
+            "DELETE FROM voice_dossier WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        if facts:
+            await self.connection.executemany(
+                """
+                INSERT INTO voice_dossier (guild_id, user_id, fact, source_date)
+                VALUES (?, ?, ?, ?)
+                """,
+                [(guild_id, user_id, fact, source_date) for fact in facts],
+            )
         await self.connection.commit()
 
     async def list_voice_dossier(

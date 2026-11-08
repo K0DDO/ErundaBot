@@ -711,6 +711,7 @@ class VoiceListenService:
     def __init__(self, db: Database, ai: AIService) -> None:
         self.db = db
         self.ai = ai
+        self.dossier_service = None
         self._clients: dict[int, discord.VoiceProtocol] = {}
         self._buffers: dict[int, dict[int, _UserBuffer]] = defaultdict(dict)
         self._lock = asyncio.Lock()
@@ -1609,8 +1610,7 @@ class VoiceListenService:
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
-            # RU Whisper often mangled the meme («Сексеон», «Продолжение следует»).
-            # Retry no-lang for hallucination / near-miss / short shout / empty.
+            # Primary MAI can still mangle memes — second pass via GPT-4o-mini-transcribe.
             sixseven_source = text
             need_retry = not mentions_sixseven(text) and (
                 not text
@@ -1620,11 +1620,11 @@ class VoiceListenService:
                 or (seconds <= 3.5 and rms >= 700 and len(text) <= 32)
             )
             if need_retry:
-                retry = await self.ai.transcribe_wav(wav, language=None)
+                retry = await self.ai.transcribe_wav_fallback(wav, language="ru")
                 retry = (retry or "").strip()
                 if retry and retry != text:
                     log.info(
-                        "STT retry no-lang user=%s guild=%s was=%r now=%r",
+                        "STT fallback user=%s guild=%s was=%r now=%r",
                         user_id,
                         guild_id,
                         text[:80],
@@ -1632,6 +1632,8 @@ class VoiceListenService:
                     )
                     if mentions_sixseven(retry):
                         sixseven_source = retry
+                        if not text or is_hallucination_heavy(text):
+                            text = retry
                     elif (
                         not is_hallucination_heavy(retry)
                         and is_useful_transcript(retry)
@@ -1639,6 +1641,12 @@ class VoiceListenService:
                     ):
                         text = retry
                         sixseven_source = retry
+                elif not text:
+                    retry2 = await self.ai.transcribe_wav_fallback(wav, language=None)
+                    retry2 = (retry2 or "").strip()
+                    if retry2:
+                        text = retry2
+                        sixseven_source = retry2
             hit, matched = self._sixseven_from_context(
                 guild_id, user_id, sixseven_source
             )
@@ -1713,7 +1721,22 @@ class VoiceListenService:
                 rms,
                 text[:120],
             )
-            await self.db.add_voice_snippet(guild_id, user_id, text[:2000])
+            voice_ch = self.listening_channel(guild_id)
+            channel_id = getattr(voice_ch, "id", None) if voice_ch is not None else None
+            tz_name = "Europe/Moscow"
+            config = await self.db.get_guild(guild_id)
+            if config is not None:
+                tz_name = config.timezone
+            if self.dossier_service is not None:
+                await self.dossier_service.record_voice_line(
+                    guild_id,
+                    user_id,
+                    channel_id,
+                    text[:2000],
+                    timezone_name=tz_name,
+                )
+            else:
+                await self.db.add_voice_snippet(guild_id, user_id, text[:2000])
             await self._announce_transcript(bot, guild_id, user_id, text)
         except OpenRouterCreditsExhausted:
             log.warning("OpenRouter 402 — leaving voice and disabling listen")
@@ -1761,18 +1784,14 @@ class VoiceListenService:
             log.info("Announce skipped: no channel set for guild %s", guild_id)
             return
         member = guild.get_member(user_id)
-        who = member.mention if member is not None else f"<@{user_id}>"
+        who = member.display_name if member is not None else f"user {user_id}"
         body = text.strip()
         if len(body) > 1800:
             body = body[:1800] + "…"
         try:
             await channel.send(
-                f"{who} говорит: {body}",
-                allowed_mentions=discord.AllowedMentions(
-                    users=[discord.Object(id=user_id)],
-                    roles=False,
-                    everyone=False,
-                ),
+                f"**{who}** говорит: {body}",
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             log.info("Announced transcript in channel %s user=%s", channel_id, user_id)
         except discord.Forbidden:
@@ -1973,54 +1992,6 @@ class VoiceListenService:
             )
 
     async def process_daily_dossiers(self, bot: ErundaBot) -> None:
-        """Once per guild local day: summarize pending snippets into dossier facts."""
-        try:
-            guilds = await self.db.list_guilds()
-        except Exception:
-            log.exception("Failed to load guilds for voice dossier")
-            return
-
-        for config in guilds:
-            guild = bot.get_guild(config.guild_id)
-            if guild is None:
-                continue
-            local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(config.timezone))
-            # Same window style as TGK refresh: 04:10 local.
-            if local_now.hour != 4 or local_now.minute != 10:
-                continue
-            if self._dossier_dates.get(config.guild_id) == local_now.date():
-                continue
-            try:
-                await self._process_guild_dossiers(guild, local_now.date())
-                await self.db.cleanup_old_voice_snippets(keep_days=14)
-                self._dossier_dates[config.guild_id] = local_now.date()
-            except Exception:
-                log.exception("Voice dossier failed for guild %s", config.guild_id)
-
-    async def _process_guild_dossiers(self, guild: discord.Guild, today: date) -> None:
-        user_ids = await self.db.list_pending_voice_snippet_users(guild.id)
-        for user_id in user_ids:
-            snippets = await self.db.list_pending_voice_snippets(guild.id, user_id)
-            if not snippets:
-                continue
-            member = guild.get_member(user_id)
-            name = member.display_name if member else f"user {user_id}"
-            worthy = [item for item in snippets if is_dossier_worthy(item.text)]
-            if not worthy:
-                await self.db.mark_voice_snippets_processed(
-                    [item.id for item in snippets]
-                )
-                continue
-            joined = "\n".join(f"- {item.text}" for item in worthy[:60])
-            facts = await self.ai.summarize_voice_dossier(
-                display_name=name,
-                lines=joined,
-            )
-            if facts:
-                await self.db.add_voice_dossier_entries(
-                    guild.id,
-                    user_id,
-                    facts[:5],
-                    today.isoformat(),
-                )
-            await self.db.mark_voice_snippets_processed([item.id for item in snippets])
+        """Backward-compatible entry; real work lives in DossierService."""
+        if self.dossier_service is not None:
+            await self.dossier_service.process_daily_and_weekly(bot)

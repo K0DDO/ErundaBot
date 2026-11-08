@@ -1,4 +1,4 @@
-"""Groq-backed text generation for birthday congratulations."""
+"""Text generation + STT via OpenRouter (primary) and Groq (fallback)."""
 
 from __future__ import annotations
 
@@ -22,25 +22,55 @@ class OpenRouterCreditsExhausted(Exception):
 
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TRANSCRIBE_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
-# Cheap multilingual STT on OpenRouter (RU ok). Override via OPENROUTER_STT_MODEL.
-DEFAULT_OPENROUTER_STT = "openai/whisper-large-v3-turbo"
+DEFAULT_OPENROUTER_CHAT = "google/gemini-2.5-flash"
+DEFAULT_OPENROUTER_STT = "microsoft/mai-transcribe-2"
+DEFAULT_OPENROUTER_STT_FALLBACK = "openai/gpt-4o-mini-transcribe"
 DEPRECATED_GROQ_MODELS = {"llama-3.1-8b-instant"}
 USER_AGENT = "ErundaBot/1.0"
 GROQ_TIMEOUT_SECONDS = 120
+CHAT_TIMEOUT_SECONDS = 90
 STT_TIMEOUT_SECONDS = 60
 FILM_TITLE_TIMEOUT_SECONDS = 20
-VOICE_DOSSIER_PROMPT = (
-    "Ты помощник Discord-бота. По репликам человека из голосового чата "
-    "выпиши до 3 коротких нейтральных фактов для «дела» (привычки, шутки, темы). "
-    "Бери ТОЛЬКО то, что явно сказано в репликах — ничего не выдумывай и не додумывай. "
-    "Игнорируй мусор Whisper: «спасибо», thank you, субтитры, продолжение следует, "
+STT_KEYWORD_PHRASES = (
+    "six seven",
+    "6-7",
+    "67",
+    "сикс севен",
+    "сиксевен",
+    "секс севен",
+    "шесть семь",
+    "блядь",
+    "блять",
+    "нахуй",
+    "сука",
+    "пиздец",
+    "ебать",
+    "хуй",
+)
+DOSSIER_PROMPT = (
+    "Ты помощник Discord-бота. По дневным репликам человека "
+    "(текст из чатов и войса, сгруппированные по каналам) "
+    "выпиши до 5 коротких нейтральных фактов для «дела» "
+    "(привычки, шутки, темы, интересы). "
+    "Бери ТОЛЬКО то, что явно сказано — ничего не выдумывай. "
+    "Не смешивай разные каналы в один факт, если контекст разный. "
+    "Игнорируй мусор STT: «спасибо», thank you, субтитры, продолжение следует, "
     "toot, обрывки без смысла, чистые мемы вроде 6-7 / six seven без контекста. "
     "Без матов, оскорблений, NSFW, политики и личных тайн. "
     "Каждый факт — одно короткое предложение на русском. "
     "Если полезного нет — верни пустой JSON-массив []. "
     "Ответ ТОЛЬКО JSON: [\"факт1\", \"факт2\"]"
+)
+DOSSIER_PRUNE_PROMPT = (
+    "Ты помощник Discord-бота. Ниже список фактов «дела» про человека с Discord-сервера. "
+    "Оставь до 10 самых ярких, устойчивых и полезных фактов. "
+    "Убери дубли, устаревшее, банальное и мусор. "
+    "Не выдумывай новых фактов — только отбери и слегка подчисти формулировки. "
+    "Без матов, NSFW, политики и личных тайн. "
+    "Ответ ТОЛЬКО JSON-массив строк: [\"факт1\", \"факт2\"]"
 )
 LATIN_WORD_RE = re.compile(r"\b[A-Za-z]{2,}\b")
 SIGN_OFF_RE = re.compile(
@@ -88,17 +118,32 @@ class AIService:
     def __init__(self) -> None:
         self.api_key = os.getenv("GROQ_API_KEY", "").strip()
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-        raw_model = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
-        self.model = DEFAULT_GROQ_MODEL if raw_model in DEPRECATED_GROQ_MODELS else raw_model
+        raw_groq = os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
+        self.groq_model = (
+            DEFAULT_GROQ_MODEL if raw_groq in DEPRECATED_GROQ_MODELS else raw_groq
+        )
+        self.chat_model = (
+            os.getenv("OPENROUTER_CHAT_MODEL", DEFAULT_OPENROUTER_CHAT).strip()
+            or DEFAULT_OPENROUTER_CHAT
+        )
+        # Backward-compat alias used by older callers / logs.
+        self.model = self.chat_model
         self.stt_model = (
             os.getenv("OPENROUTER_STT_MODEL", DEFAULT_OPENROUTER_STT).strip()
             or DEFAULT_OPENROUTER_STT
+        )
+        self.stt_fallback_model = (
+            os.getenv(
+                "OPENROUTER_STT_FALLBACK_MODEL",
+                DEFAULT_OPENROUTER_STT_FALLBACK,
+            ).strip()
+            or DEFAULT_OPENROUTER_STT_FALLBACK
         )
         self._stt_credits_exhausted = False
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.openrouter_api_key or self.api_key)
 
     @property
     def transcription_enabled(self) -> bool:
@@ -119,7 +164,7 @@ class AIService:
 
     @property
     def _is_reasoning_model(self) -> bool:
-        return "gpt-oss" in self.model
+        return "gpt-oss" in self.chat_model or "gpt-oss" in self.groq_model
 
     async def generate_birthday_congrats(
         self,
@@ -150,22 +195,17 @@ class AIService:
                 f"Факты о человеке (по желанию, максимум один):\n{fact_lines}\n"
                 "Напиши только текст поздравления."
             )
-            body: dict = {
-                "model": self.model,
-                "temperature": 0.8,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-            }
-            if self._is_reasoning_model:
-                body["max_completion_tokens"] = 2048
-                body["reasoning_effort"] = "low"
-            else:
-                body["max_tokens"] = 280
-            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
             try:
-                text = await asyncio.to_thread(self._request_groq, payload)
+                text = await self._chat(
+                    messages,
+                    temperature=0.8,
+                    max_tokens=280,
+                    timeout=GROQ_TIMEOUT_SECONDS,
+                )
                 cleaned = self._sanitize_congrats(
                     text,
                     allowed=display_name,
@@ -175,17 +215,17 @@ class AIService:
                     return cleaned
                 log.warning("Birthday congrats empty or dropped, retrying")
             except TimeoutError:
-                log.warning("Groq birthday generation timed out after %ss", GROQ_TIMEOUT_SECONDS)
+                log.warning("Birthday generation timed out after %ss", GROQ_TIMEOUT_SECONDS)
                 return None
             except (urllib.error.URLError, OSError) as exc:
                 last_error = exc
-                log.warning("Groq birthday request failed, retrying: %s", exc)
+                log.warning("Birthday request failed, retrying: %s", exc)
                 continue
             except Exception:
-                log.exception("Groq birthday generation failed")
+                log.exception("Birthday generation failed")
                 return None
         if last_error is not None:
-            log.warning("Groq birthday generation gave up after wait: %s", last_error)
+            log.warning("Birthday generation gave up after wait: %s", last_error)
         return None
 
     async def canonicalize_film_title(self, title: str) -> list[str]:
@@ -193,28 +233,19 @@ class AIService:
         cleaned = " ".join((title or "").split())
         if not cleaned or not self.enabled:
             return []
-        body: dict = {
-            "model": self.model,
-            "temperature": 0.1,
-            "messages": [
-                {"role": "system", "content": FILM_TITLE_PROMPT},
-                {"role": "user", "content": cleaned},
-            ],
-        }
-        if self._is_reasoning_model:
-            body["max_completion_tokens"] = 512
-            body["reasoning_effort"] = "low"
-        else:
-            body["max_tokens"] = 120
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        messages = [
+            {"role": "system", "content": FILM_TITLE_PROMPT},
+            {"role": "user", "content": cleaned},
+        ]
         try:
-            text = await asyncio.to_thread(
-                self._request_groq,
-                payload,
-                FILM_TITLE_TIMEOUT_SECONDS,
+            text = await self._chat(
+                messages,
+                temperature=0.1,
+                max_tokens=120,
+                timeout=FILM_TITLE_TIMEOUT_SECONDS,
             )
         except Exception:
-            log.exception("Groq film title canonicalize failed for %r", cleaned)
+            log.exception("Film title canonicalize failed for %r", cleaned)
             return []
         return self._parse_film_titles(text, original=cleaned)
 
@@ -232,7 +263,6 @@ class AIService:
             return []
         if not isinstance(data, dict):
             return []
-        found: list[str] = []
         original_key = original.casefold().replace("ё", "е")
         ordered: list[str] = []
         for key in ("ru", "en"):
@@ -246,7 +276,6 @@ class AIService:
                 continue
             if title not in ordered:
                 ordered.append(title)
-        # RU first so TMDB search prefers Russian hits over ambiguous English titles.
         cyrillic = [item for item in ordered if re.search(r"[а-яё]", item, re.IGNORECASE)]
         latin = [item for item in ordered if item not in cyrillic]
         return [*cyrillic, *latin]
@@ -256,6 +285,7 @@ class AIService:
         wav_bytes: bytes,
         *,
         language: str | None = "ru",
+        model: str | None = None,
     ) -> str | None:
         if not self.transcription_enabled or not wav_bytes:
             return None
@@ -264,22 +294,39 @@ class AIService:
                 self._request_openrouter_transcribe,
                 wav_bytes,
                 language,
+                model or self.stt_model,
             )
         except OpenRouterCreditsExhausted:
             self.mark_stt_credits_exhausted()
             raise
         except Exception:
-            log.exception("OpenRouter transcription failed")
+            log.exception("OpenRouter transcription failed model=%s", model or self.stt_model)
             return None
+
+    async def transcribe_wav_fallback(
+        self,
+        wav_bytes: bytes,
+        *,
+        language: str | None = "ru",
+    ) -> str | None:
+        """Second STT pass (GPT-4o mini transcribe) when primary mangled the clip."""
+        if self.stt_fallback_model == self.stt_model:
+            return await self.transcribe_wav(wav_bytes, language=language)
+        return await self.transcribe_wav(
+            wav_bytes,
+            language=language,
+            model=self.stt_fallback_model,
+        )
 
     def _request_openrouter_transcribe(
         self,
         wav_bytes: bytes,
         language: str | None = "ru",
+        model: str | None = None,
     ) -> str:
-        # Prompt biases Whisper toward the meme instead of subtitle hallucinations.
+        chosen = model or self.stt_model
         body: dict = {
-            "model": self.stt_model,
+            "model": chosen,
             "response_format": "json",
             "prompt": (
                 "six seven, 6-7, 67, сикс севен, сек севен, сексаван, сексеон, "
@@ -293,6 +340,14 @@ class AIService:
         }
         if language:
             body["language"] = language
+        if "mai-transcribe" in chosen:
+            body["provider"] = {
+                "options": {
+                    "azure": {
+                        "phraseList": {"phrases": list(STT_KEYWORD_PHRASES)},
+                    }
+                }
+            }
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             OPENROUTER_TRANSCRIBE_URL,
@@ -311,7 +366,7 @@ class AIService:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body_text = exc.read().decode("utf-8", errors="replace")[:500]
-            log.error("OpenRouter STT HTTP %s: %s", exc.code, body_text)
+            log.error("OpenRouter STT HTTP %s model=%s: %s", exc.code, chosen, body_text)
             if exc.code == 402:
                 raise OpenRouterCreditsExhausted(
                     "Токены OpenRouter исчерпаны (402)"
@@ -326,31 +381,74 @@ class AIService:
         display_name: str,
         lines: str,
     ) -> list[str]:
+        return await self.summarize_daily_dossier(
+            display_name=display_name,
+            lines=lines,
+        )
+
+    async def summarize_daily_dossier(
+        self,
+        *,
+        display_name: str,
+        lines: str,
+    ) -> list[str]:
         if not self.enabled or not lines.strip():
             return []
-        body: dict = {
-            "model": self.model,
-            "temperature": 0.3,
-            "messages": [
-                {"role": "system", "content": VOICE_DOSSIER_PROMPT},
-                {
-                    "role": "user",
-                    "content": f"Имя: {display_name}\nРеплики:\n{lines[:6000]}",
-                },
-            ],
-        }
-        if self._is_reasoning_model:
-            body["max_completion_tokens"] = 1024
-            body["reasoning_effort"] = "low"
-        else:
-            body["max_tokens"] = 400
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        messages = [
+            {"role": "system", "content": DOSSIER_PROMPT},
+            {
+                "role": "user",
+                "content": f"Имя: {display_name}\nРеплики за день:\n{lines[:12000]}",
+            },
+        ]
         try:
-            raw = await asyncio.to_thread(self._request_groq, payload, 60)
+            raw = await self._chat(
+                messages,
+                temperature=0.3,
+                max_tokens=500,
+                timeout=60,
+            )
         except Exception:
-            log.exception("Voice dossier summarize failed")
+            log.exception("Daily dossier summarize failed")
             return []
         return self._parse_fact_list(raw)
+
+    async def prune_dossier_facts(
+        self,
+        *,
+        display_name: str,
+        facts: list[str],
+        keep: int = 10,
+    ) -> list[str]:
+        cleaned = [item.strip() for item in facts if item and item.strip()]
+        if not cleaned:
+            return []
+        if len(cleaned) <= keep:
+            return cleaned[:keep]
+        if not self.enabled:
+            return cleaned[:keep]
+        joined = "\n".join(f"- {item}" for item in cleaned[:80])
+        messages = [
+            {"role": "system", "content": DOSSIER_PRUNE_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"Имя: {display_name}\nОставь до {keep} лучших:\n{joined}"
+                ),
+            },
+        ]
+        try:
+            raw = await self._chat(
+                messages,
+                temperature=0.2,
+                max_tokens=600,
+                timeout=60,
+            )
+        except Exception:
+            log.exception("Dossier prune failed")
+            return cleaned[:keep]
+        pruned = self._parse_fact_list(raw)
+        return (pruned or cleaned)[:keep]
 
     @staticmethod
     def _parse_fact_list(raw: str) -> list[str]:
@@ -378,9 +476,110 @@ class AIService:
                 cleaned = " ".join(item.split()).strip()
                 if cleaned and not junk.search(cleaned):
                     facts.append(cleaned[:240])
-        return facts[:5]
+        return facts[:10]
 
-    def _request_groq(self, payload: bytes, timeout: int = GROQ_TIMEOUT_SECONDS) -> str:
+    async def _chat(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float,
+        max_tokens: int,
+        timeout: int,
+    ) -> str:
+        errors: list[str] = []
+        if self.openrouter_api_key:
+            try:
+                return await asyncio.to_thread(
+                    self._request_openrouter_chat,
+                    messages,
+                    self.chat_model,
+                    temperature,
+                    max_tokens,
+                    timeout,
+                )
+            except Exception as exc:
+                errors.append(f"openrouter:{exc}")
+                log.warning(
+                    "OpenRouter chat failed model=%s, falling back to Groq: %s",
+                    self.chat_model,
+                    exc,
+                )
+        if self.api_key:
+            try:
+                return await asyncio.to_thread(
+                    self._request_groq_chat,
+                    messages,
+                    self.groq_model,
+                    temperature,
+                    max_tokens,
+                    timeout,
+                )
+            except Exception as exc:
+                errors.append(f"groq:{exc}")
+                log.exception("Groq chat failed model=%s", self.groq_model)
+                raise
+        raise RuntimeError("; ".join(errors) or "no chat backend configured")
+
+    def _request_openrouter_chat(
+        self,
+        messages: list[dict],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        timeout: int,
+    ) -> str:
+        body: dict = {
+            "model": model,
+            "temperature": temperature,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            OPENROUTER_CHAT_URL,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.openrouter_api_key}",
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": USER_AGENT,
+                "HTTP-Referer": "https://github.com/K0DDO/ErundaBot",
+                "X-Title": "Erunda Discord Bot",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace")[:400]
+            log.error("OpenRouter chat HTTP %s: %s", exc.code, body_text)
+            if exc.code == 402:
+                raise OpenRouterCreditsExhausted(
+                    "Токены OpenRouter исчерпаны (402)"
+                ) from exc
+            raise
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        return self._message_text(message)
+
+    def _request_groq_chat(
+        self,
+        messages: list[dict],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        timeout: int,
+    ) -> str:
+        body: dict = {
+            "model": model,
+            "temperature": temperature,
+            "messages": messages,
+        }
+        if "gpt-oss" in model:
+            body["max_completion_tokens"] = max(max_tokens, 1024)
+            body["reasoning_effort"] = "low"
+        else:
+            body["max_tokens"] = max_tokens
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             GROQ_URL,
             data=payload,
@@ -395,8 +594,8 @@ class AIService:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[:400]
-            log.error("Groq HTTP %s: %s", exc.code, body)
+            body_text = exc.read().decode("utf-8", errors="replace")[:400]
+            log.error("Groq HTTP %s: %s", exc.code, body_text)
             raise
         message = (data.get("choices") or [{}])[0].get("message") or {}
         return self._message_text(message)
