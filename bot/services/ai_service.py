@@ -28,10 +28,26 @@ class OpenRouterRateLimited(Exception):
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TRANSCRIBE_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
+OPENROUTER_SPEECH_URL = "https://openrouter.ai/api/v1/audio/speech"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 DEFAULT_OPENROUTER_CHAT = "google/gemini-2.5-flash"
 DEFAULT_OPENROUTER_STT = "microsoft/mai-transcribe-2"
 DEFAULT_OPENROUTER_STT_FALLBACK = "openai/gpt-4o-mini-transcribe"
+DEFAULT_OPENROUTER_TTS = "heygen/heygen-voice-1-turbo:free"
+# HeyGen public voices (OpenRouter voice field).
+HEYGEN_VOICES = (
+    "nadine",
+    "tabitha",
+    "bram",
+    "gareth",
+    "noelle",
+    "meredith",
+    "sabrina",
+    "lucian",
+    "weston",
+    "vincent",
+)
+TTS_TIMEOUT_SECONDS = 90
 DEPRECATED_GROQ_MODELS = {"llama-3.1-8b-instant"}
 USER_AGENT = "ErundaBot/1.0"
 GROQ_TIMEOUT_SECONDS = 120
@@ -153,11 +169,19 @@ class AIService:
             ).strip()
             or DEFAULT_OPENROUTER_STT_FALLBACK
         )
+        self.tts_model = (
+            os.getenv("OPENROUTER_TTS_MODEL", DEFAULT_OPENROUTER_TTS).strip()
+            or DEFAULT_OPENROUTER_TTS
+        )
         self._stt_credits_exhausted = False
 
     @property
     def enabled(self) -> bool:
         return bool(self.openrouter_api_key or self.api_key)
+
+    @property
+    def tts_enabled(self) -> bool:
+        return bool(self.openrouter_api_key)
 
     @property
     def transcription_enabled(self) -> bool:
@@ -362,6 +386,86 @@ class AIService:
             language=language,
             model=self.stt_fallback_model,
         )
+
+    async def synthesize_speech(
+        self,
+        text: str,
+        *,
+        voice: str = "gareth",
+        response_format: str = "mp3",
+        model: str | None = None,
+    ) -> bytes:
+        """HeyGen TTS via OpenRouter — returns raw audio bytes (mp3/pcm)."""
+        if not self.tts_enabled:
+            raise ValueError("Нужен OPENROUTER_API_KEY для TTS")
+        cleaned = (text or "").strip()
+        if not cleaned:
+            raise ValueError("Пустой текст")
+        if len(cleaned) > 5000:
+            raise ValueError("Текст длиннее 5000 символов")
+        voice_id = (voice or "").strip().casefold()
+        if voice_id not in HEYGEN_VOICES:
+            raise ValueError(
+                f"Неизвестный голос «{voice}». Доступны: {', '.join(HEYGEN_VOICES)}"
+            )
+        fmt = (response_format or "mp3").strip().casefold()
+        if fmt not in {"mp3", "pcm"}:
+            raise ValueError("response_format: mp3 или pcm")
+        chosen = model or self.tts_model
+        return await asyncio.to_thread(
+            self._request_openrouter_speech,
+            cleaned,
+            voice_id,
+            fmt,
+            chosen,
+        )
+
+    def _request_openrouter_speech(
+        self,
+        text: str,
+        voice: str,
+        response_format: str,
+        model: str,
+    ) -> bytes:
+        payload = json.dumps(
+            {
+                "model": model,
+                "input": text,
+                "voice": voice,
+                "response_format": response_format,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            OPENROUTER_SPEECH_URL,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self.openrouter_api_key}",
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": USER_AGENT,
+                "HTTP-Referer": "https://github.com/K0DDO/ErundaBot",
+                "X-Title": "Erunda Discord Bot",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=TTS_TIMEOUT_SECONDS) as response:
+                audio = response.read()
+        except urllib.error.HTTPError as exc:
+            body_text = exc.read().decode("utf-8", errors="replace")[:500]
+            log.error("OpenRouter TTS HTTP %s model=%s: %s", exc.code, model, body_text)
+            if exc.code == 402:
+                raise OpenRouterCreditsExhausted(
+                    "Токены OpenRouter исчерпаны (402)"
+                ) from exc
+            if exc.code == 429:
+                raise OpenRouterRateLimited(
+                    f"OpenRouter TTS rate limited (429) model={model}"
+                ) from exc
+            raise
+        if not audio:
+            raise RuntimeError("OpenRouter TTS вернул пустой аудиоответ")
+        return audio
 
     def _request_openrouter_transcribe(
         self,

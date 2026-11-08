@@ -12,8 +12,19 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.database.models import Birthday
+from bot.services.ai_service import (
+    HEYGEN_VOICES,
+    OpenRouterCreditsExhausted,
+    OpenRouterRateLimited,
+)
 from bot.services.festival_service import normalize_film_title
 from bot.services.santa_service import has_kino_role
+from bot.services.voice_listen_service import (
+    AISA_GREETING_TEXT,
+    AISA_GREETING_UNTIL,
+    AISA_GREETING_VOICE,
+    AISA_USERNAME,
+)
 from bot.utils.embeds import base_embed, error_embed, success_embed
 from bot.utils.permissions import (
     can_edit_config,
@@ -357,6 +368,117 @@ class AdminCog(commands.Cog):
             return
         await interaction.followup.send(
             embed=success_embed("Тайный Санта создан", f"[Открыть]({message.jump_url})"),
+            ephemeral=True,
+        )
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        await self.bot.voice_listen_service.handle_aisa_voice_greeting(
+            member, before, after
+        )
+
+    @admin.command(
+        name="voice",
+        description="Сгенерировать TTS (HeyGen) и проиграть в войсе",
+    )
+    @app_commands.describe(
+        voice="Голос HeyGen",
+        text="Текст для озвучки",
+    )
+    @app_commands.choices(
+        voice=[
+            app_commands.Choice(name=name, value=name) for name in HEYGEN_VOICES
+        ]
+    )
+    @app_commands.guild_only()
+    async def admin_voice(
+        self,
+        interaction: discord.Interaction,
+        voice: str,
+        text: str,
+    ) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if not can_edit_config(interaction.user, config.config_role_id):
+            await interaction.response.send_message(
+                embed=error_embed(config_denied_reason(config.config_role_id)),
+                ephemeral=True,
+            )
+            return
+        cleaned = (text or "").strip()
+        if not cleaned:
+            await interaction.response.send_message(
+                embed=error_embed("Нужен текст"),
+                ephemeral=True,
+            )
+            return
+        if not self.bot.voice_listen_service.is_listening(interaction.guild.id):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Бот не в войсе",
+                    "Сначала `/админ voice_listen` в нужном канале.",
+                ),
+                ephemeral=True,
+            )
+            return
+        if not self.bot.ai_service.tts_enabled:
+            await interaction.response.send_message(
+                embed=error_embed("Нужен OPENROUTER_API_KEY для TTS"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        voice_id = voice.casefold().strip()
+        try:
+            await self.bot.voice_listen_service.play_tts_text(
+                interaction.guild.id,
+                cleaned,
+                voice=voice_id,
+            )
+        except OpenRouterCreditsExhausted:
+            await interaction.followup.send(
+                embed=error_embed("Токены OpenRouter исчерпаны (402)"),
+                ephemeral=True,
+            )
+            return
+        except OpenRouterRateLimited:
+            await interaction.followup.send(
+                embed=error_embed("OpenRouter TTS rate limit (429), попробуй чуть позже"),
+                ephemeral=True,
+            )
+            return
+        except ValueError as exc:
+            await interaction.followup.send(
+                embed=error_embed(str(exc)),
+                ephemeral=True,
+            )
+            return
+        except Exception:
+            log.exception("admin voice TTS failed")
+            await interaction.followup.send(
+                embed=error_embed("Не удалось сгенерировать или проиграть голос"),
+                ephemeral=True,
+            )
+            return
+        tip = ""
+        if self.bot.voice_listen_service.aisa_greeting_active():
+            tip = (
+                f"\nДо {AISA_GREETING_UNTIL.isoformat()} при входе @{AISA_USERNAME} "
+                f"в канал бота играет «{AISA_GREETING_TEXT}» ({AISA_GREETING_VOICE})."
+            )
+        await interaction.followup.send(
+            embed=success_embed(
+                "Проиграно",
+                f"Голос **{voice_id}**: {cleaned[:200]}"
+                + ("…" if len(cleaned) > 200 else "")
+                + tip,
+            ),
             ephemeral=True,
         )
 

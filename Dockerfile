@@ -11,6 +11,7 @@ RUN apt-get update \
         libffi-dev \
         libnacl-dev \
         libopus0 \
+        ffmpeg \
         gcc \
         git \
     && rm -rf /var/lib/apt/lists/*

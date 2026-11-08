@@ -6,7 +6,9 @@ import asyncio
 import audioop
 import io
 import logging
+import os
 import re
+import tempfile
 import wave
 from collections import defaultdict
 from datetime import date, datetime, timezone
@@ -17,7 +19,7 @@ import discord
 from discord.opus import OpusError
 
 from bot.database.database import Database
-from bot.services.ai_service import OpenRouterCreditsExhausted
+from bot.services.ai_service import HEYGEN_VOICES, OpenRouterCreditsExhausted
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -188,6 +190,12 @@ SOUNDBOARD_ERUNDA_NAME = "уц"
 # Back-compat alias used in older log strings / tips.
 SOUNDBOARD_TRIGGER_NAME = SOUNDBOARD_SIXSEVEN_NAME
 SOUNDBOARD_COOLDOWN_SECONDS = 2.0
+# Seasonal greeting for @i_aisa (HeyGen Gareth) until this Moscow date inclusive.
+AISA_USERNAME = "i_aisa"
+AISA_GREETING_UNTIL = date(2026, 11, 30)
+AISA_GREETING_TEXT = "здравствуйте госпожа"
+AISA_GREETING_VOICE = "gareth"
+AISA_GREETING_COOLDOWN_SECONDS = 20.0
 # 16-bit PCM RMS below this ≈ silence / decrypt garbage.
 MIN_PCM_RMS = 250
 _VOICE_RECV_PATCHED = False
@@ -779,6 +787,9 @@ class VoiceListenService:
         # (guild_id, sound_name) → resolved soundboard entry
         self._sound_cache: dict[tuple[int, str], discord.SoundboardSound | None] = {}
         self._sound_cooldown_until: dict[int, float] = {}
+        self._tts_play_lock = asyncio.Lock()
+        self._tts_cache: dict[tuple[str, str], bytes] = {}
+        self._aisa_greeting_cooldown_until: dict[int, float] = {}
         self._announce_channels: dict[int, int] = {}
         self._pcm_packets: dict[int, int] = defaultdict(int)
         self._unknown_speaker_packets: dict[int, int] = defaultdict(int)
@@ -2045,6 +2056,172 @@ class VoiceListenService:
         await self._play_named_sound(
             bot, guild_id, SOUNDBOARD_SIXSEVEN_NAME, label="Sixseven"
         )
+
+    @staticmethod
+    def aisa_greeting_active(*, now: datetime | None = None) -> bool:
+        stamp = now or datetime.now(ZoneInfo("Europe/Moscow"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("Europe/Moscow"))
+        else:
+            stamp = stamp.astimezone(ZoneInfo("Europe/Moscow"))
+        return stamp.date() <= AISA_GREETING_UNTIL
+
+    @staticmethod
+    def is_aisa_member(member: discord.Member | discord.User) -> bool:
+        name = (getattr(member, "name", None) or "").casefold()
+        global_name = (getattr(member, "global_name", None) or "").casefold()
+        target = AISA_USERNAME.casefold()
+        return name == target or global_name == target
+
+    async def synthesize_cached(
+        self,
+        text: str,
+        *,
+        voice: str,
+    ) -> bytes:
+        key = (voice.casefold(), text.strip())
+        cached = self._tts_cache.get(key)
+        if cached:
+            return cached
+        audio = await self.ai.synthesize_speech(text, voice=voice, response_format="mp3")
+        # Bound cache size — keep greetings / recent admin lines.
+        if len(self._tts_cache) >= 24:
+            self._tts_cache.pop(next(iter(self._tts_cache)))
+        self._tts_cache[key] = audio
+        return audio
+
+    async def play_tts_mp3(
+        self,
+        guild_id: int,
+        mp3_bytes: bytes,
+        *,
+        label: str = "TTS",
+    ) -> None:
+        """Play MP3 bytes in the bot's current voice channel (needs ffmpeg)."""
+        if not mp3_bytes:
+            raise ValueError("Пустое аудио")
+        vc = self._clients.get(guild_id)
+        if vc is None or not vc.is_connected():
+            raise ValueError("Бот не в голосовом канале — сначала /админ voice_listen")
+        if not isinstance(getattr(vc, "channel", None), discord.VoiceChannel):
+            raise ValueError("TTS только в обычном войсе (не stage)")
+
+        async with self._tts_play_lock:
+            path = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".mp3", delete=False
+                ) as tmp:
+                    tmp.write(mp3_bytes)
+                    path = tmp.name
+                if vc.is_playing():
+                    vc.stop()
+                # Small gap so Discord accepts the next play after stop/soundboard.
+                await asyncio.sleep(0.25)
+                source = discord.FFmpegPCMAudio(
+                    path,
+                    before_options="-nostdin",
+                    options="-vn",
+                )
+
+                done = asyncio.Event()
+                error_box: list[BaseException] = []
+
+                def _after(err: BaseException | None) -> None:
+                    if err is not None:
+                        error_box.append(err)
+                    bot = self._bot
+                    if bot is not None:
+                        bot.loop.call_soon_threadsafe(done.set)
+                    else:
+                        done.set()
+
+                vc.play(source, after=_after)
+                log.info(
+                    "Playing TTS «%s» guild=%s bytes=%s",
+                    label,
+                    guild_id,
+                    len(mp3_bytes),
+                )
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=120.0)
+                except asyncio.TimeoutError:
+                    if vc.is_playing():
+                        vc.stop()
+                    raise TimeoutError("TTS playback timed out") from None
+                if error_box:
+                    raise error_box[0]
+            finally:
+                if path:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
+    async def play_tts_text(
+        self,
+        guild_id: int,
+        text: str,
+        *,
+        voice: str,
+    ) -> str:
+        voice_id = voice.casefold().strip()
+        if voice_id not in HEYGEN_VOICES:
+            raise ValueError(
+                f"Неизвестный голос «{voice}». Доступны: {', '.join(HEYGEN_VOICES)}"
+            )
+        audio = await self.synthesize_cached(text, voice=voice_id)
+        await self.play_tts_mp3(
+            guild_id,
+            audio,
+            label=f"{voice_id}: {text[:40]}",
+        )
+        return voice_id
+
+    async def handle_aisa_voice_greeting(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Until 30.11: greet @i_aisa with Gareth TTS when she joins the bot's VC."""
+        if member.bot or not self.is_aisa_member(member):
+            return
+        if not self.aisa_greeting_active():
+            return
+        if after.channel is None:
+            return
+        # Joined or switched into a channel.
+        if before.channel is not None and before.channel.id == after.channel.id:
+            return
+        guild_id = member.guild.id
+        if not self.is_listening(guild_id):
+            return
+        listening = self.listening_channel(guild_id)
+        if listening is None or listening.id != after.channel.id:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        until = self._aisa_greeting_cooldown_until.get(guild_id, 0.0)
+        if now < until:
+            return
+        self._aisa_greeting_cooldown_until[guild_id] = now + AISA_GREETING_COOLDOWN_SECONDS
+        try:
+            await self.play_tts_text(
+                guild_id,
+                AISA_GREETING_TEXT,
+                voice=AISA_GREETING_VOICE,
+            )
+            log.info(
+                "Aisa greeting played guild=%s user=%s",
+                guild_id,
+                member.id,
+            )
+        except Exception:
+            log.exception(
+                "Aisa greeting failed guild=%s user=%s",
+                guild_id,
+                member.id,
+            )
 
     async def process_daily_dossiers(self, bot: ErundaBot) -> None:
         """Backward-compatible entry; real work lives in DossierService."""
