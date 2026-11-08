@@ -632,7 +632,7 @@ async def _wait_for_dave(vc: discord.VoiceProtocol, *, timeout: float = 8.0) -> 
             await asyncio.sleep(0.15)
             continue
         try:
-            session.set_passthrough_mode(True, 120)
+            session.set_passthrough_mode(True, 600)
         except Exception:
             pass
         ready = bool(getattr(session, "ready", False))
