@@ -101,18 +101,18 @@ SWEAR_RE = re.compile(
     r")"
     r"[а-яёa-z]*"
 )
-# Whisper mangles the meme hard: «6, 7», сексон, «Зигг сервон», Zick servon…
+# Whisper mangles the meme hard: «6, 7», сексон, «Зигг сервон», «сюксалон»…
 _SIX_SEP = r"[\s\-–—./,;:…]*"
 # First half of the meme as Whisper hears it.
 _SIX_STEM = (
-    r"(?:сикс|сик\s*с?|секс|сек\s*с?|сыкс|сакс|цикс|сигг?|"
+    r"(?:сикс|сик\s*с?|секс|сек\s*с?|сыкс|сакс|сюкс|сукс|сухс|цикс|сигг?|"
     r"six|sick|sik|sex|see|zick|zigg?|zik|"
     r"зигг+|зиг|зик)"
 )
 # Second half.
 _SEVEN_STEM = (
-    r"(?:севен|севон|сервон|серван|саван|сайон|саён|семь|"
-    r"seven|sevon|servon|servan|sevan|sion)"
+    r"(?:севен|севон|сервон|серван|саван|сайон|саён|салон|семь|"
+    r"seven|sevon|servon|servan|sevan|sion|salon)"
 )
 SIXSEVEN_RE = re.compile(
     r"(?:"
@@ -131,6 +131,10 @@ SIXSEVEN_RE = re.compile(
     r"сикс[ао]?в[аеэ]н|"
     # Whisper: «Сексеон», «сексион», «сиксеон»…
     r"сикс[еёиыао]?[оае]?н|"
+    # Live 2026-11-08: «Суксал», «Сюксалон», «Сексуя», «сухсад»
+    r"с[июуы]кс[аеоуыи]?л?[аоеу]?н?|"
+    r"с[ею]кс[уиы][яею]|"
+    r"сухс[аеоу]д|сукс[аеоу]д|"
     rf"сек\s*с?{_SIX_SEP}севен|"
     rf"секс{_SIX_SEP}севен|"
     r"секс[ао]?в[аеэ]н|"
@@ -195,6 +199,9 @@ def _normalize_sixseven_text(text: str) -> str:
         (r"\bзик\b", "сикс"),
         (r"\bсигг+\b", "сикс"),
         (r"\bсиг\b", "сикс"),
+        (r"сюкс", "сикс"),
+        (r"сукс", "сикс"),
+        (r"сухс", "сикс"),
         (r"\bzick\b", "six"),
         (r"\bzigg+\b", "six"),
         (r"\bzig\b", "six"),
@@ -204,11 +211,15 @@ def _normalize_sixseven_text(text: str) -> str:
         (r"севон", "севен"),
         (r"сайон", "севен"),
         (r"саён", "севен"),
+        (r"салон", "севен"),
+        (r"сексуя+", "сексон"),
+        (r"сексуй", "сексон"),
         (r"\bservon\b", "seven"),
         (r"\bservan\b", "seven"),
         (r"\bsevon\b", "seven"),
         (r"\bsevan\b", "seven"),
         (r"\bsion\b", "seven"),
+        (r"\bsalon\b", "seven"),
     )
     for pattern, repl in replacements:
         cleaned = re.sub(pattern, repl, cleaned)
@@ -218,7 +229,24 @@ def _normalize_sixseven_text(text: str) -> str:
 
 def mentions_sixseven(text: str) -> bool:
     cleaned = _normalize_sixseven_text(text)
-    return bool(SIXSEVEN_RE.search(cleaned))
+    if SIXSEVEN_RE.search(cleaned):
+        return True
+    # Compact one-token shout: «сюксалонсюксалон» / «суксал.»
+    compact = re.sub(r"[^a-zа-я0-9]+", "", cleaned)
+    if not compact:
+        return False
+    return bool(
+        re.search(
+            r"(?:"
+            r"с[июуы]кс[аеоуыилнд]{1,6}|"
+            r"с[еэ]кс[уиы][яею]|"
+            r"сикс[аеоу]?л?[аоеу]?н|"
+            r"сексон|сиксон|сексеон|"
+            r"sixseven|sexseven|sexon"
+            r")",
+            compact,
+        )
+    )
 
 
 def maybe_sixseven_near_miss(text: str) -> bool:
@@ -228,7 +256,7 @@ def maybe_sixseven_near_miss(text: str) -> bool:
         return False
     return bool(
         re.search(
-            rf"(?:{_SIX_STEM}|{_SEVEN_STEM}|шесть|67|"
+            rf"(?:{_SIX_STEM}|{_SEVEN_STEM}|шесть|67|сюкс|сукс|сухс|сексу|"
             r"(?<!\d)6\D{0,4}7(?!\d)|(?<!\d)6\b)",
             cleaned,
         )
