@@ -195,6 +195,7 @@ AISA_USERNAME = "i_aisa"
 AISA_GREETING_UNTIL = date(2026, 11, 30)
 AISA_GREETING_TEXT = "здравствуйте госпожа"
 AISA_GREETING_VOICE = "gareth"
+AISA_GREETING_DELAY_SECONDS = 2.0
 AISA_GREETING_COOLDOWN_SECONDS = 20.0
 # 16-bit PCM RMS below this ≈ silence / decrypt garbage.
 MIN_PCM_RMS = 250
@@ -2240,6 +2241,17 @@ class VoiceListenService:
             return
         self._aisa_greeting_cooldown_until[guild_id] = now + AISA_GREETING_COOLDOWN_SECONDS
         try:
+            await asyncio.sleep(AISA_GREETING_DELAY_SECONDS)
+            # She may have left during the delay.
+            current = member.voice
+            if (
+                current is None
+                or current.channel is None
+                or listening is None
+                or current.channel.id != listening.id
+                or not self.is_listening(guild_id)
+            ):
+                return
             await self.play_tts_text(
                 guild_id,
                 AISA_GREETING_TEXT,
