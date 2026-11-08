@@ -977,6 +977,23 @@ class Database:
                 """
             )
             await self._db.execute("PRAGMA user_version = 31")
+        if version < 32:
+            await self._db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS member_profiles (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    gender TEXT NOT NULL DEFAULT 'u'
+                        CHECK (gender IN ('f', 'm', 'u')),
+                    score_f INTEGER NOT NULL DEFAULT 0,
+                    score_m INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (guild_id, user_id),
+                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+                )
+                """
+            )
+            await self._db.execute("PRAGMA user_version = 32")
 
     async def close(self) -> None:
         if self._db is not None:
@@ -2862,6 +2879,62 @@ class Database:
             (guild_id, user_id, int(channel_id or 0), source, text, day),
         )
         await self.connection.commit()
+
+    async def bump_member_gender_scores(
+        self,
+        guild_id: int,
+        user_id: int,
+        score_f: int,
+        score_m: int,
+    ) -> str:
+        """Accumulate gender evidence; return current gender code f/m/u."""
+        if score_f <= 0 and score_m <= 0:
+            return await self.get_member_gender(guild_id, user_id)
+        await self.connection.execute(
+            """
+            INSERT INTO member_profiles (guild_id, user_id, score_f, score_m, gender)
+            VALUES (?, ?, ?, ?, 'u')
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                score_f = score_f + excluded.score_f,
+                score_m = score_m + excluded.score_m,
+                updated_at = datetime('now')
+            """,
+            (guild_id, user_id, max(0, score_f), max(0, score_m)),
+        )
+        cursor = await self.connection.execute(
+            """
+            SELECT score_f, score_m FROM member_profiles
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        row = await cursor.fetchone()
+        from bot.utils.gender import decide_gender
+
+        gender = decide_gender(int(row["score_f"]), int(row["score_m"])) if row else "u"
+        await self.connection.execute(
+            """
+            UPDATE member_profiles SET gender = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (gender, guild_id, user_id),
+        )
+        await self.connection.commit()
+        return gender
+
+    async def get_member_gender(self, guild_id: int, user_id: int) -> str:
+        cursor = await self.connection.execute(
+            """
+            SELECT gender FROM member_profiles
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return "u"
+        value = str(row["gender"] or "u")
+        return value if value in {"f", "m", "u"} else "u"
 
     async def list_daily_text_log_users(self, guild_id: int, day: str) -> list[int]:
         cursor = await self.connection.execute(

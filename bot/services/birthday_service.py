@@ -495,6 +495,7 @@ class BirthdayService:
         mention: bool = True,
     ) -> tuple[discord.Embed, bool]:
         facts, extra_allowed = await self.collect_congrats_facts(guild, birthday.user_id)
+        gender = await self.db.get_member_gender(guild.id, birthday.user_id)
         description, used_ai = await ai_service.build_announce_embed_description(
             guild,
             birthday,
@@ -502,6 +503,7 @@ class BirthdayService:
             mention=mention,
             facts=facts,
             extra_allowed=extra_allowed,
+            gender=gender,
         )
         embed = discord.Embed(
             title="День рождения",

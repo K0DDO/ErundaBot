@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import discord
 
 from bot.services.voice_listen_service import is_dossier_worthy
+from bot.utils.gender import Gender, score_gender_markers
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -47,6 +48,7 @@ class DossierService:
             text[:2000],
             day,
         )
+        await self._note_gender(message.guild.id, message.author.id, text)
 
     async def record_voice_line(
         self,
@@ -69,6 +71,16 @@ class DossierService:
             cleaned[:2000],
             day,
         )
+        await self._note_gender(guild_id, user_id, cleaned)
+
+    async def _note_gender(self, guild_id: int, user_id: int, text: str) -> None:
+        score_f, score_m = score_gender_markers(text)
+        if score_f or score_m:
+            await self.db.bump_member_gender_scores(guild_id, user_id, score_f, score_m)
+
+    async def _gender_for(self, guild_id: int, user_id: int) -> Gender:
+        value = await self.db.get_member_gender(guild_id, user_id)
+        return value if value in {"f", "m", "u"} else "u"
 
     async def process_daily_and_weekly(self, bot: ErundaBot) -> None:
         try:
@@ -146,9 +158,14 @@ class DossierService:
                 else:
                     blocks.append("### без канала\n" + "\n".join(f"- {x}" for x in lines[:40]))
             joined = "\n\n".join(blocks)[:12000]
+            # Also learn gender from the day's text before summarizing.
+            for row in rows:
+                await self._note_gender(guild.id, user_id, row.text)
+            gender = await self._gender_for(guild.id, user_id)
             facts = await self.ai.summarize_daily_dossier(
                 display_name=name,
                 lines=joined,
+                gender=gender,
             )
             if facts:
                 await self.db.add_voice_dossier_entries(
@@ -168,10 +185,12 @@ class DossierService:
             member = guild.get_member(user_id)
             name = member.display_name if member else f"user {user_id}"
             facts = [item.fact for item in entries]
+            gender = await self._gender_for(guild.id, user_id)
             pruned = await self.ai.prune_dossier_facts(
                 display_name=name,
                 facts=facts,
                 keep=WEEKLY_KEEP_FACTS,
+                gender=gender,
             )
             if not pruned:
                 continue

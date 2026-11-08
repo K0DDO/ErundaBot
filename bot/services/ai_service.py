@@ -61,6 +61,8 @@ DOSSIER_PROMPT = (
     "toot, обрывки без смысла, чистые мемы вроде 6-7 / six seven без контекста. "
     "Без матов, оскорблений, NSFW, политики и личных тайн. "
     "Каждый факт — одно короткое предложение на русском. "
+    "Соблюдай род из поля «Пол по речи»: не пиши «он» про женщину и «она» про мужчину. "
+    "Если пол неизвестен — без он/она. "
     "Если полезного нет — верни пустой JSON-массив []. "
     "Ответ ТОЛЬКО JSON: [\"факт1\", \"факт2\"]"
 )
@@ -69,6 +71,8 @@ DOSSIER_PRUNE_PROMPT = (
     "Оставь до 10 самых ярких, устойчивых и полезных фактов. "
     "Убери дубли, устаревшее, банальное и мусор. "
     "Не выдумывай новых фактов — только отбери и слегка подчисти формулировки. "
+    "Поправь род местоимений/глаголов под «Пол по речи» "
+    "(не «он» про женщину, не «она» про мужчину). "
     "Без матов, NSFW, политики и личных тайн. "
     "Ответ ТОЛЬКО JSON-массив строк: [\"факт1\", \"факт2\"]"
 )
@@ -104,6 +108,8 @@ SYSTEM_PROMPT = (
     "Обращайся по имени в начале. Без подписи, без названия сервера, без <@id>, без латиницы.\n"
     "Не выдумывай факты. Возраст упоминай, только если он дан. "
     "Из списка фактов можно мягко упомянуть один, своими словами и без цифр статистики; можно ни одного.\n"
+    "Соблюдай род из поля «Пол по речи»: не пиши «он» про женщину и «она» про мужчину; "
+    "лучше «ты» / имя без лишних он/она.\n"
     "Не оскорбляй, не шути про возраст как про старость, смерть, политику и NSFW.\n"
     "Избегай штампов: «пусть сбудутся мечты», «здоровья и счастья», «новых свершений», "
     "«незабываемый день», «заряд энергии», «успехов во всём», «оставайся таким же».\n\n"
@@ -175,15 +181,18 @@ class AIService:
         today,
         facts: list[str] | None = None,
         extra_allowed: list[str] | None = None,
+        gender: str = "u",
     ) -> str | None:
         if not self.enabled:
             return None
         from bot.services.birthday_service import age_on, format_birthday_date
+        from bot.utils.gender import gender_prompt_line
 
         age = age_on(birthday, today)
         date_text = format_birthday_date(birthday.day, birthday.month, birthday.year)
         age_line = f"Сегодня исполняется {age}." if age is not None else "Возраст неизвестен — не пиши цифру лет."
         fact_lines = "\n".join(f"- {item}" for item in (facts or []) if item) or "- нет"
+        gender_code = gender if gender in {"f", "m", "u"} else "u"
         last_error: Exception | None = None
         for _attempt in range(2):
             vibe = random.choice(VIBES)
@@ -191,6 +200,7 @@ class AIService:
                 f"Имя: {display_name}\n"
                 f"Дата: {date_text}\n"
                 f"{age_line}\n"
+                f"{gender_prompt_line(gender_code)}\n"
                 f"Настроение: {vibe}\n"
                 f"Факты о человеке (по желанию, максимум один):\n{fact_lines}\n"
                 "Напиши только текст поздравления."
@@ -380,10 +390,12 @@ class AIService:
         *,
         display_name: str,
         lines: str,
+        gender: str = "u",
     ) -> list[str]:
         return await self.summarize_daily_dossier(
             display_name=display_name,
             lines=lines,
+            gender=gender,
         )
 
     async def summarize_daily_dossier(
@@ -391,14 +403,22 @@ class AIService:
         *,
         display_name: str,
         lines: str,
+        gender: str = "u",
     ) -> list[str]:
         if not self.enabled or not lines.strip():
             return []
+        from bot.utils.gender import gender_prompt_line
+
+        gender_code = gender if gender in {"f", "m", "u"} else "u"
         messages = [
             {"role": "system", "content": DOSSIER_PROMPT},
             {
                 "role": "user",
-                "content": f"Имя: {display_name}\nРеплики за день:\n{lines[:12000]}",
+                "content": (
+                    f"Имя: {display_name}\n"
+                    f"{gender_prompt_line(gender_code)}\n"
+                    f"Реплики за день:\n{lines[:12000]}"
+                ),
             },
         ]
         try:
@@ -419,6 +439,7 @@ class AIService:
         display_name: str,
         facts: list[str],
         keep: int = 10,
+        gender: str = "u",
     ) -> list[str]:
         cleaned = [item.strip() for item in facts if item and item.strip()]
         if not cleaned:
@@ -427,13 +448,18 @@ class AIService:
             return cleaned[:keep]
         if not self.enabled:
             return cleaned[:keep]
+        from bot.utils.gender import gender_prompt_line
+
+        gender_code = gender if gender in {"f", "m", "u"} else "u"
         joined = "\n".join(f"- {item}" for item in cleaned[:80])
         messages = [
             {"role": "system", "content": DOSSIER_PRUNE_PROMPT},
             {
                 "role": "user",
                 "content": (
-                    f"Имя: {display_name}\nОставь до {keep} лучших:\n{joined}"
+                    f"Имя: {display_name}\n"
+                    f"{gender_prompt_line(gender_code)}\n"
+                    f"Оставь до {keep} лучших:\n{joined}"
                 ),
             },
         ]
@@ -650,6 +676,7 @@ class AIService:
         mention: bool = True,
         facts: list[str] | None = None,
         extra_allowed: list[str] | None = None,
+        gender: str = "u",
     ) -> tuple[str, bool]:
         member = guild.get_member(birthday.user_id)
         display = member.display_name if member is not None else f"участник #{birthday.user_id}"
@@ -661,6 +688,7 @@ class AIService:
             today=today,
             facts=facts,
             extra_allowed=extra_allowed,
+            gender=gender,
         )
         if generated:
             return f"{mention_text}\n\n{generated}", True
