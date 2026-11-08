@@ -31,8 +31,9 @@ OPENROUTER_TRANSCRIBE_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 OPENROUTER_SPEECH_URL = "https://openrouter.ai/api/v1/audio/speech"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 DEFAULT_OPENROUTER_CHAT = "google/gemini-2.5-flash"
-DEFAULT_OPENROUTER_STT = "microsoft/mai-transcribe-2"
-DEFAULT_OPENROUTER_STT_FALLBACK = "openai/gpt-4o-mini-transcribe"
+# ~$0.011/hr vs MAI ~$0.10/hr; fallback Whisper Large ~$0.029/hr.
+DEFAULT_OPENROUTER_STT = "openai/whisper-large-v3-turbo"
+DEFAULT_OPENROUTER_STT_FALLBACK = "openai/whisper-large-v3"
 DEFAULT_OPENROUTER_TTS = "heygen/heygen-voice-1-turbo:free"
 # HeyGen public voices (OpenRouter voice field).
 HEYGEN_VOICES = (
@@ -343,7 +344,7 @@ class AIService:
             self.mark_stt_credits_exhausted()
             raise
         except OpenRouterRateLimited:
-            # Primary MAI often 429s under load — try fallback model immediately.
+            # Primary often 429s under load — try fallback model immediately.
             if chosen != self.stt_fallback_model:
                 log.warning(
                     "OpenRouter STT 429 on %s — falling back to %s",

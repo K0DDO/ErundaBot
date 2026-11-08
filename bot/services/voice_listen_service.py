@@ -2090,6 +2090,20 @@ class VoiceListenService:
         self._tts_cache[key] = audio
         return audio
 
+    @staticmethod
+    def _heygen_pcm_to_discord(pcm_bytes: bytes, *, sample_rate: int, channels: int) -> bytes:
+        """HeyGen s16le PCM → Discord PCM (48kHz stereo s16le), no ffmpeg."""
+        if channels == 1:
+            stereo = audioop.tostereo(pcm_bytes, 2, 1.0, 1.0)
+        elif channels == 2:
+            stereo = pcm_bytes
+        else:
+            raise ValueError(f"TTS: ожидался mono/stereo, got channels={channels}")
+        if sample_rate != PCM_RATE:
+            stereo, _ = audioop.ratecv(stereo, 2, 2, sample_rate, PCM_RATE, None)
+        # Soft boost — HeyGen can sit a bit quiet after resample.
+        return audioop.mul(stereo, 2, 1.35)
+
     async def play_tts_pcm(
         self,
         guild_id: int,
@@ -2099,7 +2113,7 @@ class VoiceListenService:
         sample_rate: int = 44100,
         channels: int = 1,
     ) -> None:
-        """Play HeyGen raw PCM (s16le mono 44.1kHz) via ffmpeg → Discord 48kHz stereo."""
+        """Play HeyGen raw PCM (s16le mono 44.1kHz) as Discord 48kHz stereo."""
         if not pcm_bytes:
             raise ValueError("Пустое аудио")
         vc = self._clients.get(guild_id)
@@ -2108,61 +2122,75 @@ class VoiceListenService:
         if not isinstance(getattr(vc, "channel", None), discord.VoiceChannel):
             raise ValueError("TTS только в обычном войсе (не stage)")
 
+        discord_pcm = self._heygen_pcm_to_discord(
+            pcm_bytes, sample_rate=sample_rate, channels=channels
+        )
+        if len(discord_pcm) < PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH // 10:
+            raise ValueError("TTS слишком короткий после конвертации")
+
         async with self._tts_play_lock:
-            path = ""
+            # Same unmute path as soundboard — mute/deaf blocks audible send.
             try:
-                with tempfile.NamedTemporaryFile(
-                    suffix=".pcm", delete=False
-                ) as tmp:
-                    tmp.write(pcm_bytes)
-                    path = tmp.name
+                voice_state = vc.guild.me.voice if vc.guild.me else None
+                if voice_state is not None and (
+                    voice_state.self_mute
+                    or voice_state.self_deaf
+                    or voice_state.mute
+                    or voice_state.deaf
+                    or voice_state.suppress
+                ):
+                    if voice_state.mute or voice_state.deaf or voice_state.suppress:
+                        raise ValueError("Бот заглушен сервером — TTS не услышать")
+                    await vc.guild.change_voice_state(
+                        channel=vc.channel,  # type: ignore[arg-type]
+                        self_mute=False,
+                        self_deaf=False,
+                    )
+                    await asyncio.sleep(0.2)
+            except ValueError:
+                raise
+            except Exception:
+                log.exception("Failed to clear self mute/deaf before TTS")
+
+            if vc.is_playing():
+                vc.stop()
+            await asyncio.sleep(0.25)
+
+            source = discord.PCMAudio(io.BytesIO(discord_pcm))
+            done = asyncio.Event()
+            error_box: list[BaseException] = []
+
+            def _after(err: BaseException | None) -> None:
+                if err is not None:
+                    error_box.append(err)
+                bot = self._bot
+                if bot is not None:
+                    bot.loop.call_soon_threadsafe(done.set)
+                else:
+                    done.set()
+
+            state = getattr(vc, "_connection", None)
+            can_encrypt = getattr(state, "can_encrypt", None)
+            encrypt_ok = bool(can_encrypt()) if callable(can_encrypt) else None
+            vc.play(source, after=_after)
+            log.info(
+                "Playing TTS «%s» guild=%s in=%s out=%s rate=%s ch=%s encrypt=%s",
+                label,
+                guild_id,
+                len(pcm_bytes),
+                len(discord_pcm),
+                sample_rate,
+                channels,
+                encrypt_ok,
+            )
+            try:
+                await asyncio.wait_for(done.wait(), timeout=120.0)
+            except asyncio.TimeoutError:
                 if vc.is_playing():
                     vc.stop()
-                # Small gap so Discord accepts the next play after stop/soundboard.
-                await asyncio.sleep(0.25)
-                source = discord.FFmpegPCMAudio(
-                    path,
-                    before_options=(
-                        f"-nostdin -f s16le -ar {int(sample_rate)} -ac {int(channels)}"
-                    ),
-                    options="-vn -ar 48000 -ac 2",
-                )
-
-                done = asyncio.Event()
-                error_box: list[BaseException] = []
-
-                def _after(err: BaseException | None) -> None:
-                    if err is not None:
-                        error_box.append(err)
-                    bot = self._bot
-                    if bot is not None:
-                        bot.loop.call_soon_threadsafe(done.set)
-                    else:
-                        done.set()
-
-                vc.play(source, after=_after)
-                log.info(
-                    "Playing TTS «%s» guild=%s bytes=%s rate=%s ch=%s",
-                    label,
-                    guild_id,
-                    len(pcm_bytes),
-                    sample_rate,
-                    channels,
-                )
-                try:
-                    await asyncio.wait_for(done.wait(), timeout=120.0)
-                except asyncio.TimeoutError:
-                    if vc.is_playing():
-                        vc.stop()
-                    raise TimeoutError("TTS playback timed out") from None
-                if error_box:
-                    raise error_box[0]
-            finally:
-                if path:
-                    try:
-                        os.unlink(path)
-                    except OSError:
-                        pass
+                raise TimeoutError("TTS playback timed out") from None
+            if error_box:
+                raise error_box[0]
 
     async def play_tts_text(
         self,
