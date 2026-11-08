@@ -181,20 +181,42 @@ DOSSIER_JUNK_RE = re.compile(
     r"thank\s+you|thanks\s+for|toot\s+toot|"
     r"редактор\s+субтитров|коррек(?:тор|ция)"
 )
-SOUNDBOARD_TRIGGER_NAME = "67"
+SOUNDBOARD_SIXSEVEN_NAME = "67"
+SOUNDBOARD_ERUNDA_NAME = "уц"
+# Back-compat alias used in older log strings / tips.
+SOUNDBOARD_TRIGGER_NAME = SOUNDBOARD_SIXSEVEN_NAME
 SOUNDBOARD_COOLDOWN_SECONDS = 2.0
 # 16-bit PCM RMS below this ≈ silence / decrypt garbage.
 MIN_PCM_RMS = 250
 _VOICE_RECV_PATCHED = False
+
+# «ерунда*» + Whisper latin/mangling (ерундушка, erunda, yerunda…).
+ERUNDA_RE = re.compile(
+    r"(?:"
+    r"ерунд[а-яё]*|"
+    r"ерунта[а-яё]*|"
+    r"ирунд[а-яё]*|"
+    r"ярунд[а-яё]*|"
+    r"erund[a-z]*|"
+    r"yerund[a-z]*|"
+    r"ierund[a-z]*|"
+    r"irund[a-z]*"
+    r")"
+)
 
 
 def count_swears(text: str) -> int:
     return len(SWEAR_RE.findall(text or ""))
 
 
-def _normalize_sixseven_text(text: str) -> str:
+def _normalize_stt_text(text: str) -> str:
     cleaned = (text or "").casefold().replace("ё", "е")
     cleaned = re.sub(r"[\"'«»„“”!?]", " ", cleaned)
+    return cleaned
+
+
+def _normalize_sixseven_text(text: str) -> str:
+    cleaned = _normalize_stt_text(text)
     # Whisper often sticks punctuation to digits/words: «6-7.», «6, 7».
     cleaned = re.sub(r"(?<!\d)6[\s\-–—./,;:…]+7(?!\d)", "67", cleaned)
     # Collapse observed RU/EN mangling toward canonical stems before regex.
@@ -263,6 +285,28 @@ def maybe_sixseven_near_miss(text: str) -> bool:
         re.search(
             rf"(?:{_SIX_STEM}|{_SEVEN_STEM}|шесть|67|сюкс|сукс|сухс|сексу|"
             r"(?<!\d)6\D{0,4}7(?!\d)|(?<!\d)6\b)",
+            cleaned,
+        )
+    )
+
+
+def mentions_erunda(text: str) -> bool:
+    """True for ерунда / ерунды / ерундушка / erunda / …"""
+    cleaned = _normalize_stt_text(text)
+    if ERUNDA_RE.search(cleaned):
+        return True
+    compact = re.sub(r"[^a-zа-я0-9]+", "", cleaned)
+    return bool(compact) and bool(ERUNDA_RE.search(compact))
+
+
+def maybe_erunda_near_miss(text: str) -> bool:
+    cleaned = _normalize_stt_text(text)
+    if not cleaned or mentions_erunda(cleaned):
+        return False
+    # Partial stems Whisper often produces before a clean «ерунда».
+    return bool(
+        re.search(
+            r"(?:ерун|ерум|ерунд|erund|yerund|ирунд|ярунд)",
             cleaned,
         )
     )
@@ -343,6 +387,8 @@ def is_dossier_worthy(text: str) -> bool:
         return False
     # Lone meme trigger is not a personality fact.
     if mentions_sixseven(cleaned) and letters < 24:
+        return False
+    if mentions_erunda(cleaned) and letters < 24:
         return False
     return True
 
@@ -727,7 +773,8 @@ class VoiceListenService:
         self._dossier_dates: dict[int, date] = {}
         self._bot: ErundaBot | None = None
         self._credits_shutdown = False
-        self._sound_cache: dict[int, discord.SoundboardSound | None] = {}
+        # (guild_id, sound_name) → resolved soundboard entry
+        self._sound_cache: dict[tuple[int, str], discord.SoundboardSound | None] = {}
         self._sound_cooldown_until: dict[int, float] = {}
         self._announce_channels: dict[int, int] = {}
         self._pcm_packets: dict[int, int] = defaultdict(int)
@@ -1544,11 +1591,12 @@ class VoiceListenService:
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
             # Primary MAI can still mangle memes — second pass via GPT-4o-mini-transcribe.
-            sixseven_source = text
-            need_retry = not mentions_sixseven(text) and (
+            meme_source = text
+            need_retry = not mentions_sixseven(text) and not mentions_erunda(text) and (
                 not text
                 or is_hallucination_heavy(text)
                 or maybe_sixseven_near_miss(text)
+                or maybe_erunda_near_miss(text)
                 # Short loud shout is usually the meme; skip quiet «да/ок».
                 or (seconds <= 3.5 and rms >= 700 and len(text) <= 32)
             )
@@ -1563,8 +1611,8 @@ class VoiceListenService:
                         text[:80],
                         retry[:80],
                     )
-                    if mentions_sixseven(retry):
-                        sixseven_source = retry
+                    if mentions_sixseven(retry) or mentions_erunda(retry):
+                        meme_source = retry
                         if not text or is_hallucination_heavy(text):
                             text = retry
                     elif (
@@ -1573,26 +1621,40 @@ class VoiceListenService:
                         and _cyrillic_letters(retry) >= 4
                     ):
                         text = retry
-                        sixseven_source = retry
+                        meme_source = retry
                 elif not text:
                     retry2 = await self.ai.transcribe_wav_fallback(wav, language=None)
                     retry2 = (retry2 or "").strip()
                     if retry2:
                         text = retry2
-                        sixseven_source = retry2
+                        meme_source = retry2
             hit, matched = self._sixseven_from_context(
-                guild_id, user_id, sixseven_source
+                guild_id, user_id, meme_source
             )
             if hit:
                 log.info(
                     "Sixseven trigger user=%s guild=%s text=%r matched=%r",
                     user_id,
                     guild_id,
-                    sixseven_source[:120],
+                    meme_source[:120],
                     matched[:120],
                 )
-                await self._play_sixseven_sound(bot, guild_id)
-            if is_hallucination_heavy(text) and not hit:
+                await self._play_named_sound(
+                    bot, guild_id, SOUNDBOARD_SIXSEVEN_NAME, label="Sixseven"
+                )
+            erunda_hit = mentions_erunda(meme_source) or mentions_erunda(text)
+            if erunda_hit:
+                log.info(
+                    "Erunda trigger user=%s guild=%s text=%r",
+                    user_id,
+                    guild_id,
+                    meme_source[:120],
+                )
+                await self._play_named_sound(
+                    bot, guild_id, SOUNDBOARD_ERUNDA_NAME, label="Erunda"
+                )
+            meme_hit = hit or erunda_hit
+            if is_hallucination_heavy(text) and not meme_hit:
                 stripped = strip_hallucination_phrases(text)
                 if is_useful_transcript(stripped) and not is_hallucination_heavy(stripped):
                     text = stripped
@@ -1611,7 +1673,7 @@ class VoiceListenService:
                     # Do not heal/remount mid-call — that desyncs DAVE keys.
                     return
             # Count swears even when we skip storing junk (e.g. thank-you + мат).
-            swears = max(count_swears(text), count_swears(sixseven_source))
+            swears = max(count_swears(text), count_swears(meme_source))
             if swears:
                 guild = bot.get_guild(guild_id)
                 tz_name = "Europe/Moscow"
@@ -1626,10 +1688,10 @@ class VoiceListenService:
                     swears,
                     user_id,
                     guild_id,
-                    (text or sixseven_source)[:80],
+                    (text or meme_source)[:80],
                 )
-            # Meme-only shouts (6-7) have almost no letters — still announce them.
-            if not is_useful_transcript(text) and not hit:
+            # Meme-only shouts (6-7 / ерунда) have almost no letters — still announce them.
+            if not is_useful_transcript(text) and not meme_hit:
                 log.info(
                     "STT skip user=%s guild=%s audio=%.1fs rms=%s text=%r",
                     user_id,
@@ -1639,8 +1701,8 @@ class VoiceListenService:
                     text[:80],
                 )
                 return
-            if not text and hit:
-                text = matched or sixseven_source
+            if not text and meme_hit:
+                text = matched or meme_source
             self._hallucination_streak[guild_id] = 0
             self._soft_rebind_times[guild_id] = []
             self._last_useful_stt_at[guild_id] = datetime.now(timezone.utc).timestamp()
@@ -1734,24 +1796,31 @@ class VoiceListenService:
             log.exception("Failed to post voice transcript in channel %s", channel_id)
 
     @staticmethod
-    def _sound_name_matches(name: str | None) -> bool:
+    def _sound_name_matches(name: str | None, target: str) -> bool:
         cleaned = (name or "").casefold().replace("ё", "е").strip()
-        target = SOUNDBOARD_TRIGGER_NAME.casefold()
-        return cleaned == target or cleaned.startswith(f"{target} ")
+        want = (target or "").casefold().replace("ё", "е").strip()
+        if not want:
+            return False
+        return cleaned == want or cleaned.startswith(f"{want} ")
 
-    async def _resolve_uc_sound(
+    async def _resolve_named_sound(
         self,
         guild: discord.Guild,
+        sound_name: str,
         *,
         force: bool = False,
     ) -> discord.SoundboardSound | None:
-        if not force and guild.id in self._sound_cache:
-            cached = self._sound_cache[guild.id]
-            if cached is None or self._sound_name_matches(cached.name):
+        cache_key = (guild.id, sound_name.casefold())
+        if not force and cache_key in self._sound_cache:
+            cached = self._sound_cache[cache_key]
+            if cached is None or self._sound_name_matches(cached.name, sound_name):
                 return cached
-            self._sound_cache.pop(guild.id, None)
+            self._sound_cache.pop(cache_key, None)
         sounds = list(guild.soundboard_sounds)
-        sound = discord.utils.find(lambda item: self._sound_name_matches(item.name), sounds)
+        sound = discord.utils.find(
+            lambda item: self._sound_name_matches(item.name, sound_name),
+            sounds,
+        )
         if sound is None:
             try:
                 sounds = list(await guild.fetch_soundboard_sounds())
@@ -1760,7 +1829,7 @@ class VoiceListenService:
                 # Do not cache failure forever — boosts/permissions may change.
                 return None
             sound = discord.utils.find(
-                lambda item: self._sound_name_matches(item.name),
+                lambda item: self._sound_name_matches(item.name, sound_name),
                 sounds,
             )
         if sound is not None and getattr(sound, "available", True) is False:
@@ -1770,16 +1839,27 @@ class VoiceListenService:
                 guild.id,
             )
             sound = None
-        self._sound_cache[guild.id] = sound
+        self._sound_cache[cache_key] = sound
         if sound is None:
             names = ", ".join(sorted({(s.name or "?") for s in sounds})) or "(пусто)"
             log.warning(
                 "Soundboard sound «%s» not found in guild %s; available: %s",
-                SOUNDBOARD_TRIGGER_NAME,
+                sound_name,
                 guild.id,
                 names[:300],
             )
         return sound
+
+    async def _resolve_uc_sound(
+        self,
+        guild: discord.Guild,
+        *,
+        force: bool = False,
+    ) -> discord.SoundboardSound | None:
+        """Backward-compat: resolve the sixseven «67» sound."""
+        return await self._resolve_named_sound(
+            guild, SOUNDBOARD_SIXSEVEN_NAME, force=force
+        )
 
     async def _soundboard_status(
         self,
@@ -1790,12 +1870,13 @@ class VoiceListenService:
             return "Саундборд: только обычный войс (не stage)."
         me = guild.me
         perms = channel.permissions_for(me) if me is not None else None
-        sound = await self._resolve_uc_sound(guild, force=True)
         bits: list[str] = []
-        if sound is None:
-            bits.append(f"звук «{SOUNDBOARD_TRIGGER_NAME}» не найден на сервере")
-        else:
-            bits.append(f"звук «{sound.name}» ок")
+        for sound_name in (SOUNDBOARD_SIXSEVEN_NAME, SOUNDBOARD_ERUNDA_NAME):
+            sound = await self._resolve_named_sound(guild, sound_name, force=True)
+            if sound is None:
+                bits.append(f"звук «{sound_name}» не найден")
+            else:
+                bits.append(f"звук «{sound.name}» ок")
         if perms is not None:
             if not perms.speak:
                 bits.append("нет права Speak")
@@ -1822,11 +1903,23 @@ class VoiceListenService:
             return voice_state.channel
         return None
 
-    async def _play_sixseven_sound(self, bot: ErundaBot, guild_id: int) -> None:
+    async def _play_named_sound(
+        self,
+        bot: ErundaBot,
+        guild_id: int,
+        sound_name: str,
+        *,
+        label: str,
+    ) -> None:
         now = datetime.now(timezone.utc).timestamp()
         until = self._sound_cooldown_until.get(guild_id, 0.0)
         if now < until:
-            log.info("Sixseven cooldown guild=%s (%.1fs left)", guild_id, until - now)
+            log.info(
+                "%s cooldown guild=%s (%.1fs left)",
+                label,
+                guild_id,
+                until - now,
+            )
             return
         guild = bot.get_guild(guild_id)
         if guild is None:
@@ -1837,14 +1930,15 @@ class VoiceListenService:
             if channel is not None:
                 break
             log.warning(
-                "Sixseven: voice channel missing guild=%s attempt=%s/%s",
+                "%s: voice channel missing guild=%s attempt=%s/%s",
+                label,
                 guild_id,
                 attempt,
                 3,
             )
             await asyncio.sleep(0.6 * attempt)
         if not isinstance(channel, discord.VoiceChannel):
-            log.warning("Sixseven: not a voice channel in guild %s", guild_id)
+            log.warning("%s: not a voice channel in guild %s", label, guild_id)
             return
         # Discord rejects soundboard if the bot is mute/deaf/suppress.
         me = guild.me
@@ -1870,9 +1964,14 @@ class VoiceListenService:
                 )
             except Exception:
                 log.exception("Failed to clear self mute/deaf before soundboard")
-        sound = await self._resolve_uc_sound(guild, force=True)
+        sound = await self._resolve_named_sound(guild, sound_name, force=True)
         if sound is None:
-            log.warning("Sixseven: sound «%s» missing in guild %s", SOUNDBOARD_TRIGGER_NAME, guild_id)
+            log.warning(
+                "%s: sound «%s» missing in guild %s",
+                label,
+                sound_name,
+                guild_id,
+            )
             return
         if me is not None:
             perms = channel.permissions_for(me)
@@ -1893,10 +1992,11 @@ class VoiceListenService:
                     datetime.now(timezone.utc).timestamp() + SOUNDBOARD_COOLDOWN_SECONDS
                 )
                 log.info(
-                    "Played soundboard «%s» in guild %s (attempt=%s)",
+                    "Played soundboard «%s» in guild %s (attempt=%s, trigger=%s)",
                     sound.name,
                     guild_id,
                     attempt,
+                    label,
                 )
                 return
             except discord.Forbidden:
@@ -1921,6 +2021,11 @@ class VoiceListenService:
                 guild_id,
                 exc_info=last_exc,
             )
+
+    async def _play_sixseven_sound(self, bot: ErundaBot, guild_id: int) -> None:
+        await self._play_named_sound(
+            bot, guild_id, SOUNDBOARD_SIXSEVEN_NAME, label="Sixseven"
+        )
 
     async def process_daily_dossiers(self, bot: ErundaBot) -> None:
         """Backward-compatible entry; real work lives in DossierService."""
