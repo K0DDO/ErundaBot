@@ -2083,22 +2083,24 @@ class VoiceListenService:
         cached = self._tts_cache.get(key)
         if cached:
             return cached
-        audio = await self.ai.synthesize_speech(text, voice=voice, response_format="mp3")
+        audio = await self.ai.synthesize_speech(text, voice=voice, response_format="pcm")
         # Bound cache size — keep greetings / recent admin lines.
         if len(self._tts_cache) >= 24:
             self._tts_cache.pop(next(iter(self._tts_cache)))
         self._tts_cache[key] = audio
         return audio
 
-    async def play_tts_mp3(
+    async def play_tts_pcm(
         self,
         guild_id: int,
-        mp3_bytes: bytes,
+        pcm_bytes: bytes,
         *,
         label: str = "TTS",
+        sample_rate: int = 44100,
+        channels: int = 1,
     ) -> None:
-        """Play MP3 bytes in the bot's current voice channel (needs ffmpeg)."""
-        if not mp3_bytes:
+        """Play HeyGen raw PCM (s16le mono 44.1kHz) via ffmpeg → Discord 48kHz stereo."""
+        if not pcm_bytes:
             raise ValueError("Пустое аудио")
         vc = self._clients.get(guild_id)
         if vc is None or not vc.is_connected():
@@ -2110,9 +2112,9 @@ class VoiceListenService:
             path = ""
             try:
                 with tempfile.NamedTemporaryFile(
-                    suffix=".mp3", delete=False
+                    suffix=".pcm", delete=False
                 ) as tmp:
-                    tmp.write(mp3_bytes)
+                    tmp.write(pcm_bytes)
                     path = tmp.name
                 if vc.is_playing():
                     vc.stop()
@@ -2120,8 +2122,10 @@ class VoiceListenService:
                 await asyncio.sleep(0.25)
                 source = discord.FFmpegPCMAudio(
                     path,
-                    before_options="-nostdin",
-                    options="-vn",
+                    before_options=(
+                        f"-nostdin -f s16le -ar {int(sample_rate)} -ac {int(channels)}"
+                    ),
+                    options="-vn -ar 48000 -ac 2",
                 )
 
                 done = asyncio.Event()
@@ -2138,10 +2142,12 @@ class VoiceListenService:
 
                 vc.play(source, after=_after)
                 log.info(
-                    "Playing TTS «%s» guild=%s bytes=%s",
+                    "Playing TTS «%s» guild=%s bytes=%s rate=%s ch=%s",
                     label,
                     guild_id,
-                    len(mp3_bytes),
+                    len(pcm_bytes),
+                    sample_rate,
+                    channels,
                 )
                 try:
                     await asyncio.wait_for(done.wait(), timeout=120.0)
@@ -2171,7 +2177,7 @@ class VoiceListenService:
                 f"Неизвестный голос «{voice}». Доступны: {', '.join(HEYGEN_VOICES)}"
             )
         audio = await self.synthesize_cached(text, voice=voice_id)
-        await self.play_tts_mp3(
+        await self.play_tts_pcm(
             guild_id,
             audio,
             label=f"{voice_id}: {text[:40]}",

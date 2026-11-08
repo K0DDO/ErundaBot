@@ -392,10 +392,10 @@ class AIService:
         text: str,
         *,
         voice: str = "gareth",
-        response_format: str = "mp3",
+        response_format: str = "pcm",
         model: str | None = None,
     ) -> bytes:
-        """HeyGen TTS via OpenRouter — returns raw audio bytes (mp3/pcm)."""
+        """HeyGen TTS via OpenRouter — raw audio bytes (HeyGen free: only pcm)."""
         if not self.tts_enabled:
             raise ValueError("Нужен OPENROUTER_API_KEY для TTS")
         cleaned = (text or "").strip()
@@ -408,9 +408,10 @@ class AIService:
             raise ValueError(
                 f"Неизвестный голос «{voice}». Доступны: {', '.join(HEYGEN_VOICES)}"
             )
-        fmt = (response_format or "mp3").strip().casefold()
-        if fmt not in {"mp3", "pcm"}:
-            raise ValueError("response_format: mp3 или pcm")
+        # heygen/heygen-voice-1-turbo:free accepts only response_format=pcm (44.1kHz mono).
+        fmt = (response_format or "pcm").strip().casefold()
+        if fmt != "pcm":
+            raise ValueError("HeyGen TTS: только response_format=pcm")
         chosen = model or self.tts_model
         return await asyncio.to_thread(
             self._request_openrouter_speech,
