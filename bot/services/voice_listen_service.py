@@ -58,8 +58,8 @@ VOICE_USEFUL_STT_STALE_SECONDS = 150.0
 VOICE_DAVE_FAIL_WINDOW_SECONDS = 12.0
 VOICE_DAVE_FAIL_RECOVER_COUNT = 40
 VOICE_NO_RTP_RECOVER_SECONDS = 50.0
-# Leave+join only when the voice websocket/UDP path is actually dead.
-VOICE_HARD_RECONNECT_COOLDOWN_SECONDS = 180.0
+# Resume join only if Discord already dropped us — never leave+join while connected.
+VOICE_RESUME_JOIN_COOLDOWN_SECONDS = 180.0
 
 # Rolling DAVE decrypt stats (updated from voice_recv patch).
 _DAVE_EVENTS: list[tuple[float, bool]] = []
@@ -945,8 +945,8 @@ class VoiceListenService:
         last_cb = self._last_callback_at.get(guild_id, 0.0)
         cb_age = (now - last_cb) if last_cb > 0 else 1e9
         if cb_age >= 15.0:
-            # No RTP at all — sink rebind won't help; voice transport is dead.
-            self._schedule_hard_reconnect(guild_id, reason=f"no_rtp:{reason}")
+            # Stay in channel — only passthrough + sink heal, never leave+join.
+            self._schedule_heal(guild_id, reason=f"no_rtp:{reason}")
             return
         recent = [
             ts
@@ -978,7 +978,9 @@ class VoiceListenService:
         guild = bot.get_guild(guild_id)
         vc = self._clients.get(guild_id)
         if guild is None or vc is None or not vc.is_connected():
-            self._schedule_hard_reconnect(guild_id, reason=f"soft_rebind_no_vc:{reason}")
+            self._schedule_resume_if_disconnected(
+                guild_id, reason=f"soft_rebind_no_vc:{reason}"
+            )
             return
         log.warning("Soft-rebind voice sink guild=%s (%s)", guild_id, reason)
         # Keep SSRC map — wiping it caused "without speaker map" storms.
@@ -1000,7 +1002,7 @@ class VoiceListenService:
         except Exception:
             listening = False
         if not listening:
-            self._schedule_hard_reconnect(
+            self._schedule_heal(
                 guild_id,
                 reason=f"soft_rebind_failed:{reason} listening={listening}",
             )
@@ -1041,8 +1043,10 @@ class VoiceListenService:
         try:
             guild = bot.get_guild(guild_id)
             vc = self._clients.get(guild_id)
-            if guild is None or vc is None or not self._voice_ws_alive(vc):
-                self._schedule_hard_reconnect(guild_id, reason=f"heal_dead_ws:{reason}")
+            if guild is None or vc is None or not vc.is_connected():
+                self._schedule_resume_if_disconnected(
+                    guild_id, reason=f"heal_no_vc:{reason}"
+                )
                 return
             log.warning(
                 "Healing voice listen in place guild=%s (%s)",
@@ -1066,69 +1070,79 @@ class VoiceListenService:
         finally:
             self._healing.discard(guild_id)
 
-    def _schedule_hard_reconnect(self, guild_id: int, *, reason: str) -> None:
-        """Last resort only when the voice client is gone. Prefer heal for everything else."""
+    def _schedule_resume_if_disconnected(self, guild_id: int, *, reason: str) -> None:
+        """Join again only if Discord already dropped the bot. Never leave while connected."""
         bot = self._bot
         if bot is None:
+            return
+        vc = self._clients.get(guild_id)
+        if vc is not None and vc.is_connected():
+            log.info(
+                "Skip resume join guild=%s — still connected (%s); heal instead",
+                guild_id,
+                reason,
+            )
+            self._schedule_heal(guild_id, reason=f"skip_resume:{reason}")
             return
         now = datetime.now(timezone.utc).timestamp()
         if guild_id in self._healing:
             return
         last = self._last_hard_reconnect_at.get(guild_id, 0.0)
-        if now - last < VOICE_HARD_RECONNECT_COOLDOWN_SECONDS:
+        if now - last < VOICE_RESUME_JOIN_COOLDOWN_SECONDS:
             return
         log.warning(
-            "Scheduling hard voice reconnect guild=%s (%s)",
+            "Scheduling voice resume join guild=%s (%s)",
             guild_id,
             reason,
         )
 
         def _go() -> None:
-            asyncio.create_task(self._hard_reconnect(guild_id, reason=reason))
+            asyncio.create_task(self._resume_join_if_disconnected(guild_id, reason=reason))
 
         bot.loop.call_soon_threadsafe(_go)
 
-    async def _hard_reconnect(self, guild_id: int, *, reason: str) -> None:
+    async def _resume_join_if_disconnected(self, guild_id: int, *, reason: str) -> None:
         bot = self._bot
         if bot is None or self.ai.stt_credits_exhausted:
             return
+        vc = self._clients.get(guild_id)
+        if vc is not None and vc.is_connected():
+            log.info("Resume join skipped guild=%s — already connected (%s)", guild_id, reason)
+            return
         now = datetime.now(timezone.utc).timestamp()
         last = self._last_hard_reconnect_at.get(guild_id, 0.0)
-        if now - last < VOICE_HARD_RECONNECT_COOLDOWN_SECONDS:
+        if now - last < VOICE_RESUME_JOIN_COOLDOWN_SECONDS:
             return
         self._healing.add(guild_id)
         self._last_hard_reconnect_at[guild_id] = now
         try:
             announce_id = self._announce_channels.get(guild_id)
-            channel = self.listening_channel(guild_id)
             config = await self.db.get_guild(guild_id)
             if announce_id is None and config is not None:
                 announce_id = config.voice_announce_channel_id
+            channel_id = config.voice_listen_channel_id if config else None
+            guild = bot.get_guild(guild_id)
+            channel = guild.get_channel(channel_id) if guild and channel_id else None
             if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-                channel_id = config.voice_listen_channel_id if config else None
-                guild = bot.get_guild(guild_id)
-                channel = guild.get_channel(channel_id) if guild and channel_id else None
-            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-                log.warning("Hard reconnect aborted: no channel guild=%s", guild_id)
+                log.warning("Resume join aborted: no channel guild=%s", guild_id)
                 return
-            log.error(
-                "Hard reconnect (voice client lost) guild=%s channel=%s (%s)",
+            log.warning(
+                "Resume join after Discord drop guild=%s channel=%s (%s)",
                 guild_id,
                 channel.id,
                 reason,
             )
             _reset_dave_stats()
-            await self.leave(guild_id, flush=False, clear_resume=False)
-            await asyncio.sleep(2.0)
+            # Do not leave() — we are already out. Just join.
             await self.join(bot, channel, announce_channel_id=announce_id)
             _reset_dave_stats()
             ok = await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
             if ok:
-                log.info("Hard reconnect got RTP guild=%s", guild_id)
+                log.info("Resume join got RTP guild=%s", guild_id)
             else:
-                log.error("Hard reconnect still no RTP guild=%s", guild_id)
+                log.error("Resume join still no RTP guild=%s", guild_id)
         except Exception:
-            log.exception("Hard voice reconnect failed guild=%s", guild_id)
+            log.exception("Voice resume join failed guild=%s", guild_id)
         finally:
             self._healing.discard(guild_id)
 
@@ -1345,7 +1359,7 @@ class VoiceListenService:
             if guild is None or vc is None:
                 continue
             if not vc.is_connected():
-                self._schedule_hard_reconnect(guild_id, reason="vc_disconnected")
+                self._schedule_resume_if_disconnected(guild_id, reason="vc_disconnected")
                 continue
             if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
                 continue
@@ -1384,62 +1398,42 @@ class VoiceListenService:
             dave_broken = _dave_cryptor_broken()
             dave_fails, dave_oks = _dave_fail_counts()
 
-            # Sink dropped while vc stayed connected.
+            # Sink dropped while vc stayed connected — rebind in place, never leave.
             try:
                 listening = bool(getattr(vc, "is_listening", lambda: True)())
             except Exception:
                 listening = True
             if not listening:
-                # Soft-rebind cannot fix dead MLS cryptors — it just flaps the sink.
-                if dave_broken or dave_fails >= VOICE_DAVE_FAIL_RECOVER_COUNT:
-                    self._schedule_hard_reconnect(
-                        guild_id,
-                        reason=(
-                            f"sink_not_listening+dave fails={dave_fails} oks={dave_oks}"
-                        ),
-                    )
-                else:
-                    self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
+                self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
                 continue
 
-            # MLS keys out of sync (NoValidCryptorFound storm). Passthrough/rebind
-            # does not create new cryptors — only a fresh voice session does.
+            # DAVE desync / stale STT / speaking without PCM → heal in place only.
             if dave_broken:
-                self._schedule_hard_reconnect(
+                self._schedule_heal(
                     guild_id,
                     reason=f"dave_cryptor_broken fails={dave_fails} oks={dave_oks}",
                 )
                 continue
 
-            # STT dark while PCM/DAVE unhealthy — escalate to reconnect when DAVE fails.
             if (
                 last_useful > 0
                 and useful_age >= VOICE_USEFUL_STT_STALE_SECONDS
                 and (pcm_age >= VOICE_STALE_PCM_SECONDS or dave_fails >= 15)
                 and (cb_age < 10.0 or speaking or dave_fails >= 15)
             ):
-                if dave_fails >= 15:
-                    self._schedule_hard_reconnect(
-                        guild_id,
-                        reason=(
-                            f"useful_stt_stale+dave age={useful_age:.0f}s "
-                            f"dave_fail={dave_fails}"
-                        ),
-                    )
-                else:
-                    self._schedule_heal(
-                        guild_id,
-                        reason=(
-                            f"useful_stt_stale age={useful_age:.0f}s "
-                            f"pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s"
-                        ),
-                    )
+                self._schedule_heal(
+                    guild_id,
+                    reason=(
+                        f"useful_stt_stale age={useful_age:.0f}s "
+                        f"pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s "
+                        f"dave_fail={dave_fails}"
+                    ),
+                )
                 continue
 
-            # People are marked speaking, but we get no usable PCM → map/decrypt dead.
             if speaking and last_pcm > 0 and pcm_age >= 12.0:
-                if dave_fails >= 15 or cb_age < 5.0 or streak >= 30:
-                    self._schedule_hard_reconnect(
+                if cb_age < 5.0 or streak >= 30 or dave_fails >= 15:
+                    self._schedule_heal(
                         guild_id,
                         reason=(
                             f"speaking_without_pcm pcm_age={pcm_age:.0f}s "
@@ -1453,24 +1447,16 @@ class VoiceListenService:
                     )
                 continue
 
-            # RTP callbacks flow, but nothing maps to usable (loud) PCM for too long.
             if last_pcm > 0 and cb_age < 5.0 and pcm_age >= VOICE_STALE_PCM_SECONDS:
-                if dave_fails >= 15:
-                    self._schedule_hard_reconnect(
-                        guild_id,
-                        reason=(
-                            f"callbacks_without_pcm pcm_age={pcm_age:.0f}s "
-                            f"dave_fail={dave_fails}"
-                        ),
-                    )
-                else:
-                    self._schedule_heal(
-                        guild_id,
-                        reason=f"callbacks_without_pcm pcm_age={pcm_age:.0f}s streak={streak}",
-                    )
+                self._schedule_heal(
+                    guild_id,
+                    reason=(
+                        f"callbacks_without_pcm pcm_age={pcm_age:.0f}s "
+                        f"dave_fail={dave_fails}"
+                    ),
+                )
                 continue
 
-            # Decrypt/map half-dead: loud PCM but STT is only Whisper junk.
             if (
                 speaking
                 and cb_age < 5.0
@@ -1487,18 +1473,17 @@ class VoiceListenService:
                 )
                 continue
 
-            # No audio callbacks after join / while speaking ⇒ UDP/WS dead.
-            # Hard reconnect is correct here (heal cannot recreate the transport).
+            # No leave+join for silent RTP — stay put; heal sink/passthrough at most.
             session_started = self._session_started_at.get(guild_id, 0.0)
             session_age = (now - session_started) if session_started > 0 else 0.0
             if last_cb <= 0 and session_age >= VOICE_NO_RTP_RECOVER_SECONDS:
-                self._schedule_hard_reconnect(
+                self._schedule_heal(
                     guild_id,
                     reason=f"no_rtp_after_join session_age={session_age:.0f}s",
                 )
                 continue
             if speaking and last_cb > 0 and cb_age >= VOICE_NO_RTP_RECOVER_SECONDS:
-                self._schedule_hard_reconnect(
+                self._schedule_heal(
                     guild_id,
                     reason=f"rtp_dead_while_speaking cb_age={cb_age:.0f}s",
                 )
