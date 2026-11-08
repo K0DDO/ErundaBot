@@ -627,6 +627,8 @@ def _patch_voice_recv() -> None:
     vr_opus.PacketDecoder._process_packet = _process_packet  # type: ignore[method-assign]
     vr_router.PacketRouter._do_run = _do_run  # type: ignore[method-assign]
     _VOICE_RECV_PATCHED = True
+    # RTCP SenderReport spam drowns real voice diagnostics.
+    logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
     log.info("Patched voice_recv for DAVE decrypt + OpusError survival")
 
 
@@ -1016,33 +1018,32 @@ class VoiceListenService:
         vc.listen(voice_recv.BasicSink(on_voice, decode=True))
 
     def _schedule_soft_rebind(self, guild_id: int, *, reason: str) -> None:
-        """Rebind sink in place. Escalate to DAVE heal — never leave+join."""
+        """Only touch sink when RTP/callbacks are actually dead.
+
+        Mid-call listen()/stop_listening() desyncs DAVE (NoValidCryptorFound).
+        False `is_listening()==False` while packets still flow must be ignored.
+        """
         bot = self._bot
         if bot is None or guild_id in self._healing:
             return
         now = datetime.now(timezone.utc).timestamp()
         last_cb = self._last_callback_at.get(guild_id, 0.0)
+        last_pcm = self._last_pcm_at.get(guild_id, 0.0)
         cb_age = (now - last_cb) if last_cb > 0 else 1e9
-        if cb_age >= 15.0:
-            # Stay in channel — only passthrough + sink heal, never leave+join.
-            self._schedule_heal(guild_id, reason=f"no_rtp:{reason}")
-            return
-        recent = [
-            ts
-            for ts in self._soft_rebind_times[guild_id]
-            if now - ts < VOICE_SOFT_REBIND_WINDOW_SECONDS
-        ]
-        self._soft_rebind_times[guild_id] = recent
-        if len(recent) >= VOICE_SOFT_REBIND_ESCALATE_AFTER:
-            self._schedule_heal(
+        pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
+        # Live audio path — do not remount sink.
+        if cb_age < 20.0 or pcm_age < 20.0:
+            log.info(
+                "Skip soft rebind guild=%s (%s) — live audio cb_age=%.1fs pcm_age=%.1fs",
                 guild_id,
-                reason=f"soft_rebind_escalate:{reason} n={len(recent)}",
+                reason,
+                cb_age,
+                pcm_age,
             )
             return
         if now - self._last_soft_rebind_at.get(guild_id, 0.0) < VOICE_SOFT_REBIND_COOLDOWN_SECONDS:
             return
         self._last_soft_rebind_at[guild_id] = now
-        self._soft_rebind_times[guild_id].append(now)
         log.warning("Scheduling voice soft rebind guild=%s (%s)", guild_id, reason)
 
         def _go() -> None:
@@ -1061,6 +1062,28 @@ class VoiceListenService:
                 guild_id, reason=f"soft_rebind_no_vc:{reason}"
             )
             return
+        now = datetime.now(timezone.utc).timestamp()
+        last_cb = self._last_callback_at.get(guild_id, 0.0)
+        cb_age = (now - last_cb) if last_cb > 0 else 1e9
+        if cb_age < 20.0:
+            log.info(
+                "Abort soft rebind guild=%s (%s) — callbacks resumed age=%.1fs",
+                guild_id,
+                reason,
+                cb_age,
+            )
+            return
+        try:
+            listening = bool(getattr(vc, "is_listening", lambda: False)())
+        except Exception:
+            listening = False
+        if listening:
+            log.info(
+                "Abort soft rebind guild=%s (%s) — sink reports listening again",
+                guild_id,
+                reason,
+            )
+            return
         log.warning("Soft-rebind voice sink guild=%s (%s)", guild_id, reason)
         self._unknown_streak[guild_id] = 0
         try:
@@ -1070,24 +1093,9 @@ class VoiceListenService:
                 session.set_passthrough_mode(True, 600)
         except Exception:
             pass
-        # Never stop_listening mid-call — only start if sink is actually dead.
+        # Never stop_listening / restart=True mid-call — only start if truly dead.
         self._bind_listen_sink(bot, guild, vc, restart=False)
-        _reset_dave_stats()
-        self._recover_grace_until[guild_id] = (
-            datetime.now(timezone.utc).timestamp() + VOICE_RECOVER_GRACE_SECONDS
-        )
-        await asyncio.sleep(6.0)
-        if guild_id in self._healing:
-            return
-        try:
-            listening = bool(getattr(vc, "is_listening", lambda: False)())
-        except Exception:
-            listening = False
-        if not listening:
-            # Last resort in-place: forced restart without leaving the channel.
-            self._bind_listen_sink(bot, guild, vc, restart=True)
-            _reset_dave_stats()
-            self._mark_heal_grace(guild_id)
+        self._mark_heal_grace(guild_id)
 
     def _schedule_heal(self, guild_id: int, *, reason: str) -> None:
         """In-place fix: reinit MLS/DAVE + rebind sink. Does not leave the channel."""
@@ -1491,33 +1499,35 @@ class VoiceListenService:
             dave_broken = _dave_cryptor_broken()
             dave_fails, dave_oks = _dave_fail_counts()
 
-            # Sink dropped while vc stayed connected — confirm before rebind;
-            # a single false "not listening" + stop/start desyncs DAVE.
+            # Sink flag alone lies often while RTP still flows. Require dead callbacks.
             try:
                 listening = bool(getattr(vc, "is_listening", lambda: True)())
             except Exception:
                 listening = True
-            if not listening:
+            if not listening and cb_age >= 20.0:
                 self._sink_dead_streak[guild_id] += 1
                 if self._sink_dead_streak[guild_id] >= VOICE_SINK_DEAD_CONFIRM:
                     self._sink_dead_streak[guild_id] = 0
                     self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
                 continue
-            self._sink_dead_streak[guild_id] = 0
+            if listening or cb_age < 20.0:
+                self._sink_dead_streak[guild_id] = 0
 
-            # DAVE desync / stale STT / speaking without PCM → heal in place only.
-            if dave_broken:
+            # DAVE desync with no usable PCM → heal passthrough only (no sink remount).
+            if dave_broken and pcm_age >= 12.0:
                 self._schedule_heal(
                     guild_id,
                     reason=f"dave_cryptor_broken fails={dave_fails} oks={dave_oks}",
                 )
                 continue
 
+            # Don't heal on "bad STT while PCM is live" — that is usually DAVE noise,
+            # and heal/rebind makes cryptors worse.
             if (
                 last_useful > 0
                 and useful_age >= VOICE_USEFUL_STT_STALE_SECONDS
-                and (pcm_age >= VOICE_STALE_PCM_SECONDS or dave_fails >= 15)
-                and (cb_age < 10.0 or speaking or dave_fails >= 15)
+                and pcm_age >= VOICE_STALE_PCM_SECONDS
+                and (cb_age < 10.0 or speaking)
             ):
                 self._schedule_heal(
                     guild_id,
@@ -1538,7 +1548,8 @@ class VoiceListenService:
                             f"streak={streak} dave_fail={dave_fails}"
                         ),
                     )
-                else:
+                # Soft-rebind only when callbacks are also dead (see _schedule_soft_rebind).
+                elif cb_age >= 20.0:
                     self._schedule_soft_rebind(
                         guild_id,
                         reason=f"speaking_no_callback pcm_age={pcm_age:.0f}s",
