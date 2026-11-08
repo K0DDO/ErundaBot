@@ -34,9 +34,10 @@ CREDITS_EXHAUSTED_MESSAGE = (
 PCM_RATE = 48000
 PCM_CHANNELS = 2
 PCM_SAMPLE_WIDTH = 2
-SILENCE_FLUSH_SECONDS = 2.0
-MIN_AUDIO_SECONDS = 0.6
-MAX_BUFFER_SECONDS = 12.0
+# Wait this long after last PCM before STT+announce (was 2.0 — felt too slow in chat).
+SILENCE_FLUSH_SECONDS = 0.85
+MIN_AUDIO_SECONDS = 0.45
+MAX_BUFFER_SECONDS = 8.0
 BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
 # Join nearby STT chunks so "сикс" + "севен" across a short pause still match.
 SIXSEVEN_CONTEXT_SECONDS = 6.0
@@ -1410,7 +1411,7 @@ class VoiceListenService:
         await bot.wait_until_ready()
         while True:
             try:
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.2)
                 now = datetime.now(timezone.utc).timestamp()
                 for guild_id, users in list(self._buffers.items()):
                     for user_id, buf in list(users.items()):
