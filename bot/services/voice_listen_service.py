@@ -368,15 +368,8 @@ def _reset_dave_stats() -> None:
     _DAVE_EVENTS.clear()
 
 
-def _looks_dave_frame(raw: bytes) -> bool:
-    """DAVE ciphertext usually carries the 0xFAFA marker near the end."""
-    if len(raw) < 4:
-        return False
-    return raw[-2:] == b"\xfa\xfa" or b"\xfa\xfa" in raw[-6:]
-
-
-def _strip_rtp_padding(raw: bytes, *, padding: bool) -> bytes:
-    """voice_recv leaves RTP padding in place (TODO in library); DAVE hates it."""
+def _strip_rtp_padding(raw: bytes, *, padding: bool = False) -> bytes:
+    """voice_recv leaves RTP padding in place (TODO in library)."""
     if not raw:
         return raw
     if padding:
@@ -389,6 +382,20 @@ def _strip_rtp_padding(raw: bytes, *, padding: bool) -> bytes:
         if 2 <= n <= 32 and n < len(raw) and raw[-n:] == bytes([n]) * n:
             return raw[:-n]
     return raw
+
+
+def _strip_dave_passthrough_trailers(raw: bytes, *, padding: bool = False) -> bytes:
+    """Recover Opus from Discord passthrough frames (pycord PR#3201).
+
+    Layout: [raw_opus][dave_supp_block][rtp_padding]
+    supp_block ends with supp_size(1) + 0xFAFA(2); FAFA is NOT ciphertext here.
+    """
+    opus = _strip_rtp_padding(raw, padding=padding)
+    if len(opus) >= 3 and opus[-2:] == b"\xfa\xfa":
+        supp_size = opus[-3]
+        if 3 <= supp_size < len(opus):
+            opus = opus[:-supp_size]
+    return opus
 
 
 def _patch_voice_recv() -> None:
@@ -413,18 +420,26 @@ def _patch_voice_recv() -> None:
     dave_fails = {"n": 0}
     dave_ok = {"n": 0}
 
+    def _keep_passthrough(session) -> None:  # type: ignore[no-untyped-def]
+        try:
+            # Long window: Discord still sends unencrypted passthrough frames
+            # while DAVE is active; disabling this is what creates "desync" storms.
+            session.set_passthrough_mode(True, 600)
+        except Exception:
+            pass
+
     def _init(self, router, ssrc):  # type: ignore[no-untyped-def]
         orig_init(self, router, ssrc)
         try:
             vc = self.sink.voice_client
             session = getattr(getattr(vc, "_connection", None), "dave_session", None)
             if session is not None:
-                session.set_passthrough_mode(True, 120)
+                _keep_passthrough(session)
         except Exception:
             log.exception("DAVE set_passthrough_mode on decoder init failed")
 
     def _process_packet(self, packet):  # type: ignore[no-untyped-def]
-        # Mirrors imayhaveborkedit/discord-ext-voice-recv#54 with None-member guard.
+        # DAVE decrypt + passthrough trailer strip (pycord PR#3201).
         pcm = None
         member = self._get_cached_member()
         if member is None:
@@ -448,69 +463,87 @@ def _patch_voice_recv() -> None:
             and not silence
             and raw is not None
             and len(raw) > 3
-            and member is not None
             and int(payload) == 120
         ):
+            _keep_passthrough(session)
             padding = bool(getattr(packet, "padding", False))
             cleaned = _strip_rtp_padding(bytes(raw), padding=padding)
+            user_ids: list[int] = []
+            if member is not None:
+                user_ids.append(int(member.id))
             try:
-                packet.decrypted_data = session.decrypt(
-                    int(member.id),
-                    MediaType.audio,
-                    cleaned,
-                )
+                mapped = self.sink.voice_client._get_id_from_ssrc(self.ssrc)
+                if mapped is not None and int(mapped) not in user_ids:
+                    user_ids.append(int(mapped))
+            except Exception:
+                pass
+            try:
+                for uid in session.get_user_ids():
+                    uid_i = int(uid)
+                    if uid_i not in user_ids:
+                        user_ids.append(uid_i)
+            except Exception:
+                pass
+
+            decrypted = None
+            used_uid: int | None = None
+            last_exc: BaseException | None = None
+            for uid in user_ids:
+                try:
+                    decrypted = session.decrypt(uid, MediaType.audio, cleaned)
+                    used_uid = uid
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    exc_text = repr(exc)
+                    if "UnencryptedWhenPassthroughDisabled" in exc_text:
+                        # Raw Opus + DAVE supplemental + optional RTP padding.
+                        packet.decrypted_data = _strip_dave_passthrough_trailers(
+                            cleaned, padding=False
+                        )
+                        _note_dave_result(True)
+                        dave_ok["n"] += 1
+                        decrypted = None
+                        last_exc = None
+                        used_uid = -1  # marker: passthrough handled
+                        break
+                    continue
+
+            if used_uid == -1:
+                pass  # passthrough already set packet.decrypted_data
+            elif decrypted is not None and used_uid is not None:
+                packet.decrypted_data = decrypted
                 dave_ok["n"] += 1
                 _note_dave_result(True)
+                if member is None or int(member.id) != used_uid:
+                    self._cached_id = used_uid
+                    member = self._get_cached_member()
                 if dave_ok["n"] == 1:
-                    users = []
-                    try:
-                        users = list(session.get_user_ids())
-                    except Exception:
-                        pass
                     log.info(
                         "DAVE decrypt ok (first) user=%s mls_users=%s",
-                        member.id,
-                        users,
+                        used_uid,
+                        user_ids,
                     )
-            except Exception as exc:
-                exc_text = repr(exc)
-                # Epoch transitions / non-DAVE frames: already transport-decrypted Opus.
-                if (
-                    "UnencryptedWhenPassthroughDisabled" in exc_text
-                    or not _looks_dave_frame(cleaned)
-                ):
-                    _note_dave_result(True)
-                    packet.decrypted_data = cleaned
-                    try:
-                        session.set_passthrough_mode(True, 120)
-                    except Exception:
-                        pass
-                    # Fall through to opus decode.
-                else:
-                    dave_fails["n"] += 1
-                    _note_dave_result(False)
-                    if dave_fails["n"] in (1, 25, 50, 200, 1000):
-                        users = []
-                        try:
-                            users = list(session.get_user_ids())
-                        except Exception:
-                            pass
-                        log.warning(
-                            "DAVE decrypt failed (#%s, user=%s, ready=%s, mls_users=%s): %r",
-                            dave_fails["n"],
-                            member.id if member else None,
-                            getattr(session, "ready", None),
-                            users,
-                            exc,
-                        )
-                        try:
-                            session.set_passthrough_mode(True, 120)
-                        except Exception:
-                            pass
-                    # Drop frame as silence so opus/router stay alive.
-                    self._last_seq = packet.sequence
-                    self._last_ts = packet.timestamp
-                    return vr_opus.VoiceData(packet, member, pcm=b"")
+            elif last_exc is not None:
+                dave_fails["n"] += 1
+                _note_dave_result(False)
+                if dave_fails["n"] in (1, 25, 50, 200, 1000):
+                    log.warning(
+                        "DAVE decrypt failed (#%s, tried=%s, ready=%s): %r",
+                        dave_fails["n"],
+                        user_ids,
+                        getattr(session, "ready", None),
+                        last_exc,
+                    )
+                # Never feed ciphertext to Opus — silence frame.
+                self._last_seq = packet.sequence
+                self._last_ts = packet.timestamp
+                return vr_opus.VoiceData(packet, member, pcm=b"")
+            elif not user_ids:
+                # Session ready but no speaker map yet — keep passthrough audio.
+                packet.decrypted_data = _strip_dave_passthrough_trailers(
+                    cleaned, padding=False
+                )
 
         if not self.sink.wants_opus():
             try:
@@ -989,7 +1022,7 @@ class VoiceListenService:
             state = getattr(vc, "_connection", None)
             session = getattr(state, "dave_session", None) if state is not None else None
             if session is not None:
-                session.set_passthrough_mode(True, 120)
+                session.set_passthrough_mode(True, 600)
         except Exception:
             pass
         self._bind_listen_sink(bot, guild, vc)
@@ -1057,14 +1090,24 @@ class VoiceListenService:
             session = getattr(state, "dave_session", None) if state is not None else None
             if session is not None:
                 try:
-                    session.set_passthrough_mode(True, 120)
+                    session.set_passthrough_mode(True, 600)
                 except Exception:
                     log.exception("DAVE passthrough during heal failed guild=%s", guild_id)
             self._unknown_streak[guild_id] = 0
             self._hallucination_streak[guild_id] = 0
-            self._bind_listen_sink(bot, guild, vc)
+            # Rebind only if sink died — stop/start mid-call desyncs DAVE nonce windows.
+            try:
+                listening = bool(getattr(vc, "is_listening", lambda: False)())
+            except Exception:
+                listening = False
+            if not listening:
+                self._bind_listen_sink(bot, guild, vc)
             self._mark_heal_grace(guild_id)
-            log.info("Voice listen healed in place guild=%s", guild_id)
+            log.info(
+                "Voice listen healed in place guild=%s listening=%s",
+                guild_id,
+                listening,
+            )
         except Exception:
             log.exception("Voice listen heal failed guild=%s", guild_id)
         finally:
