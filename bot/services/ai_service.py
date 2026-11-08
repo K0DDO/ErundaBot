@@ -21,6 +21,10 @@ class OpenRouterCreditsExhausted(Exception):
     """OpenRouter returned 402 — balance/limit exhausted."""
 
 
+class OpenRouterRateLimited(Exception):
+    """OpenRouter returned 429 — temporary rate limit."""
+
+
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_TRANSCRIBE_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
@@ -42,6 +46,10 @@ STT_KEYWORD_PHRASES = (
     "сиксевен",
     "секс севен",
     "шесть семь",
+    "ерунда",
+    "ерунды",
+    "ерундушка",
+    "erunda",
     "блядь",
     "блять",
     "нахуй",
@@ -299,18 +307,45 @@ class AIService:
     ) -> str | None:
         if not self.transcription_enabled or not wav_bytes:
             return None
+        chosen = model or self.stt_model
         try:
             return await asyncio.to_thread(
                 self._request_openrouter_transcribe,
                 wav_bytes,
                 language,
-                model or self.stt_model,
+                chosen,
             )
         except OpenRouterCreditsExhausted:
             self.mark_stt_credits_exhausted()
             raise
+        except OpenRouterRateLimited:
+            # Primary MAI often 429s under load — try fallback model immediately.
+            if chosen != self.stt_fallback_model:
+                log.warning(
+                    "OpenRouter STT 429 on %s — falling back to %s",
+                    chosen,
+                    self.stt_fallback_model,
+                )
+                try:
+                    return await asyncio.to_thread(
+                        self._request_openrouter_transcribe,
+                        wav_bytes,
+                        language,
+                        self.stt_fallback_model,
+                    )
+                except OpenRouterCreditsExhausted:
+                    self.mark_stt_credits_exhausted()
+                    raise
+                except Exception:
+                    log.exception(
+                        "OpenRouter STT fallback failed model=%s",
+                        self.stt_fallback_model,
+                    )
+                    return None
+            log.warning("OpenRouter STT 429 model=%s (no fallback left)", chosen)
+            return None
         except Exception:
-            log.exception("OpenRouter transcription failed model=%s", model or self.stt_model)
+            log.exception("OpenRouter transcription failed model=%s", chosen)
             return None
 
     async def transcribe_wav_fallback(
@@ -341,6 +376,7 @@ class AIService:
             "prompt": (
                 "six seven, 6-7, 67, сикс севен, сек севен, сексаван, сексеон, "
                 "sex seven, sick seven, шесть семь. "
+                "ерунда, ерунды, ерундушка, erunda. "
                 "блядь, блять, нахуй, сука, пиздец, ебать, хуй."
             ),
             "input_audio": {
@@ -380,6 +416,10 @@ class AIService:
             if exc.code == 402:
                 raise OpenRouterCreditsExhausted(
                     "Токены OpenRouter исчерпаны (402)"
+                ) from exc
+            if exc.code == 429:
+                raise OpenRouterRateLimited(
+                    f"OpenRouter STT rate limited (429) model={chosen}"
                 ) from exc
             raise
         text = data.get("text") if isinstance(data, dict) else None

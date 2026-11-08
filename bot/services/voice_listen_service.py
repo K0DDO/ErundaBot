@@ -64,6 +64,8 @@ VOICE_NO_RTP_RECOVER_SECONDS = 50.0
 VOICE_RESUME_JOIN_COOLDOWN_SECONDS = 180.0
 # Ops visibility only — never leave+join / remount to "heal" a live DAVE session.
 VOICE_HEALTH_STATUS_EVERY = 60.0
+# If STT task dies/hangs without clearing flushing, unblock the user buffer.
+VOICE_FLUSH_STUCK_SECONDS = 45.0
 # Opus DTX silence frame (pycord / cursedshrine): keeps decoder alive on decrypt miss.
 _OPUS_SILENCE = b"\xf8\xff\xfe"
 
@@ -753,12 +755,13 @@ async def _wait_for_dave(vc: discord.VoiceProtocol, *, timeout: float = 8.0) -> 
 
 
 class _UserBuffer:
-    __slots__ = ("pcm", "last_packet_at", "flushing")
+    __slots__ = ("pcm", "last_packet_at", "flushing", "flush_started_at")
 
     def __init__(self) -> None:
         self.pcm = bytearray()
         self.last_packet_at = 0.0
         self.flushing = False
+        self.flush_started_at = 0.0
 
 
 class VoiceListenService:
@@ -1481,8 +1484,9 @@ class VoiceListenService:
         buf.last_packet_at = datetime.now(timezone.utc).timestamp()
         max_bytes = int(MAX_BUFFER_SECONDS * BYTES_PER_SECOND)
         if len(buf.pcm) >= max_bytes and not buf.flushing:
-            buf.flushing = True
-            # Flush scheduled by watchdog with bot; mark for immediate attention.
+            # Only poke the watchdog — NEVER set flushing here. Setting flushing
+            # without spawning STT deadlocks the user forever (watchdog skips
+            # flushing buffers, and nothing else clears the flag).
             buf.last_packet_at = 0.0
 
     async def _silence_watchdog(self, bot: ErundaBot) -> None:
@@ -1493,7 +1497,20 @@ class VoiceListenService:
                 now = datetime.now(timezone.utc).timestamp()
                 for guild_id, users in list(self._buffers.items()):
                     for user_id, buf in list(users.items()):
-                        if buf.flushing or not buf.pcm:
+                        if buf.flushing:
+                            started = buf.flush_started_at or now
+                            if now - started >= VOICE_FLUSH_STUCK_SECONDS:
+                                log.warning(
+                                    "STT flush stuck user=%s guild=%s for %.0fs — force unlock",
+                                    user_id,
+                                    guild_id,
+                                    now - started,
+                                )
+                                buf.flushing = False
+                                buf.flush_started_at = 0.0
+                            else:
+                                continue
+                        if not buf.pcm:
                             continue
                         silent_for = now - buf.last_packet_at
                         max_bytes = int(MAX_BUFFER_SECONDS * BYTES_PER_SECOND)
@@ -1503,6 +1520,7 @@ class VoiceListenService:
                             buf.pcm.clear()
                             continue
                         buf.flushing = True
+                        buf.flush_started_at = now
                         pcm = bytes(buf.pcm)
                         buf.pcm.clear()
                         asyncio.create_task(
@@ -1738,6 +1756,7 @@ class VoiceListenService:
             log.exception("Failed to transcribe voice for user %s", user_id)
         finally:
             buf.flushing = False
+            buf.flush_started_at = 0.0
 
     async def _announce_transcript(
         self,
