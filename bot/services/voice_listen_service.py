@@ -404,18 +404,16 @@ def _reset_dave_stats() -> None:
 
 
 def _strip_rtp_padding(raw: bytes, *, padding: bool = False) -> bytes:
-    """voice_recv leaves RTP padding in place (TODO in library)."""
-    if not raw:
+    """Strip RTP padding only when the P-bit is set (RFC 3550 §5.1).
+
+    Heuristic stripping of trailing identical bytes corrupts DAVE ciphertext
+    (pycord#3386 / davey#15) and produces NoValidCryptorFound storms.
+    """
+    if not raw or not padding:
         return raw
-    if padding:
-        n = raw[-1]
-        if 0 < n < len(raw):
-            return raw[:-n]
-    # Heuristic: trailing run of identical pad-count bytes (e.g. 05 05 05 05).
-    if len(raw) >= 4:
-        n = raw[-1]
-        if 2 <= n <= 32 and n < len(raw) and raw[-n:] == bytes([n]) * n:
-            return raw[:-n]
+    n = raw[-1]
+    if 0 < n < len(raw):
+        return raw[:-n]
     return raw
 
 
@@ -990,10 +988,13 @@ class VoiceListenService:
                         streak,
                         total,
                     )
-                if streak == VOICE_RECOVER_UNKNOWN_STREAK:
-                    self._schedule_soft_rebind(guild.id, reason=f"unknown_streak={streak}")
-                elif streak == VOICE_HARD_RECOVER_UNKNOWN_STREAK:
-                    self._schedule_heal(guild.id, reason=f"unknown_streak={streak}")
+                # Never soft-rebind/heal mid-call for unknown SSRC — remount desyncs DAVE.
+                if streak in (VOICE_RECOVER_UNKNOWN_STREAK, VOICE_HARD_RECOVER_UNKNOWN_STREAK):
+                    log.warning(
+                        "Unknown speaker streak=%s guild=%s — leave sink alone (DAVE-safe)",
+                        streak,
+                        guild.id,
+                    )
                 return
             # Decay instead of hard reset — flapping known/unknown must still escalate.
             self._unknown_streak[guild.id] = max(0, self._unknown_streak[guild.id] - 8)
@@ -1447,6 +1448,11 @@ class VoiceListenService:
                 log.exception("Voice silence watchdog failed")
 
     async def _check_voice_health(self, bot: ErundaBot, now: float) -> None:
+        """Health monitor: only resume if Discord already dropped the bot.
+
+        Mid-call soft-rebind / stop_listening / sink remount desyncs DAVE
+        (NoValidCryptorFound). Do not "heal" a live session.
+        """
         for guild_id in list(self._clients):
             if not self.is_listening(guild_id):
                 continue
@@ -1454,148 +1460,20 @@ class VoiceListenService:
                 continue
             if now < self._recover_grace_until.get(guild_id, 0.0):
                 continue
-            guild = bot.get_guild(guild_id)
-            channel = self.listening_channel(guild_id)
             vc = self._clients.get(guild_id)
-            if guild is None or vc is None:
+            if vc is None:
                 continue
             if not vc.is_connected():
                 self._schedule_resume_if_disconnected(guild_id, reason="vc_disconnected")
                 continue
-            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-                continue
-            humans = [m for m in channel.members if not getattr(m, "bot", False)]
-            if not humans:
-                continue
-            unmuted = []
-            for member in humans:
-                state = getattr(member, "voice", None)
-                if state is None:
-                    continue
-                if getattr(state, "self_mute", False) or getattr(state, "mute", False):
-                    continue
-                unmuted.append(member)
-            if not unmuted:
-                continue
-
-            speaking = False
-            get_speaking = getattr(vc, "get_speaking", None)
-            if callable(get_speaking):
-                for member in unmuted:
-                    try:
-                        if get_speaking(member):
-                            speaking = True
-                            break
-                    except Exception:
-                        pass
-
-            last_pcm = self._last_pcm_at.get(guild_id, 0.0)
-            last_cb = self._last_callback_at.get(guild_id, 0.0)
-            last_useful = self._last_useful_stt_at.get(guild_id, 0.0)
-            streak = self._unknown_streak.get(guild_id, 0)
-            pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
-            cb_age = (now - last_cb) if last_cb > 0 else 1e9
-            useful_age = (now - last_useful) if last_useful > 0 else 1e9
-            dave_broken = _dave_cryptor_broken()
-            dave_fails, dave_oks = _dave_fail_counts()
-
-            # Sink flag alone lies often while RTP still flows. Require dead callbacks.
+            # Keep passthrough enabled; never remount sink while connected.
             try:
-                listening = bool(getattr(vc, "is_listening", lambda: True)())
+                state = getattr(vc, "_connection", None)
+                session = getattr(state, "dave_session", None) if state is not None else None
+                if session is not None:
+                    session.set_passthrough_mode(True, 600)
             except Exception:
-                listening = True
-            if not listening and cb_age >= 20.0:
-                self._sink_dead_streak[guild_id] += 1
-                if self._sink_dead_streak[guild_id] >= VOICE_SINK_DEAD_CONFIRM:
-                    self._sink_dead_streak[guild_id] = 0
-                    self._schedule_soft_rebind(guild_id, reason="sink_not_listening")
-                continue
-            if listening or cb_age < 20.0:
-                self._sink_dead_streak[guild_id] = 0
-
-            # DAVE desync with no usable PCM → heal passthrough only (no sink remount).
-            if dave_broken and pcm_age >= 12.0:
-                self._schedule_heal(
-                    guild_id,
-                    reason=f"dave_cryptor_broken fails={dave_fails} oks={dave_oks}",
-                )
-                continue
-
-            # Don't heal on "bad STT while PCM is live" — that is usually DAVE noise,
-            # and heal/rebind makes cryptors worse.
-            if (
-                last_useful > 0
-                and useful_age >= VOICE_USEFUL_STT_STALE_SECONDS
-                and pcm_age >= VOICE_STALE_PCM_SECONDS
-                and (cb_age < 10.0 or speaking)
-            ):
-                self._schedule_heal(
-                    guild_id,
-                    reason=(
-                        f"useful_stt_stale age={useful_age:.0f}s "
-                        f"pcm_age={pcm_age:.0f}s cb_age={cb_age:.0f}s "
-                        f"dave_fail={dave_fails}"
-                    ),
-                )
-                continue
-
-            if speaking and last_pcm > 0 and pcm_age >= 12.0:
-                if cb_age < 5.0 or streak >= 30 or dave_fails >= 15:
-                    self._schedule_heal(
-                        guild_id,
-                        reason=(
-                            f"speaking_without_pcm pcm_age={pcm_age:.0f}s "
-                            f"streak={streak} dave_fail={dave_fails}"
-                        ),
-                    )
-                # Soft-rebind only when callbacks are also dead (see _schedule_soft_rebind).
-                elif cb_age >= 20.0:
-                    self._schedule_soft_rebind(
-                        guild_id,
-                        reason=f"speaking_no_callback pcm_age={pcm_age:.0f}s",
-                    )
-                continue
-
-            if last_pcm > 0 and cb_age < 5.0 and pcm_age >= VOICE_STALE_PCM_SECONDS:
-                self._schedule_heal(
-                    guild_id,
-                    reason=(
-                        f"callbacks_without_pcm pcm_age={pcm_age:.0f}s "
-                        f"dave_fail={dave_fails}"
-                    ),
-                )
-                continue
-
-            if (
-                speaking
-                and cb_age < 5.0
-                and pcm_age < 8.0
-                and useful_age >= 90.0
-                and self._hallucination_streak.get(guild_id, 0) >= 3
-            ):
-                self._schedule_heal(
-                    guild_id,
-                    reason=(
-                        f"speaking_hallucination_only useful_age={useful_age:.0f}s "
-                        f"hallu={self._hallucination_streak.get(guild_id, 0)}"
-                    ),
-                )
-                continue
-
-            # No leave+join for silent RTP — stay put; heal sink/passthrough at most.
-            session_started = self._session_started_at.get(guild_id, 0.0)
-            session_age = (now - session_started) if session_started > 0 else 0.0
-            if last_cb <= 0 and session_age >= VOICE_NO_RTP_RECOVER_SECONDS:
-                self._schedule_heal(
-                    guild_id,
-                    reason=f"no_rtp_after_join session_age={session_age:.0f}s",
-                )
-                continue
-            if speaking and last_cb > 0 and cb_age >= VOICE_NO_RTP_RECOVER_SECONDS:
-                self._schedule_heal(
-                    guild_id,
-                    reason=f"rtp_dead_while_speaking cb_age={cb_age:.0f}s",
-                )
+                pass
 
     async def _transcribe_and_store(
         self,
@@ -1671,7 +1549,7 @@ class VoiceListenService:
                     matched[:120],
                 )
                 await self._play_sixseven_sound(bot, guild_id)
-            if is_hallucination_heavy(text):
+            if is_hallucination_heavy(text) and not hit:
                 stripped = strip_hallucination_phrases(text)
                 if is_useful_transcript(stripped) and not is_hallucination_heavy(stripped):
                     text = stripped
@@ -1687,12 +1565,7 @@ class VoiceListenService:
                         text[:80],
                         hallu,
                     )
-                    if hallu >= VOICE_HALLUCINATION_RECOVER_STREAK:
-                        self._hallucination_streak[guild_id] = 0
-                        self._schedule_heal(
-                            guild_id,
-                            reason=f"hallucination_streak={hallu}",
-                        )
+                    # Do not heal/remount mid-call — that desyncs DAVE keys.
                     return
             # Count swears even when we skip storing junk (e.g. thank-you + мат).
             swears = max(count_swears(text), count_swears(sixseven_source))
@@ -1712,7 +1585,8 @@ class VoiceListenService:
                     guild_id,
                     (text or sixseven_source)[:80],
                 )
-            if not is_useful_transcript(text):
+            # Meme-only shouts (6-7) have almost no letters — still announce them.
+            if not is_useful_transcript(text) and not hit:
                 log.info(
                     "STT skip user=%s guild=%s audio=%.1fs rms=%s text=%r",
                     user_id,
@@ -1722,6 +1596,8 @@ class VoiceListenService:
                     text[:80],
                 )
                 return
+            if not text and hit:
+                text = matched or sixseven_source
             self._hallucination_streak[guild_id] = 0
             self._soft_rebind_times[guild_id] = []
             self._last_useful_stt_at[guild_id] = datetime.now(timezone.utc).timestamp()
