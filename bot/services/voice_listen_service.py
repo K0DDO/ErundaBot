@@ -62,13 +62,10 @@ VOICE_DAVE_FAIL_RECOVER_COUNT = 40
 VOICE_NO_RTP_RECOVER_SECONDS = 50.0
 # Resume join only if Discord already dropped us — never leave+join while connected.
 VOICE_RESUME_JOIN_COOLDOWN_SECONDS = 180.0
-# Connected but deaf: RTP/callbacks still flow (empty PCM after DAVE/Opus fail),
-# while loud PCM stalls. Soft remount desyncs DAVE — only full leave+join resets MLS.
-VOICE_DEAF_PCM_SECONDS = 45.0
-VOICE_DEAF_CB_FRESH_SECONDS = 15.0
-VOICE_DEAF_EMPTY_STREAK = 40
-VOICE_HARD_RECONNECT_COOLDOWN_SECONDS = 240.0
+# Ops visibility only — never leave+join / remount to "heal" a live DAVE session.
 VOICE_HEALTH_STATUS_EVERY = 60.0
+# Opus DTX silence frame (pycord / cursedshrine): keeps decoder alive on decrypt miss.
+_OPUS_SILENCE = b"\xf8\xff\xfe"
 
 # Rolling DAVE decrypt stats (updated from voice_recv patch).
 _DAVE_EVENTS: list[tuple[float, bool]] = []
@@ -439,34 +436,60 @@ def _strip_dave_passthrough_trailers(raw: bytes, *, padding: bool = False) -> by
 
 
 def _patch_voice_recv() -> None:
-    """DAVE decrypt (PR#54-style) + keep listening on bad opus frames.
+    """DAVE decrypt + OpusError survival without leave/join or sink remount.
 
-    Discord mandates DAVE E2EE. Stock voice-recv only opens the outer envelope;
-    ciphertext → OpusError / Whisper hallucinations. We decrypt with discord.py's
-    dave_session before opus decode, enable passthrough while MLS keys settle,
-    and stop PacketRouter from killing the whole listen on one bad frame.
+    Critical: decrypt with the SSRC→user mapping only. Brute-forcing every MLS
+    user_id poisons davey nonce/ratchet state (NoValidCryptorFound storms) and
+    the bot goes silently deaf while RTP still flows.
     """
     global _VOICE_RECV_PATCHED
     if _VOICE_RECV_PATCHED:
         return
 
-    import davey
     from davey import MediaType
     from discord.ext.voice_recv import opus as vr_opus
     from discord.ext.voice_recv import router as vr_router
     from discord.opus import Decoder as OpusDecoder
 
+    try:
+        from discord.ext.voice_recv.rtp import OPUS_SILENCE as _VR_OPUS_SILENCE
+
+        opus_silence = bytes(_VR_OPUS_SILENCE)
+    except Exception:
+        opus_silence = _OPUS_SILENCE
+
     orig_init = vr_opus.PacketDecoder.__init__
     dave_fails = {"n": 0}
     dave_ok = {"n": 0}
+    dave_skip = {"n": 0}
 
     def _keep_passthrough(session) -> None:  # type: ignore[no-untyped-def]
         try:
-            # Long window: Discord still sends unencrypted passthrough frames
-            # while DAVE is active; disabling this is what creates "desync" storms.
+            # Allow unencrypted transition frames; long expiry only matters on disable.
             session.set_passthrough_mode(True, 600)
         except Exception:
             pass
+
+    def _mapped_user_id(self) -> int | None:  # type: ignore[no-untyped-def]
+        """Resolve the single speaker for this SSRC — never scan the whole MLS roster."""
+        if self._cached_id is not None:
+            try:
+                return int(self._cached_id)
+            except Exception:
+                pass
+        try:
+            mapped = self.sink.voice_client._get_id_from_ssrc(self.ssrc)
+            if mapped is not None:
+                return int(mapped)
+        except Exception:
+            pass
+        member = self._get_cached_member()
+        if member is not None:
+            try:
+                return int(member.id)
+            except Exception:
+                pass
+        return None
 
     def _init(self, router, ssrc):  # type: ignore[no-untyped-def]
         orig_init(self, router, ssrc)
@@ -479,7 +502,6 @@ def _patch_voice_recv() -> None:
             log.exception("DAVE set_passthrough_mode on decoder init failed")
 
     def _process_packet(self, packet):  # type: ignore[no-untyped-def]
-        # DAVE decrypt + passthrough trailer strip (pycord PR#3201).
         pcm = None
         member = self._get_cached_member()
         if member is None:
@@ -490,100 +512,79 @@ def _patch_voice_recv() -> None:
             member = self._get_cached_member()
 
         vc = self.sink.voice_client
+        # Always re-read live connection state (Hermes #77998): dave_session can
+        # be replaced on MLS reinit; never cache the object across packets.
         state = getattr(vc, "_connection", None)
         session = getattr(state, "dave_session", None) if state is not None else None
+        protocol = int(getattr(state, "dave_protocol_version", 0) or 0) if state else 0
         silence = bool(getattr(packet, "is_silence", lambda: False)())
         payload = getattr(packet, "payload_type", getattr(packet, "type", 120))
         raw = getattr(packet, "decrypted_data", None)
+        is_audio = packet and not silence and raw is not None and len(raw) > 3 and int(payload) == 120
 
-        if (
-            session is not None
-            and getattr(session, "ready", False)
-            and packet
-            and not silence
-            and raw is not None
-            and len(raw) > 3
-            and int(payload) == 120
-        ):
+        if session is not None and protocol > 0 and is_audio:
             _keep_passthrough(session)
             padding = bool(getattr(packet, "padding", False))
             cleaned = _strip_rtp_padding(bytes(raw), padding=padding)
-            user_ids: list[int] = []
-            if member is not None:
-                user_ids.append(int(member.id))
-            try:
-                mapped = self.sink.voice_client._get_id_from_ssrc(self.ssrc)
-                if mapped is not None and int(mapped) not in user_ids:
-                    user_ids.append(int(mapped))
-            except Exception:
-                pass
-            try:
-                for uid in session.get_user_ids():
-                    uid_i = int(uid)
-                    if uid_i not in user_ids:
-                        user_ids.append(uid_i)
-            except Exception:
-                pass
+            ready = bool(getattr(session, "ready", False))
+            user_id = _mapped_user_id(self)
 
-            decrypted = None
-            used_uid: int | None = None
-            last_exc: BaseException | None = None
-            for uid in user_ids:
+            if not ready or user_id is None:
+                # MLS not ready / SSRC not mapped yet: passthrough strip only.
+                # Never brute-force session.get_user_ids() — that poisons nonces.
+                packet.decrypted_data = _strip_dave_passthrough_trailers(
+                    cleaned, padding=False
+                )
+                dave_skip["n"] += 1
+                if dave_skip["n"] in (1, 100, 500, 2000):
+                    log.info(
+                        "DAVE skip decrypt (#%s) ready=%s user=%s ssrc=%s — passthrough strip",
+                        dave_skip["n"],
+                        ready,
+                        user_id,
+                        self.ssrc,
+                    )
+            else:
                 try:
-                    decrypted = session.decrypt(uid, MediaType.audio, cleaned)
-                    used_uid = uid
-                    break
+                    packet.decrypted_data = session.decrypt(
+                        user_id, MediaType.audio, cleaned
+                    )
+                    dave_ok["n"] += 1
+                    _note_dave_result(True)
+                    self._cached_id = user_id
+                    member = self._get_cached_member()
+                    if dave_ok["n"] == 1:
+                        log.info(
+                            "DAVE decrypt ok (first) user=%s ssrc=%s",
+                            user_id,
+                            self.ssrc,
+                        )
                 except Exception as exc:
-                    last_exc = exc
                     exc_text = repr(exc)
                     if "UnencryptedWhenPassthroughDisabled" in exc_text:
-                        # Raw Opus + DAVE supplemental + optional RTP padding.
+                        # Valid transport Opus during epoch transition (pycord #3139).
                         packet.decrypted_data = _strip_dave_passthrough_trailers(
                             cleaned, padding=False
                         )
                         _note_dave_result(True)
                         dave_ok["n"] += 1
-                        decrypted = None
-                        last_exc = None
-                        used_uid = -1  # marker: passthrough handled
-                        break
-                    continue
+                    else:
+                        dave_fails["n"] += 1
+                        _note_dave_result(False)
+                        if dave_fails["n"] in (1, 25, 50, 200, 1000):
+                            log.warning(
+                                "DAVE decrypt failed (#%s, user=%s, ready=%s): %r",
+                                dave_fails["n"],
+                                user_id,
+                                ready,
+                                exc,
+                            )
+                        # Never feed ciphertext to Opus — DTX silence keeps decoder alive.
+                        packet.decrypted_data = opus_silence
 
-            if used_uid == -1:
-                pass  # passthrough already set packet.decrypted_data
-            elif decrypted is not None and used_uid is not None:
-                packet.decrypted_data = decrypted
-                dave_ok["n"] += 1
-                _note_dave_result(True)
-                if member is None or int(member.id) != used_uid:
-                    self._cached_id = used_uid
-                    member = self._get_cached_member()
-                if dave_ok["n"] == 1:
-                    log.info(
-                        "DAVE decrypt ok (first) user=%s mls_users=%s",
-                        used_uid,
-                        user_ids,
-                    )
-            elif last_exc is not None:
-                dave_fails["n"] += 1
-                _note_dave_result(False)
-                if dave_fails["n"] in (1, 25, 50, 200, 1000):
-                    log.warning(
-                        "DAVE decrypt failed (#%s, tried=%s, ready=%s): %r",
-                        dave_fails["n"],
-                        user_ids,
-                        getattr(session, "ready", None),
-                        last_exc,
-                    )
-                # Never feed ciphertext to Opus — silence frame.
-                self._last_seq = packet.sequence
-                self._last_ts = packet.timestamp
-                return vr_opus.VoiceData(packet, member, pcm=b"")
-            elif not user_ids:
-                # Session ready but no speaker map yet — keep passthrough audio.
-                packet.decrypted_data = _strip_dave_passthrough_trailers(
-                    cleaned, padding=False
-                )
+        elif protocol > 0 and is_audio and session is None:
+            # Protocol claims DAVE but session missing mid-reinit — don't Opus ciphertext.
+            packet.decrypted_data = opus_silence
 
         if not self.sink.wants_opus():
             try:
@@ -632,7 +633,6 @@ def _patch_voice_recv() -> None:
     vr_opus.PacketDecoder._process_packet = _process_packet  # type: ignore[method-assign]
     vr_router.PacketRouter._do_run = _do_run  # type: ignore[method-assign]
     _VOICE_RECV_PATCHED = True
-    # RTCP SenderReport spam drowns real voice diagnostics.
     logging.getLogger("discord.ext.voice_recv.reader").setLevel(logging.WARNING)
     log.info("Patched voice_recv for DAVE decrypt + OpusError survival")
 
@@ -1470,11 +1470,10 @@ class VoiceListenService:
                 log.exception("Voice silence watchdog failed")
 
     async def _check_voice_health(self, bot: ErundaBot, now: float) -> None:
-        """Health monitor: resume if Discord dropped us; hard-reconnect if deaf.
+        """Health monitor: resume only if Discord already dropped the bot.
 
-        Mid-call soft-rebind / stop_listening / sink remount desyncs DAVE
-        (NoValidCryptorFound). Connected-but-deaf (live RTP, empty PCM) needs
-        a full leave+join to reset MLS — never a soft remount.
+        Never leave+join / soft-remount while connected — that desyncs DAVE.
+        Decrypt correctness (SSRC-mapped user only) is what keeps hearing alive.
         """
         status_due = now - self._health_status_tick >= VOICE_HEALTH_STATUS_EVERY
         if status_due:
@@ -1501,13 +1500,13 @@ class VoiceListenService:
             except Exception:
                 pass
 
-            last_cb = self._last_callback_at.get(guild_id, 0.0)
-            last_pcm = self._last_pcm_at.get(guild_id, 0.0)
-            cb_age = (now - last_cb) if last_cb > 0 else 1e9
-            pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
-            empty = self._empty_pcm_streak.get(guild_id, 0)
-            fails, oks = _dave_fail_counts()
             if status_due:
+                last_cb = self._last_callback_at.get(guild_id, 0.0)
+                last_pcm = self._last_pcm_at.get(guild_id, 0.0)
+                cb_age = (now - last_cb) if last_cb > 0 else 1e9
+                pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
+                empty = self._empty_pcm_streak.get(guild_id, 0)
+                fails, oks = _dave_fail_counts()
                 log.info(
                     "Voice health guild=%s cb_age=%.0fs pcm_age=%.0fs empty=%s "
                     "dave_fail=%s dave_ok=%s",
@@ -1518,85 +1517,6 @@ class VoiceListenService:
                     fails,
                     oks,
                 )
-
-            # Live RTP → empty/corrupt frames, no loud PCM: silent deafness.
-            deaf = (
-                cb_age < VOICE_DEAF_CB_FRESH_SECONDS
-                and pcm_age > VOICE_DEAF_PCM_SECONDS
-                and empty >= VOICE_DEAF_EMPTY_STREAK
-            )
-            if deaf or _dave_cryptor_broken():
-                reason = "dave_broken" if _dave_cryptor_broken() else "deaf_live_rtp"
-                self._schedule_hard_reconnect(guild_id, reason=reason)
-
-    def _schedule_hard_reconnect(self, guild_id: int, *, reason: str) -> None:
-        """Full leave+join to reset DAVE/MLS. Rate-limited; never soft-remount."""
-        bot = self._bot
-        if bot is None or guild_id in self._healing:
-            return
-        now = datetime.now(timezone.utc).timestamp()
-        last = self._last_hard_reconnect_at.get(guild_id, 0.0)
-        if now - last < VOICE_HARD_RECONNECT_COOLDOWN_SECONDS:
-            return
-        log.warning(
-            "Scheduling voice hard reconnect guild=%s (%s)",
-            guild_id,
-            reason,
-        )
-
-        def _go() -> None:
-            asyncio.create_task(self._hard_reconnect(guild_id, reason=reason))
-
-        bot.loop.call_soon_threadsafe(_go)
-
-    async def _hard_reconnect(self, guild_id: int, *, reason: str) -> None:
-        bot = self._bot
-        if bot is None or self.ai.stt_credits_exhausted:
-            return
-        if guild_id in self._healing:
-            return
-        now = datetime.now(timezone.utc).timestamp()
-        last = self._last_hard_reconnect_at.get(guild_id, 0.0)
-        if now - last < VOICE_HARD_RECONNECT_COOLDOWN_SECONDS:
-            return
-        vc = self._clients.get(guild_id)
-        channel = None
-        if vc is not None:
-            channel = getattr(vc, "channel", None)
-        announce_id = self._announce_channels.get(guild_id)
-        config = await self.db.get_guild(guild_id)
-        if announce_id is None and config is not None:
-            announce_id = config.voice_announce_channel_id
-        if channel is None and config is not None and config.voice_listen_channel_id:
-            guild = bot.get_guild(guild_id)
-            if guild is not None:
-                channel = guild.get_channel(config.voice_listen_channel_id)
-        if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-            log.warning("Hard reconnect aborted: no channel guild=%s (%s)", guild_id, reason)
-            return
-        self._healing.add(guild_id)
-        self._last_hard_reconnect_at[guild_id] = now
-        try:
-            log.warning(
-                "Hard reconnect voice guild=%s channel=%s (%s)",
-                guild_id,
-                channel.id,
-                reason,
-            )
-            _reset_dave_stats()
-            await self.leave(guild_id, flush=False, clear_resume=False)
-            await asyncio.sleep(1.2)
-            await self.join(bot, channel, announce_channel_id=announce_id)
-            _reset_dave_stats()
-            ok = await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
-            if ok:
-                log.info("Hard reconnect got RTP guild=%s", guild_id)
-            else:
-                log.error("Hard reconnect still no RTP guild=%s", guild_id)
-        except Exception:
-            log.exception("Voice hard reconnect failed guild=%s", guild_id)
-        finally:
-            self._healing.discard(guild_id)
 
     async def _transcribe_and_store(
         self,
