@@ -68,8 +68,10 @@ def adapt_sql(sql: str) -> str:
 
 
 def adapt_schema_sql(sql: str) -> str:
-    text = sql
-    text = re.sub(r"PRAGMA\s+[^;]+;", "", text, flags=re.IGNORECASE)
+    text = sql.strip()
+    if re.match(r"^PRAGMA\b", text, flags=re.IGNORECASE):
+        return ""
+    text = re.sub(r"PRAGMA\s+[^;]+;?", "", text, flags=re.IGNORECASE)
     text = _DATETIME_NOW.sub("NOW()", text)
     text = _AUTOINCREMENT.sub("BIGSERIAL PRIMARY KEY", text)
     return text

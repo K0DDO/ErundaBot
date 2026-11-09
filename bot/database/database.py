@@ -41,8 +41,6 @@ from .models import (
 log = logging.getLogger(__name__)
 
 SCHEMA = """
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS guilds (
     guild_id BIGINT PRIMARY KEY,
     timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',
