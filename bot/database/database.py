@@ -819,7 +819,7 @@ class Database:
                 0,
                 CAST(
                     EXTRACT(
-                        EPOCH FROM (CAST(? AS TIMESTAMP) - CAST(started_at AS TIMESTAMP))
+                        EPOCH FROM ((?::text)::timestamptz - started_at::timestamptz)
                     ) AS INTEGER
                 )
             )
@@ -850,7 +850,7 @@ class Database:
                     0,
                     CAST(
                         EXTRACT(
-                            EPOCH FROM (CAST(? AS TIMESTAMP) - CAST(started_at AS TIMESTAMP))
+                            EPOCH FROM ((?::text)::timestamptz - started_at::timestamptz)
                         ) AS INTEGER
                     )
                 )
@@ -869,7 +869,7 @@ class Database:
                     0,
                     CAST(
                         EXTRACT(
-                            EPOCH FROM (CAST(? AS TIMESTAMP) - CAST(started_at AS TIMESTAMP))
+                            EPOCH FROM ((?::text)::timestamptz - started_at::timestamptz)
                         ) AS INTEGER
                     )
                 )
