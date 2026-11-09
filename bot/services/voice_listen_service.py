@@ -38,8 +38,12 @@ CREDITS_EXHAUSTED_MESSAGE = (
 PCM_RATE = 48000
 PCM_CHANNELS = 2
 PCM_SAMPLE_WIDTH = 2
-# Wait this long after last PCM before STT+announce (was 2.0 — felt too slow in chat).
-SILENCE_FLUSH_SECONDS = 0.85
+# Wait this long after last PCM before STT+announce (was 2.0 → 0.85 → still felt ~3s to soundboard).
+SILENCE_FLUSH_SECONDS = 0.4
+# Short loud shouts (memes) can flush sooner — less dead air before soundboard.
+SILENCE_FLUSH_MEME_SECONDS = 0.25
+MEME_FLUSH_MAX_SECONDS = 3.5
+MEME_FLUSH_MIN_RMS = 700
 MIN_AUDIO_SECONDS = 0.45
 MAX_BUFFER_SECONDS = 8.0
 BYTES_PER_SECOND = PCM_RATE * PCM_CHANNELS * PCM_SAMPLE_WIDTH
@@ -1544,7 +1548,7 @@ class VoiceListenService:
         await bot.wait_until_ready()
         while True:
             try:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
                 now = datetime.now(timezone.utc).timestamp()
                 for guild_id, users in list(self._buffers.items()):
                     for user_id, buf in list(users.items()):
@@ -1565,8 +1569,15 @@ class VoiceListenService:
                             continue
                         silent_for = now - buf.last_packet_at
                         max_bytes = int(MAX_BUFFER_SECONDS * BYTES_PER_SECOND)
-                        if silent_for < SILENCE_FLUSH_SECONDS and len(buf.pcm) < max_bytes:
+                        if silent_for < SILENCE_FLUSH_MEME_SECONDS and len(buf.pcm) < max_bytes:
                             continue
+                        if silent_for < SILENCE_FLUSH_SECONDS and len(buf.pcm) < max_bytes:
+                            seconds = len(buf.pcm) / BYTES_PER_SECOND
+                            if not (
+                                seconds <= MEME_FLUSH_MAX_SECONDS
+                                and pcm_rms(buf.pcm) >= MEME_FLUSH_MIN_RMS
+                            ):
+                                continue
                         if len(buf.pcm) < int(MIN_AUDIO_SECONDS * BYTES_PER_SECOND):
                             buf.pcm.clear()
                             continue
@@ -1689,9 +1700,36 @@ class VoiceListenService:
             wav = await asyncio.to_thread(pcm_to_wav_bytes, pcm)
             text = await self.ai.transcribe_wav(wav)
             text = (text or "").strip()
-            # Primary MAI can still mangle memes — second pass via GPT-4o-mini-transcribe.
             meme_source = text
-            need_retry = not mentions_sixseven(text) and not mentions_erunda(text) and (
+            # Fire soundboard as soon as primary STT matches — don't wait for fallback.
+            hit, matched = self._sixseven_from_context(
+                guild_id, user_id, meme_source
+            )
+            if hit:
+                log.info(
+                    "Sixseven trigger user=%s guild=%s text=%r matched=%r",
+                    user_id,
+                    guild_id,
+                    meme_source[:120],
+                    matched[:120],
+                )
+                await self._play_named_sound(
+                    bot, guild_id, SOUNDBOARD_SIXSEVEN_NAME, label="Sixseven"
+                )
+            erunda_hit = mentions_erunda(meme_source) or mentions_erunda(text)
+            if erunda_hit:
+                log.info(
+                    "Erunda trigger user=%s guild=%s text=%r",
+                    user_id,
+                    guild_id,
+                    meme_source[:120],
+                )
+                await self._play_named_sound(
+                    bot, guild_id, SOUNDBOARD_ERUNDA_NAME, label="Erunda"
+                )
+            meme_hit = hit or erunda_hit
+            # Primary can still mangle memes — second pass only if soundboard missed.
+            need_retry = not meme_hit and (
                 not text
                 or is_hallucination_heavy(text)
                 or maybe_sixseven_near_miss(text)
@@ -1727,32 +1765,33 @@ class VoiceListenService:
                     if retry2:
                         text = retry2
                         meme_source = retry2
-            hit, matched = self._sixseven_from_context(
-                guild_id, user_id, meme_source
-            )
-            if hit:
-                log.info(
-                    "Sixseven trigger user=%s guild=%s text=%r matched=%r",
-                    user_id,
-                    guild_id,
-                    meme_source[:120],
-                    matched[:120],
-                )
-                await self._play_named_sound(
-                    bot, guild_id, SOUNDBOARD_SIXSEVEN_NAME, label="Sixseven"
-                )
-            erunda_hit = mentions_erunda(meme_source) or mentions_erunda(text)
-            if erunda_hit:
-                log.info(
-                    "Erunda trigger user=%s guild=%s text=%r",
-                    user_id,
-                    guild_id,
-                    meme_source[:120],
-                )
-                await self._play_named_sound(
-                    bot, guild_id, SOUNDBOARD_ERUNDA_NAME, label="Erunda"
-                )
-            meme_hit = hit or erunda_hit
+                if not meme_hit:
+                    hit, matched = self._sixseven_from_context(
+                        guild_id, user_id, meme_source
+                    )
+                    if hit:
+                        log.info(
+                            "Sixseven trigger (fallback) user=%s guild=%s text=%r matched=%r",
+                            user_id,
+                            guild_id,
+                            meme_source[:120],
+                            matched[:120],
+                        )
+                        await self._play_named_sound(
+                            bot, guild_id, SOUNDBOARD_SIXSEVEN_NAME, label="Sixseven"
+                        )
+                    erunda_hit = mentions_erunda(meme_source) or mentions_erunda(text)
+                    if erunda_hit:
+                        log.info(
+                            "Erunda trigger (fallback) user=%s guild=%s text=%r",
+                            user_id,
+                            guild_id,
+                            meme_source[:120],
+                        )
+                        await self._play_named_sound(
+                            bot, guild_id, SOUNDBOARD_ERUNDA_NAME, label="Erunda"
+                        )
+                    meme_hit = hit or erunda_hit
             if is_hallucination_heavy(text) and not meme_hit:
                 stripped = strip_hallucination_phrases(text)
                 if is_useful_transcript(stripped) and not is_hallucination_heavy(stripped):
