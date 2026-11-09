@@ -89,7 +89,7 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
-    @admin.command(name="birthday_test", description="Тестовое поздравление (видно только тебе)")
+    @admin.command(name="birthday_test", description="Тестовое поздравление")
     @app_commands.describe(user="Кого поздравить, по умолчанию тебя")
     @app_commands.guild_only()
     async def admin_birthday_test(
@@ -471,7 +471,7 @@ class AdminCog(commands.Cog):
 
     @admin.command(
         name="description",
-        description="Справка по командам для участников (без админских)",
+        description="Справка по командам для участников",
     )
     @app_commands.describe(
         visibility="Кому отправить: только тебе или в канал",

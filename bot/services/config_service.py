@@ -27,7 +27,6 @@ class ConfigService:
         birthday = _channel_or_name(config.birthday_channel_id, "дни-рождения")
         tgk = _channel_or_name(config.tgk_channel_id, "тгк")
         santa = _channel_or_name(config.santa_channel_id, "тайный-санта")
-        _ = channel_mention  # keep import used if helpers change
         return (
             "## Цитаты\n"
             f"Канал: {quotes}\n"
@@ -46,7 +45,7 @@ class ConfigService:
             "## Ивенты\n"
             f"Канал: {events}\n"
             "• `/event create` — создать (с ролью для пинга)\n"
-            "• `/event cancel` · `/event ended` — создатель\n"
+            "• `/event cancel` · `/event ended`\n"
             "• Кнопки на карточке: присоединиться / покинуть\n"
             "\n"
             "## Дни рождения\n"

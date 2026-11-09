@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import discord
 
-from bot.settings import OWNER_MENTION, OWNER_ONLY_HINT, OWNER_USER_ID
+from bot.settings import OWNER_USER_ID
 
 
 def is_owner(user: discord.abc.User | discord.Member | None) -> bool:
@@ -24,10 +24,7 @@ def can_staff(member: discord.Member) -> bool:
 
 
 def staff_denied_reason() -> str:
-    return (
-        f"Нужны права администратора / Manage Server или доступ владельца "
-        f"({OWNER_MENTION})."
-    )
+    return "Недостаточно прав"
 
 
 def can_edit_config(member: discord.Member, config_role_id: int | None = None) -> bool:
@@ -42,7 +39,7 @@ def config_denied_reason(config_role_id: int | None = None) -> str:
 
 
 def owner_denied_reason() -> str:
-    return f"Нужен доступ владельца ({OWNER_ONLY_HINT})."
+    return "Недостаточно прав"
 
 
 def find_member_by_nickname(guild: discord.Guild, nickname: str) -> discord.Member:
