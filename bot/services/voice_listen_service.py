@@ -1495,7 +1495,8 @@ class VoiceListenService:
         self.ai.mark_stt_credits_exhausted()
         for guild_id in list(self._clients):
             try:
-                await self.leave(guild_id, flush=False)
+                # Keep DB resume target so bot rejoins after credits are restored.
+                await self.leave(guild_id, flush=False, clear_resume=False)
             except Exception:
                 log.exception("Failed to leave voice after credits exhausted (%s)", guild_id)
 
