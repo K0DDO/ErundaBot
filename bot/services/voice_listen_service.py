@@ -1301,12 +1301,26 @@ class VoiceListenService:
         self._healing.add(guild_id)
         self._last_hard_reconnect_at[guild_id] = now
         try:
+            # Drop zombie VoiceClient after failed Discord reconnect so join()
+            # does not trip over a half-dead connection object.
+            dead = self._clients.pop(guild_id, None)
+            if dead is not None:
+                try:
+                    await dead.disconnect(force=True)
+                except Exception:
+                    log.exception("Failed to drop dead voice client guild=%s", guild_id)
+            guild = bot.get_guild(guild_id)
+            if guild is not None and guild.voice_client is not None:
+                try:
+                    await guild.voice_client.disconnect(force=True)
+                except Exception:
+                    log.exception("Failed to drop guild.voice_client guild=%s", guild_id)
+
             announce_id = self._announce_channels.get(guild_id)
             config = await self.db.get_guild(guild_id)
             if announce_id is None and config is not None:
                 announce_id = config.voice_announce_channel_id
             channel_id = config.voice_listen_channel_id if config else None
-            guild = bot.get_guild(guild_id)
             channel = guild.get_channel(channel_id) if guild and channel_id else None
             if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
                 log.warning("Resume join aborted: no channel guild=%s", guild_id)
@@ -1318,7 +1332,6 @@ class VoiceListenService:
                 reason,
             )
             _reset_dave_stats()
-            # Do not leave() — we are already out. Just join.
             await self.join(bot, channel, announce_channel_id=announce_id)
             _reset_dave_stats()
             ok = await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
@@ -1551,13 +1564,16 @@ class VoiceListenService:
 
         Never leave+join / soft-remount while connected — that desyncs DAVE.
         Decrypt correctness (SSRC-mapped user only) is what keeps hearing alive.
+
+        Important: do NOT gate on is_listening() before the disconnect check —
+        is_listening requires is_connected(), which made resume unreachable.
         """
         status_due = now - self._health_status_tick >= VOICE_HEALTH_STATUS_EVERY
         if status_due:
             self._health_status_tick = now
+
+        tracked = set(self._clients)
         for guild_id in list(self._clients):
-            if not self.is_listening(guild_id):
-                continue
             if guild_id in self._healing:
                 continue
             if now < self._recover_grace_until.get(guild_id, 0.0):
@@ -1566,7 +1582,11 @@ class VoiceListenService:
             if vc is None:
                 continue
             if not vc.is_connected():
-                self._schedule_resume_if_disconnected(guild_id, reason="vc_disconnected")
+                # Dead VoiceClient left in _clients after Discord 1006 / failed
+                # reconnect — schedule join from DB channel id.
+                self._schedule_resume_if_disconnected(
+                    guild_id, reason="vc_disconnected"
+                )
                 continue
             # Keep passthrough enabled; never remount sink while connected.
             try:
@@ -1594,6 +1614,29 @@ class VoiceListenService:
                     fails,
                     oks,
                 )
+
+        # Also catch guilds that fell out of _clients but still have a DB resume
+        # target (failed reconnect can drop the client without leave()).
+        if status_due:
+            try:
+                for config in await self.db.list_guilds():
+                    channel_id = config.voice_listen_channel_id
+                    if channel_id is None:
+                        continue
+                    guild_id = config.guild_id
+                    if guild_id in tracked and self.is_listening(guild_id):
+                        continue
+                    if guild_id in self._healing:
+                        continue
+                    if now < self._recover_grace_until.get(guild_id, 0.0):
+                        continue
+                    if self.is_listening(guild_id):
+                        continue
+                    self._schedule_resume_if_disconnected(
+                        guild_id, reason="db_resume_missing"
+                    )
+            except Exception:
+                log.exception("Voice health DB resume scan failed")
 
     async def _transcribe_and_store(
         self,
