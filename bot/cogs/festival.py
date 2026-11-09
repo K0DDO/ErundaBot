@@ -17,7 +17,6 @@ from bot.services.festival_service import (
 )
 from bot.utils.embeds import error_embed, success_embed
 from bot.views.festival_views import (
-    FestivalAddModal,
     FestivalEditModal,
     FestivalNewModal,
     festival_card,
@@ -93,32 +92,10 @@ class FestivalCog(commands.Cog):
             return channel
         return None
 
-    @fest.command(name="add", description="Предложить фильм")
-    @app_commands.guild_only()
-    async def fest_add(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        await interaction.response.send_modal(
-            FestivalAddModal(self.bot, interaction.guild.id, interaction.user.id)
-        )
-
-    @fest.command(name="remove", description="Убрать свой фильм")
-    @app_commands.guild_only()
-    async def fest_remove(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        try:
-            festival = await self.bot.festival_service.remove_film(
-                interaction.guild.id,
-                interaction.user.id,
-            )
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        await refresh_festival_message(self.bot, festival)
-        await interaction.response.send_message(embed=success_embed("Фильм убран"), ephemeral=True)
-
-    @fest.command(name="new", description="Открыть новый кинофестиваль")
+    @fest.command(
+        name="new",
+        description="Открыть новый кинофестиваль (админы сервера / владелец)",
+    )
     @app_commands.guild_only()
     async def fest_new(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
@@ -133,7 +110,10 @@ class FestivalCog(commands.Cog):
             FestivalNewModal(self.bot, interaction.guild.id, MSK_TIMEZONE)
         )
 
-    @fest.command(name="edit", description="Изменить дату и время сеанса")
+    @fest.command(
+        name="edit",
+        description="Изменить дату и время сеанса (админы сервера / владелец)",
+    )
     @app_commands.guild_only()
     async def fest_edit(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
@@ -158,7 +138,10 @@ class FestivalCog(commands.Cog):
             )
         )
 
-    @fest.command(name="delete", description="Удалить кинофестиваль")
+    @fest.command(
+        name="delete",
+        description="Удалить кинофестиваль (админы сервера / владелец)",
+    )
     @app_commands.describe(number="Номер карточки, без номера — текущий открытый")
     @app_commands.guild_only()
     async def fest_delete(
@@ -213,7 +196,10 @@ class FestivalCog(commands.Cog):
                 break
         return choices
 
-    @fest.command(name="export", description="Список имён для колеса")
+    @fest.command(
+        name="export",
+        description="Список имён для колеса (админы сервера / владелец)",
+    )
     @app_commands.guild_only()
     async def fest_export(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
@@ -232,7 +218,10 @@ class FestivalCog(commands.Cog):
             ephemeral=True,
         )
 
-    @fest.command(name="winner", description="Отметить победителя колеса")
+    @fest.command(
+        name="winner",
+        description="Отметить победителя колеса (админы сервера / владелец)",
+    )
     @app_commands.describe(user="Кто выиграл в колесе")
     @app_commands.guild_only()
     async def fest_winner(self, interaction: discord.Interaction, user: discord.Member) -> None:
@@ -257,30 +246,6 @@ class FestivalCog(commands.Cog):
             ephemeral=True,
         )
 
-    @fest.command(name="ping", description="Напомнить о сеансе")
-    @app_commands.describe(role="Кого пингануть")
-    @app_commands.guild_only()
-    async def fest_ping(self, interaction: discord.Interaction, role: discord.Role) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        try:
-            await self.bot.festival_service.require_staff(interaction.user, config)
-            festival = await self.bot.festival_service.require_open(interaction.guild.id)
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        channel = self._post_channel(interaction, config.fest_channel_id)
-        if channel is None:
-            await interaction.response.send_message(
-                embed=error_embed("Некуда отправить напоминание"),
-                ephemeral=True,
-            )
-            return
-        await self.bot.db.update_guild(interaction.guild.id, fest_ping_role_id=role.id)
-        text = self.bot.festival_service.ping_text(festival, config.timezone, role)
-        await channel.send(text)
-        await interaction.response.send_message(embed=success_embed("Напоминание отправлено"), ephemeral=True)
 
 async def setup(bot: ErundaBot) -> None:
     await bot.add_cog(FestivalCog(bot))

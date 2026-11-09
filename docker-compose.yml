@@ -1,9 +1,33 @@
 services:
+  postgres:
+    image: postgres:16
+    container_name: erunda-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: erunda
+      POSTGRES_PASSWORD: erunda
+      POSTGRES_DB: erunda
+    volumes:
+      - erunda_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erunda -d erunda"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   erunda-bot:
     build: .
     container_name: erunda-bot
     restart: unless-stopped
     env_file:
       - .env.production
+    environment:
+      DATABASE_URL: postgresql://erunda:erunda@postgres:5432/erunda
     volumes:
       - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  erunda_pgdata:

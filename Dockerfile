@@ -20,8 +20,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot ./bot
+COPY scripts ./scripts
 COPY main.py .
 
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/data/tts_cache
 
 CMD ["python", "main.py"]

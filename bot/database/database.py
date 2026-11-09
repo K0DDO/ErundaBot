@@ -1,16 +1,19 @@
-"""Async SQLite database layer."""
+"""Async Postgres database layer (asyncpg)."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
+import asyncpg
 
-from bot.utils.birthday_emojis import clean_birthday_emoji, pick_birthday_emoji
+from bot.database.pg_compat import CompatConnection
+from bot.settings import is_home_guild
+from bot.utils.birthday_emojis import pick_birthday_emoji
 
 FESTIVAL_START_NUMBER = 29
 
@@ -41,15 +44,15 @@ SCHEMA = """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS guilds (
-    guild_id INTEGER PRIMARY KEY,
+    guild_id BIGINT PRIMARY KEY,
     timezone TEXT NOT NULL DEFAULT 'Europe/Moscow',
-    birthday_channel_id INTEGER,
-    events_channel_id INTEGER,
-    proposals_channel_id INTEGER,
-    quotes_channel_id INTEGER,
-    fest_channel_id INTEGER,
-    tgk_channel_id INTEGER,
-    santa_channel_id INTEGER,
+    birthday_channel_id BIGINT,
+    events_channel_id BIGINT,
+    proposals_channel_id BIGINT,
+    quotes_channel_id BIGINT,
+    fest_channel_id BIGINT,
+    tgk_channel_id BIGINT,
+    santa_channel_id BIGINT,
     statistics_enabled INTEGER NOT NULL DEFAULT 1,
     personal_roles_enabled INTEGER NOT NULL DEFAULT 1,
     auto_execute_proposals INTEGER NOT NULL DEFAULT 0,
@@ -61,19 +64,21 @@ CREATE TABLE IF NOT EXISTS guilds (
     proposal_duration_hours INTEGER NOT NULL DEFAULT 24,
     proposal_quorum INTEGER NOT NULL DEFAULT 3,
     proposal_pass_ratio REAL NOT NULL DEFAULT 0.5,
-    birthday_board_message_id INTEGER,
-    birthday_star_role_id INTEGER,
-    fest_staff_role_id INTEGER,
-    fest_ping_role_id INTEGER,
-    config_role_id INTEGER,
+    birthday_board_message_id BIGINT,
+    birthday_star_role_id BIGINT,
+    fest_staff_role_id BIGINT,
+    fest_ping_role_id BIGINT,
+    config_role_id BIGINT,
     fest_reminder_minutes INTEGER NOT NULL DEFAULT 60,
     fest_presence_check INTEGER NOT NULL DEFAULT 1,
     tarot_reset_minutes INTEGER NOT NULL DEFAULT 10,
     tarot_show_meaning INTEGER NOT NULL DEFAULT 1,
     voice_chat_transcripts INTEGER NOT NULL DEFAULT 1,
-    voice_listen_channel_id INTEGER,
-    voice_announce_channel_id INTEGER,
-    tgk_board_message_id INTEGER,
+    voice_listen_channel_id BIGINT,
+    voice_announce_channel_id BIGINT,
+    tgk_board_message_id BIGINT,
+    tgk_board_message_ids TEXT NOT NULL DEFAULT '[]',
+    tgk_list_role_id BIGINT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -147,6 +152,7 @@ CREATE TABLE IF NOT EXISTS events (
         CHECK (status IN ('scheduled', 'cancelled', 'completed')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (guild_id, number),
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
 );
 
@@ -346,659 +352,176 @@ CREATE TABLE IF NOT EXISTS tg_channels (
     UNIQUE (guild_id, number),
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS santa_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    number INTEGER NOT NULL,
+    channel_id INTEGER,
+    message_id INTEGER,
+    drawn INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
+    UNIQUE (guild_id, number)
+);
+
+CREATE TABLE IF NOT EXISTS santa_entries (
+    event_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    address TEXT NOT NULL,
+    wishlist_url TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (event_id, user_id),
+    FOREIGN KEY (event_id) REFERENCES santa_events(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS santa_assignments (
+    event_id INTEGER NOT NULL,
+    giver_id INTEGER NOT NULL,
+    receiver_id INTEGER NOT NULL,
+    PRIMARY KEY (event_id, giver_id),
+    FOREIGN KEY (event_id) REFERENCES santa_events(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS voice_snippets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    processed INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_snippets_pending
+ON voice_snippets(guild_id, user_id, processed);
+
+CREATE TABLE IF NOT EXISTS voice_dossier (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    fact TEXT NOT NULL,
+    source_date TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_dossier_user
+ON voice_dossier(guild_id, user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS voice_swear_stats (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id, day),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS daily_text_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL CHECK (source IN ('chat', 'voice')),
+    text TEXT NOT NULL,
+    day TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_text_logs_guild_day_user
+ON daily_text_logs(guild_id, day, user_id);
+
+CREATE TABLE IF NOT EXISTS member_profiles (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    gender TEXT NOT NULL DEFAULT 'u'
+        CHECK (gender IN ('f', 'm', 'u')),
+    score_f INTEGER NOT NULL DEFAULT 0,
+    score_m INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, user_id),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS voice_listen_muted (
+    guild_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, user_id),
+    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
 class Database:
-    def __init__(self, path: str | Path, default_timezone: str = "Europe/Moscow") -> None:
-        self.path = Path(path)
+    def __init__(
+        self,
+        dsn: str | None = None,
+        *,
+        path: str | Path | None = None,
+        default_timezone: str = "Europe/Moscow",
+    ) -> None:
+        # path kept for migrate script / temporary local fallback messaging.
+        self.path = Path(path) if path else Path("./data/erunda.db")
+        self.dsn = (dsn or os.getenv("DATABASE_URL") or "").strip()
         self.default_timezone = default_timezone
-        self._db: aiosqlite.Connection | None = None
+        self._db: CompatConnection | None = None
+        self._pool: asyncpg.Pool | None = None
 
     @property
-    def connection(self) -> aiosqlite.Connection:
+    def connection(self) -> CompatConnection:
         if self._db is None:
             raise RuntimeError("Database is not connected. Call connect() first.")
         return self._db
 
     async def connect(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(self.path)
-        self._db.row_factory = aiosqlite.Row
-        await self._db.execute("PRAGMA foreign_keys = ON")
+        if not self.dsn:
+            raise RuntimeError(
+                "DATABASE_URL is not set (postgresql://user:pass@host:5432/db)"
+            )
+        self._pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=10)
+        self._db = CompatConnection(self._pool)
         await self._db.executescript(SCHEMA)
         await self._migrate()
-        await self._db.commit()
-        log.info("Database ready at %s", self.path)
+        log.info("Database ready (Postgres)")
 
     async def _migrate(self) -> None:
-        """Add columns to existing databases."""
-        migrations = (
-            "ALTER TABLE guilds ADD COLUMN birthday_board_message_id INTEGER",
-            "ALTER TABLE quotes ADD COLUMN author_display TEXT",
-            "ALTER TABLE quotes ADD COLUMN posted_channel_id INTEGER",
-            "ALTER TABLE quotes ADD COLUMN posted_message_id INTEGER",
+        """Additive Postgres migrations via schema_migrations."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            "SELECT COALESCE(MAX(version), 0) AS v FROM schema_migrations"
         )
-        for sql in migrations:
-            try:
-                await self._db.execute(sql)
-            except Exception:
-                pass  # column already exists
-
-        cursor = await self._db.execute("PRAGMA user_version")
         row = await cursor.fetchone()
-        version = int(row[0]) if row else 0
-        if version < 1:
-            await self._db.execute(
-                "UPDATE guilds SET statistics_enabled = 1, personal_roles_enabled = 1"
-            )
-            await self._db.execute("PRAGMA user_version = 1")
-        if version < 2:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE birthdays ADD COLUMN emoji TEXT NOT NULL DEFAULT '👤'"
-                )
-            except Exception:
-                pass
-            await self._db.execute("PRAGMA user_version = 2")
-        if version < 3:
-            cursor = await self._db.execute("SELECT guild_id, user_id FROM birthdays")
-            rows = await cursor.fetchall()
-            for row in rows:
-                await self._db.execute(
-                    "UPDATE birthdays SET emoji = ? WHERE guild_id = ? AND user_id = ?",
-                    (pick_birthday_emoji(int(row["user_id"])), row["guild_id"], row["user_id"]),
-                )
-            await self._db.execute("PRAGMA user_version = 3")
-        if version < 4:
-            await self._db.execute("UPDATE guilds SET personal_roles_enabled = 1")
-            await self._db.execute("PRAGMA user_version = 4")
-        if version < 5:
-            cursor = await self._db.execute("SELECT guild_id, user_id, emoji FROM birthdays")
-            rows = await cursor.fetchall()
-            for row in rows:
-                cleaned = clean_birthday_emoji(str(row["emoji"]))
-                if cleaned != row["emoji"]:
-                    await self._db.execute(
-                        "UPDATE birthdays SET emoji = ? WHERE guild_id = ? AND user_id = ?",
-                        (cleaned, row["guild_id"], row["user_id"]),
-                    )
-            await self._db.execute("PRAGMA user_version = 5")
-        if version < 6:
-            for sql in (
-                "ALTER TABLE guilds ADD COLUMN birthday_star_role_id INTEGER",
-                """
-                CREATE TABLE IF NOT EXISTS birthday_star_grants (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    hidden_role_ids TEXT NOT NULL DEFAULT '[]',
-                    granted_on TEXT NOT NULL,
-                    PRIMARY KEY (guild_id, user_id),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                )
-                """,
-            ):
-                try:
-                    await self._db.execute(sql)
-                except Exception:
-                    pass
-            await self._db.execute("PRAGMA user_version = 6")
-        if version < 7:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE quotes ADD COLUMN number INTEGER NOT NULL DEFAULT 0"
-                )
-            except Exception:
-                pass
-            cursor = await self._db.execute("SELECT id, number FROM quotes")
-            rows = await cursor.fetchall()
-            for row in rows:
-                if not row["number"]:
-                    await self._db.execute(
-                        "UPDATE quotes SET number = ? WHERE id = ?",
-                        (row["id"], row["id"]),
-                    )
-            await self._db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_quotes_guild_number "
-                "ON quotes (guild_id, number)"
-            )
-            await self._db.execute("PRAGMA user_version = 7")
-        if version < 8:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE quotes ADD COLUMN author_ids TEXT NOT NULL DEFAULT '[]'"
-                )
-            except Exception:
-                pass
-            cursor = await self._db.execute("SELECT id, author_id, author_ids FROM quotes")
-            rows = await cursor.fetchall()
-            for row in rows:
-                raw = row["author_ids"] if "author_ids" in row.keys() else "[]"
-                try:
-                    parsed = json.loads(raw or "[]")
-                except Exception:
-                    parsed = []
-                if parsed or not row["author_id"]:
-                    continue
-                await self._db.execute(
-                    "UPDATE quotes SET author_ids = ? WHERE id = ?",
-                    (json.dumps([int(row["author_id"])]), row["id"]),
-                )
-            await self._db.execute("PRAGMA user_version = 8")
-        if version < 9:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE events ADD COLUMN number INTEGER NOT NULL DEFAULT 0"
-                )
-            except Exception:
-                pass
-            await self._db.execute(
-                "DELETE FROM events WHERE status IN ('cancelled', 'completed')"
-            )
-            cursor = await self._db.execute(
-                "SELECT DISTINCT guild_id FROM events WHERE status = 'scheduled'"
-            )
-            guild_rows = await cursor.fetchall()
-            for guild_row in guild_rows:
-                guild_id = int(guild_row["guild_id"])
-                scheduled = await self._db.execute(
-                    "SELECT id FROM events WHERE guild_id = ? AND status = 'scheduled' "
-                    "ORDER BY starts_at, id",
-                    (guild_id,),
-                )
-                event_rows = await scheduled.fetchall()
-                for index, event_row in enumerate(event_rows, start=1):
-                    await self._db.execute(
-                        "UPDATE events SET number = ? WHERE id = ?",
-                        (-index, event_row["id"]),
-                    )
-                for index, event_row in enumerate(event_rows, start=1):
-                    await self._db.execute(
-                        "UPDATE events SET number = ? WHERE id = ?",
-                        (index, event_row["id"]),
-                    )
-            await self._db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_guild_number "
-                "ON events (guild_id, number)"
-            )
-            await self._db.execute("PRAGMA user_version = 9")
-        if version < 10:
-            for sql in (
-                "ALTER TABLE guilds ADD COLUMN fest_channel_id INTEGER",
-                "ALTER TABLE guilds ADD COLUMN tgk_channel_id INTEGER",
-                "ALTER TABLE guilds ADD COLUMN fest_staff_role_id INTEGER",
-                "ALTER TABLE guilds ADD COLUMN fest_ping_role_id INTEGER",
-                "ALTER TABLE guilds ADD COLUMN fest_reminder_minutes INTEGER NOT NULL DEFAULT 60",
-                "ALTER TABLE guilds ADD COLUMN tgk_board_message_id INTEGER",
-            ):
-                try:
-                    await self._db.execute(sql)
-                except Exception:
-                    pass
-            await self._db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS festivals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER NOT NULL,
-                    number INTEGER NOT NULL,
-                    starts_at TEXT NOT NULL,
-                    channel_id INTEGER,
-                    message_id INTEGER,
-                    winner_user_id INTEGER,
-                    winner_film TEXT,
-                    status TEXT NOT NULL DEFAULT 'open'
-                        CHECK (status IN ('open', 'closed')),
-                    reminder_sent INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    UNIQUE (guild_id, number),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS festival_films (
-                    festival_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    PRIMARY KEY (festival_id, user_id),
-                    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
-                );
-                CREATE TABLE IF NOT EXISTS tg_channels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    number INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    image_url TEXT,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    UNIQUE (guild_id, number),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                );
-                """
-            )
-            await self._db.execute("PRAGMA user_version = 10")
-        if version < 11:
-            try:
-                await self._db.execute("ALTER TABLE festival_films ADD COLUMN image_url TEXT")
-            except Exception:
-                pass
-            await self._db.execute("PRAGMA user_version = 11")
-        if version < 12:
-            await self._db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS festival_blocked_films (
-                    guild_id INTEGER NOT NULL,
-                    title_key TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    PRIMARY KEY (guild_id, title_key),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                );
-                """
-            )
-            cursor = await self._db.execute(
-                "SELECT guild_id, winner_film FROM festivals "
-                "WHERE winner_film IS NOT NULL AND trim(winner_film) != ''"
-            )
-            for row in await cursor.fetchall():
-                title = " ".join(str(row["winner_film"]).split())
-                key = title.casefold()
-                if not key:
-                    continue
-                await self._db.execute(
-                    """
-                    INSERT OR IGNORE INTO festival_blocked_films (guild_id, title_key, title)
-                    VALUES (?, ?, ?)
-                    """,
-                    (row["guild_id"], key, title),
-                )
-            await self._db.execute("PRAGMA user_version = 12")
-        if version < 13:
-            from bot.services.festival_service import film_title_key
-
-            cursor = await self._db.execute(
-                "SELECT guild_id, title FROM festival_blocked_films"
-            )
-            kept: dict[tuple[int, str], str] = {}
-            for row in await cursor.fetchall():
-                key = film_title_key(row["title"])
-                if not key:
-                    continue
-                kept.setdefault((int(row["guild_id"]), key), str(row["title"]))
-            await self._db.execute("DELETE FROM festival_blocked_films")
-            for (guild_id, key), title in kept.items():
-                await self._db.execute(
-                    """
-                    INSERT INTO festival_blocked_films (guild_id, title_key, title)
-                    VALUES (?, ?, ?)
-                    """,
-                    (guild_id, key, title),
-                )
-            await self._db.execute("PRAGMA user_version = 13")
-        if version < 14:
-            try:
-                await self._db.execute("ALTER TABLE festival_films ADD COLUMN age_rating TEXT")
-            except Exception:
-                pass
-            await self._db.execute("PRAGMA user_version = 14")
-        if version < 15:
-            cursor = await self._db.execute(
-                "SELECT guild_id FROM festivals GROUP BY guild_id"
-            )
-            guild_ids = [int(row["guild_id"]) for row in await cursor.fetchall()]
-            for guild_id in guild_ids:
-                cursor = await self._db.execute(
-                    """
-                    SELECT id, number FROM festivals
-                    WHERE guild_id = ? ORDER BY number ASC, id ASC
-                    """,
-                    (guild_id,),
-                )
-                rows = await cursor.fetchall()
-                if not rows:
-                    continue
-                min_number = min(int(row["number"]) for row in rows)
-                if min_number >= FESTIVAL_START_NUMBER:
-                    continue
-                offset = FESTIVAL_START_NUMBER - min_number
-                for row in rows:
-                    await self._db.execute(
-                        "UPDATE festivals SET number = ? WHERE id = ?",
-                        (-int(row["id"]), row["id"]),
-                    )
-                for row in rows:
-                    await self._db.execute(
-                        "UPDATE festivals SET number = ? WHERE id = ?",
-                        (int(row["number"]) + offset, row["id"]),
-                    )
-            await self._db.execute("PRAGMA user_version = 15")
-        if version < 16:
-            try:
-                await self._db.execute("ALTER TABLE guilds ADD COLUMN config_role_id INTEGER")
-            except Exception:
-                pass
-            await self._db.execute("PRAGMA user_version = 16")
-        if version < 17:
-            for sql in (
-                "ALTER TABLE festival_films ADD COLUMN runtime_minutes INTEGER",
-                """
-                CREATE TABLE IF NOT EXISTS festival_ratings (
-                    festival_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 10),
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    PRIMARY KEY (festival_id, user_id),
-                    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
-                )
-                """,
-            ):
-                try:
-                    await self._db.execute(sql)
-                except Exception:
-                    pass
-            await self._db.execute("PRAGMA user_version = 17")
-        if version < 18:
-            for sql in (
-                "ALTER TABLE birthday_notifications ADD COLUMN channel_id INTEGER",
-                "ALTER TABLE birthday_notifications ADD COLUMN message_id INTEGER",
-            ):
-                try:
-                    await self._db.execute(sql)
-                except Exception:
-                    pass
-            await self._db.execute("PRAGMA user_version = 18")
-        if version < 19:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE events ADD COLUMN ping_role_id INTEGER"
-                )
-            except Exception:
-                pass
-            await self._db.execute("PRAGMA user_version = 19")
-        if version < 20:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE guilds ADD COLUMN tgk_list_role_id INTEGER"
-                )
-            except Exception:
-                pass
-            await self._db.execute("PRAGMA user_version = 20")
-        if version < 21:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE guilds ADD COLUMN tgk_board_message_ids TEXT NOT NULL DEFAULT '[]'"
-                )
-            except Exception:
-                pass
-            cursor = await self._db.execute(
-                "SELECT guild_id, tgk_board_message_id FROM guilds "
-                "WHERE tgk_board_message_id IS NOT NULL"
-            )
-            rows = await cursor.fetchall()
-            for row in rows:
-                await self._db.execute(
-                    "UPDATE guilds SET tgk_board_message_ids = ? WHERE guild_id = ?",
-                    (json.dumps([int(row["tgk_board_message_id"])]), int(row["guild_id"])),
-                )
-            await self._db.execute("PRAGMA user_version = 21")
-        if version < 22:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE tg_channels ADD COLUMN description TEXT"
-                )
-            except Exception:
-                pass
-            await self._db.execute("PRAGMA user_version = 22")
-        if version < 23:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE tg_channels ADD COLUMN telegram_chat_id INTEGER"
-                )
-            except Exception:
-                pass
-            await self._db.execute("PRAGMA user_version = 23")
-        if version < 24:
+        version = int(row["v"]) if row else 0
+        if version < 33:
             await self._db.execute(
                 """
-                CREATE TABLE IF NOT EXISTS festival_rating_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    festival_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    score INTEGER NOT NULL CHECK (score BETWEEN 1 AND 10),
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_festival_rating_logs_fest
-                ON festival_rating_logs(festival_id, created_at, id)
-                """
-            )
-            await self._db.execute(
-                """
-                INSERT INTO festival_rating_logs (festival_id, user_id, score, created_at)
-                SELECT r.festival_id, r.user_id, r.score, r.created_at
-                FROM festival_ratings r
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM festival_rating_logs l
-                    WHERE l.festival_id = r.festival_id AND l.user_id = r.user_id
-                )
-                """
-            )
-            await self._db.execute("PRAGMA user_version = 24")
-        if version < 25:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE guilds ADD COLUMN fest_presence_check "
-                    "INTEGER NOT NULL DEFAULT 1"
-                )
-            except Exception:
-                pass
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS festival_voice_segments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    festival_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    started_at TEXT NOT NULL,
-                    ended_at TEXT,
-                    FOREIGN KEY (festival_id) REFERENCES festivals(id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_festival_voice_open
-                ON festival_voice_segments(festival_id, user_id, ended_at)
-                """
-            )
-            await self._db.execute("PRAGMA user_version = 25")
-        if version < 26:
-            for sql in (
-                "ALTER TABLE guilds ADD COLUMN tarot_reset_minutes INTEGER NOT NULL DEFAULT 10",
-                "ALTER TABLE guilds ADD COLUMN tarot_show_meaning INTEGER NOT NULL DEFAULT 1",
-            ):
-                try:
-                    await self._db.execute(sql)
-                except Exception:
-                    pass
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS tarot_draws (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    card_id TEXT NOT NULL,
-                    reversed INTEGER NOT NULL DEFAULT 0,
-                    drawn_at TEXT NOT NULL,
-                    PRIMARY KEY (guild_id, user_id, card_id),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute("PRAGMA user_version = 26")
-        if version < 27:
-            try:
-                await self._db.execute(
-                    "ALTER TABLE guilds ADD COLUMN santa_channel_id INTEGER"
-                )
-            except Exception:
-                pass
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS santa_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER NOT NULL,
-                    number INTEGER NOT NULL,
-                    channel_id INTEGER,
-                    message_id INTEGER,
-                    drawn INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE,
-                    UNIQUE (guild_id, number)
-                )
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS santa_entries (
-                    event_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    address TEXT NOT NULL,
-                    wishlist_url TEXT NOT NULL,
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    PRIMARY KEY (event_id, user_id),
-                    FOREIGN KEY (event_id) REFERENCES santa_events(id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS santa_assignments (
-                    event_id INTEGER NOT NULL,
-                    giver_id INTEGER NOT NULL,
-                    receiver_id INTEGER NOT NULL,
-                    PRIMARY KEY (event_id, giver_id),
-                    FOREIGN KEY (event_id) REFERENCES santa_events(id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute("PRAGMA user_version = 27")
-        if version < 28:
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS voice_snippets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    text TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    processed INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_voice_snippets_pending
-                ON voice_snippets(guild_id, user_id, processed)
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS voice_dossier (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    fact TEXT NOT NULL,
-                    source_date TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_voice_dossier_user
-                ON voice_dossier(guild_id, user_id, created_at)
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS voice_swear_stats (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    day TEXT NOT NULL,
-                    count INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (guild_id, user_id, day),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute("PRAGMA user_version = 28")
-        if version < 29:
-            await self._db.execute(
-                "ALTER TABLE guilds ADD COLUMN voice_chat_transcripts "
-                "INTEGER NOT NULL DEFAULT 1"
-            )
-            await self._db.execute("PRAGMA user_version = 29")
-        if version < 30:
-            for column in ("voice_listen_channel_id", "voice_announce_channel_id"):
-                try:
-                    await self._db.execute(
-                        f"ALTER TABLE guilds ADD COLUMN {column} INTEGER"
-                    )
-                except Exception as exc:
-                    # Seed/hotfix may have added the column before user_version bump.
-                    if "duplicate column" not in str(exc).lower():
-                        raise
-            await self._db.execute("PRAGMA user_version = 30")
-        if version < 31:
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS daily_text_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL DEFAULT 0,
-                    source TEXT NOT NULL CHECK (source IN ('chat', 'voice')),
-                    text TEXT NOT NULL,
-                    day TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-                )
-                """
-            )
-            await self._db.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_daily_text_logs_guild_day_user
-                ON daily_text_logs(guild_id, day, user_id)
-                """
-            )
-            await self._db.execute("PRAGMA user_version = 31")
-        if version < 32:
-            await self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS member_profiles (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    gender TEXT NOT NULL DEFAULT 'u'
-                        CHECK (gender IN ('f', 'm', 'u')),
-                    score_f INTEGER NOT NULL DEFAULT 0,
-                    score_m INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                CREATE TABLE IF NOT EXISTS voice_listen_muted (
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
                     PRIMARY KEY (guild_id, user_id),
                     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
                 )
                 """
             )
-            await self._db.execute("PRAGMA user_version = 32")
+            await self._db.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?)",
+                (33,),
+            )
+            version = 33
+        log.debug("schema version=%s", version)
 
     async def close(self) -> None:
         if self._db is not None:
             await self._db.close()
             self._db = None
+            self._pool = None
             log.info("Database closed")
 
     async def ensure_guild(self, guild_id: int) -> GuildConfig:
@@ -2058,13 +1581,18 @@ class Database:
 
     # --- Festivals ---
 
+    def _festival_seed(self, guild_id: int) -> int:
+        """Home guild continues from 29; other guilds start at #1."""
+        return FESTIVAL_START_NUMBER - 1 if is_home_guild(guild_id) else 0
+
     async def next_festival_number(self, guild_id: int) -> int:
+        seed = self._festival_seed(guild_id)
         cursor = await self.connection.execute(
             "SELECT COALESCE(MAX(number), ?) + 1 AS n FROM festivals WHERE guild_id = ?",
-            (FESTIVAL_START_NUMBER - 1, guild_id),
+            (seed, guild_id),
         )
         row = await cursor.fetchone()
-        return int(row["n"]) if row else FESTIVAL_START_NUMBER
+        return int(row["n"]) if row else seed + 1
 
     async def create_festival(self, guild_id: int, starts_at: str) -> Festival:
         await self.ensure_guild(guild_id)
@@ -2147,12 +1675,13 @@ class Database:
         festivals = [Festival.from_row(row) for row in await cursor.fetchall()]
         if not festivals:
             return []
-        for index, festival in enumerate(festivals, start=FESTIVAL_START_NUMBER):
+        start_number = self._festival_seed(guild_id) + 1
+        for index, festival in enumerate(festivals, start=start_number):
             await self.connection.execute(
                 "UPDATE festivals SET number = ? WHERE id = ?",
                 (-index, festival.id),
             )
-        for index, festival in enumerate(festivals, start=FESTIVAL_START_NUMBER):
+        for index, festival in enumerate(festivals, start=start_number):
             await self.connection.execute(
                 "UPDATE festivals SET number = ? WHERE id = ?",
                 (index, festival.id),
@@ -3170,3 +2699,44 @@ class Database:
         )
         await self.connection.commit()
         return cursor.rowcount
+
+    # --- Voice listen mute ---
+
+    async def is_voice_listen_muted(self, guild_id: int, user_id: int) -> bool:
+        cursor = await self.connection.execute(
+            "SELECT 1 FROM voice_listen_muted WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        return await cursor.fetchone() is not None
+
+    async def toggle_voice_listen_muted(self, guild_id: int, user_id: int) -> bool:
+        """Toggle mute; returns True if user is muted after the call."""
+        await self.ensure_guild(guild_id)
+        if await self.is_voice_listen_muted(guild_id, user_id):
+            await self.connection.execute(
+                "DELETE FROM voice_listen_muted WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id),
+            )
+            await self.connection.commit()
+            return False
+        await self.connection.execute(
+            "INSERT INTO voice_listen_muted (guild_id, user_id) VALUES (?, ?)",
+            (guild_id, user_id),
+        )
+        await self.connection.commit()
+        return True
+
+    async def list_voice_listen_muted(self, guild_id: int) -> list[int]:
+        cursor = await self.connection.execute(
+            "SELECT user_id FROM voice_listen_muted WHERE guild_id = ?",
+            (guild_id,),
+        )
+        rows = await cursor.fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    async def list_all_voice_listen_muted(self) -> list[tuple[int, int]]:
+        cursor = await self.connection.execute(
+            "SELECT guild_id, user_id FROM voice_listen_muted"
+        )
+        rows = await cursor.fetchall()
+        return [(int(row["guild_id"]), int(row["user_id"])) for row in rows]

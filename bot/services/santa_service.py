@@ -13,7 +13,7 @@ import discord
 
 from bot.database.database import Database
 from bot.database.models import GuildConfig, SantaEntry, SantaEvent
-from bot.utils.permissions import is_guild_admin
+from bot.utils.permissions import can_staff
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -34,13 +34,14 @@ def member_server_nick(member: discord.Member) -> str:
 
 
 def has_kino_role(member: discord.Member, config: GuildConfig) -> bool:
-    if config.fest_staff_role_id is None:
-        return False
-    return any(role.id == config.fest_staff_role_id for role in member.roles)
+    # Legacy name — staff is owner or guild admin (Кино role removed).
+    _ = config
+    return can_staff(member)
 
 
 def can_santa_draw(member: discord.Member, config: GuildConfig) -> bool:
-    return is_guild_admin(member) or has_kino_role(member, config)
+    _ = config
+    return can_staff(member)
 
 
 def normalize_wishlist_url(raw: str) -> str:
@@ -91,7 +92,7 @@ class SantaService:
     async def require_active(self, guild_id: int) -> SantaEvent:
         event = await self.db.get_active_santa_event(guild_id)
         if event is None:
-            raise ValueError("Нет активного тайного санты — сначала /админ santa_start")
+            raise ValueError("Нет активного тайного санты — сначала /.admin santa_start")
         return event
 
     async def create_event(self, guild_id: int) -> tuple[SantaEvent, SantaEvent | None]:

@@ -1,17 +1,13 @@
-"""Telegram channel slash commands."""
+"""Telegram channel board sync (slash add/remove removed — use board buttons)."""
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
-import discord
-from discord import app_commands
 from discord.ext import commands
 
-from bot.utils.embeds import error_embed, success_embed
-from bot.utils.permissions import is_guild_admin
-from bot.views.tgk_views import TgkAddModal, refresh_tgk_board, register_tgk_board_views
+from bot.views.tgk_views import register_tgk_board_views
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -35,35 +31,6 @@ class TgkCog(commands.Cog):
             except Exception:
                 log.exception("Failed to sync TGK board for guild %s", guild.id)
         await register_tgk_board_views(self.bot)
-
-    tgk = app_commands.Group(name="tgk", description="Телеграм-каналы участников")
-
-    @tgk.command(name="add", description="Добавить свой ТГК")
-    @app_commands.guild_only()
-    async def tgk_add(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_modal(TgkAddModal(self.bot))
-
-    @tgk.command(name="remove", description="Удалить ТГК по номеру")
-    @app_commands.describe(number="Номер с доски")
-    @app_commands.guild_only()
-    async def tgk_remove(self, interaction: discord.Interaction, number: int) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        try:
-            channel = await self.bot.tgk_service.remove(
-                interaction.guild.id,
-                number,
-                interaction.user.id,
-                is_admin=is_guild_admin(interaction.user),
-            )
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        await refresh_tgk_board(self.bot, interaction.guild)
-        await interaction.response.send_message(
-            embed=success_embed(f"ТГК #{channel.number} удалён"),
-            ephemeral=True,
-        )
 
 
 async def setup(bot: ErundaBot) -> None:

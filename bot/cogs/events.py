@@ -9,8 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.utils.embeds import base_embed, error_embed, success_embed
-from bot.utils.formatting import role_mention
+from bot.utils.embeds import error_embed, success_embed
 from bot.views.event_views import (
     EventCancelConfirmView,
     EventCreateModal,
@@ -75,102 +74,6 @@ class EventsCog(commands.Cog):
             )
         )
 
-    @event.command(name="list", description="Список ивентов")
-    @app_commands.guild_only()
-    async def event_list(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        events = await self.bot.event_service.list_scheduled(interaction.guild.id)
-        if not events:
-            await interaction.response.send_message(
-                embed=base_embed(title="Ивенты", description="Пока нет запланированных ивентов."),
-                ephemeral=True,
-            )
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        lines: list[str] = []
-        for ev in events[:15]:
-            date_label, _time_label = self.bot.event_service.format_starts_at(ev, config.timezone)
-            count = await self.bot.event_service.participant_count(ev.id)
-            time_label = self.bot.event_service.time_display(ev, config.timezone)
-            status = time_label if time_label in {"Идёт", "Закончился"} else f"{date_label} {time_label}"
-            line = (
-                f"**#{ev.number}** {ev.title} — {status} · {count} чел. · "
-                f"{role_mention(ev.ping_role_id)}"
-            )
-            channel_id = ev.channel_id or config.events_channel_id
-            if channel_id and ev.message_id:
-                url = f"https://discord.com/channels/{ev.guild_id}/{channel_id}/{ev.message_id}"
-                line += f" — [открыть]({url})"
-            lines.append(line)
-        await interaction.response.send_message(
-            embed=base_embed(title="Ивенты", description="\n".join(lines)),
-            ephemeral=True,
-        )
-
-    @event.command(name="ping", description="Пингануть участников ивента")
-    @app_commands.describe(number="Номер ивента из /event list")
-    @app_commands.guild_only()
-    async def event_ping(self, interaction: discord.Interaction, number: int) -> None:
-        if interaction.guild is None:
-            return
-        event = await self.bot.event_service.get_by_number(interaction.guild.id, number)
-        if event is None:
-            await interaction.response.send_message(
-                embed=error_embed("Ивент не найден"),
-                ephemeral=True,
-            )
-            return
-        if not self.bot.event_service.is_pingable(event):
-            await interaction.response.send_message(
-                embed=error_embed("Этот ивент больше нельзя пинговать"),
-                ephemeral=True,
-            )
-            return
-        participants = await self.bot.event_service.participants_for_display(event)
-        if not participants:
-            await interaction.response.send_message(
-                embed=error_embed("Никто не присоединился к ивенту"),
-                ephemeral=True,
-            )
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        channel_id = event.channel_id or config.events_channel_id or interaction.channel_id
-        channel = interaction.guild.get_channel(channel_id) if channel_id else None
-        if channel is None or not hasattr(channel, "send"):
-            await interaction.response.send_message(
-                embed=error_embed("Некуда отправить пинг"),
-                ephemeral=True,
-            )
-            return
-        text = self.bot.event_service.participant_ping_content(
-            event,
-            participants,
-            mode=self.bot.event_service.manual_ping_mode(event),
-        )
-        if text is None:
-            await interaction.response.send_message(
-                embed=error_embed("Некого пинговать"),
-                ephemeral=True,
-            )
-            return
-        await channel.send(text)
-        await interaction.response.send_message(
-            embed=success_embed("Пинг отправлен"),
-            ephemeral=True,
-        )
-
-    @event_ping.autocomplete("number")
-    async def event_ping_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[int]]:
-        if interaction.guild is None:
-            return []
-        events = await self.bot.event_service.list_pingable(interaction.guild.id)
-        return await self._event_number_autocomplete(interaction, current, events)
-
     async def _event_number_autocomplete(
         self,
         interaction: discord.Interaction,
@@ -197,7 +100,7 @@ class EventsCog(commands.Cog):
         return choices
 
     @event.command(name="cancel", description="Отменить ивент (создатель)")
-    @app_commands.describe(number="Номер ивента из /event list")
+    @app_commands.describe(number="Номер ивента")
     @app_commands.guild_only()
     async def event_cancel(self, interaction: discord.Interaction, number: int) -> None:
         if interaction.guild is None:
@@ -235,7 +138,7 @@ class EventsCog(commands.Cog):
         return await self._event_number_autocomplete(interaction, current, events)
 
     @event.command(name="ended", description="Завершить ивент (создатель)")
-    @app_commands.describe(number="Номер ивента из /event list")
+    @app_commands.describe(number="Номер ивента")
     @app_commands.guild_only()
     async def event_ended(self, interaction: discord.Interaction, number: int) -> None:
         if interaction.guild is None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 
 import discord
 from discord.ext import commands
@@ -41,6 +40,7 @@ COG_MODULES = (
     "bot.cogs.santa",
     "bot.cogs.quotes",
     "bot.cogs.roles",
+    "bot.cogs.voice",
 )
 
 
@@ -48,7 +48,7 @@ class ErundaBot(commands.Bot):
     def __init__(
         self,
         *,
-        database_path: str | Path,
+        database_url: str,
         default_timezone: str = "Europe/Moscow",
     ) -> None:
         intents = discord.Intents.default()
@@ -62,7 +62,7 @@ class ErundaBot(commands.Bot):
 
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
 
-        self.db = Database(database_path, default_timezone=default_timezone)
+        self.db = Database(database_url, default_timezone=default_timezone)
         self.config_service = ConfigService(self.db)
         self.birthday_service = BirthdayService(self.db)
         self.birthday_star_service = BirthdayStarService(self.db)
@@ -124,6 +124,8 @@ def create_bot_from_env() -> ErundaBot:
     if not token:
         raise RuntimeError("DISCORD_TOKEN is not set")
 
-    database_path = os.getenv("DATABASE_PATH", "./data/erunda.db")
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not set")
     default_timezone = os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow")
-    return ErundaBot(database_path=database_path, default_timezone=default_timezone)
+    return ErundaBot(database_url=database_url, default_timezone=default_timezone)

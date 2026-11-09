@@ -1,4 +1,4 @@
-"""Birthday slash commands."""
+"""Birthday board sync (slash set/remove removed — use board buttons)."""
 
 from __future__ import annotations
 
@@ -7,12 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-import discord
-from discord import app_commands
 from discord.ext import commands
-
-from bot.utils.embeds import error_embed, success_embed
-from bot.views.birthday_views import BirthdaySetModal, refresh_birthday_board
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -57,38 +52,6 @@ class BirthdaysCog(commands.Cog):
                         guild.id,
                     )
         self._old_greetings_cleaned = True
-
-    birthday = app_commands.Group(name="birthday", description="Дни рождения")
-
-    @birthday.command(name="set", description="Указать / изменить дату")
-    @app_commands.guild_only()
-    async def birthday_set(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        await interaction.response.send_modal(
-            BirthdaySetModal(self.bot, interaction.guild.id, interaction.user.id)
-        )
-
-    @birthday.command(name="remove", description="Удалить свой день рождения")
-    @app_commands.guild_only()
-    async def birthday_remove(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            return
-        removed = await self.bot.birthday_service.remove_birthday(
-            interaction.guild.id,
-            interaction.user.id,
-        )
-        if not removed:
-            await interaction.response.send_message(
-                embed=error_embed("День рождения не найден"),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            embed=success_embed("День рождения удалён"),
-            ephemeral=True,
-        )
-        await refresh_birthday_board(self.bot, interaction.guild)
 
 
 async def setup(bot: ErundaBot) -> None:

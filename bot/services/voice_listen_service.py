@@ -12,6 +12,7 @@ import tempfile
 import wave
 from collections import defaultdict
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -20,6 +21,7 @@ from discord.opus import OpusError
 
 from bot.database.database import Database
 from bot.services.ai_service import HEYGEN_VOICES, OpenRouterCreditsExhausted
+from bot.settings import is_home_guild
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -197,6 +199,7 @@ AISA_GREETING_TEXT = "здравствуйте госпожа"
 AISA_GREETING_VOICE = "gareth"
 AISA_GREETING_DELAY_SECONDS = 2.0
 AISA_GREETING_COOLDOWN_SECONDS = 20.0
+AISA_TTS_CACHE_PATH = Path("data/tts_cache/aisa_gareth.pcm")
 # 16-bit PCM RMS below this ≈ silence / decrypt garbage.
 MIN_PCM_RMS = 250
 _VOICE_RECV_PATCHED = False
@@ -790,6 +793,7 @@ class VoiceListenService:
         self._sound_cooldown_until: dict[int, float] = {}
         self._tts_play_lock = asyncio.Lock()
         self._tts_cache: dict[tuple[str, str], bytes] = {}
+        self._voice_muted: dict[int, set[int]] = defaultdict(set)
         self._aisa_greeting_cooldown_until: dict[int, float] = {}
         self._announce_channels: dict[int, int] = {}
         self._pcm_packets: dict[int, int] = defaultdict(int)
@@ -832,7 +836,26 @@ class VoiceListenService:
 
     async def start(self, bot: ErundaBot) -> None:
         self._ensure_watchdog(bot)
+        await self.reload_voice_muted_cache()
         asyncio.create_task(self._restore_sessions(bot))
+
+    async def reload_voice_muted_cache(self) -> None:
+        try:
+            rows = await self.db.list_all_voice_listen_muted()
+        except Exception:
+            log.exception("Failed to load voice_listen_muted cache")
+            return
+        muted: dict[int, set[int]] = defaultdict(set)
+        for guild_id, user_id in rows:
+            muted[int(guild_id)].add(int(user_id))
+        self._voice_muted = muted
+
+    def set_user_muted(self, guild_id: int, user_id: int, muted: bool) -> None:
+        bucket = self._voice_muted.setdefault(guild_id, set())
+        if muted:
+            bucket.add(user_id)
+        else:
+            bucket.discard(user_id)
 
     async def stop_all(self) -> None:
         if self._flush_task is not None:
@@ -1070,6 +1093,8 @@ class VoiceListenService:
                 return
             # Decay instead of hard reset — flapping known/unknown must still escalate.
             self._unknown_streak[guild.id] = max(0, self._unknown_streak[guild.id] - 8)
+            if user_id in self._voice_muted.get(guild.id, set()):
+                return
             pcm = getattr(data, "pcm", None)
             if not pcm:
                 # DAVE/Opus failure returns empty VoiceData while RTP still flows.
@@ -1986,6 +2011,9 @@ class VoiceListenService:
         *,
         label: str,
     ) -> None:
+        if not is_home_guild(guild_id):
+            log.info("%s skipped: non-home guild %s", label, guild_id)
+            return
         now = datetime.now(timezone.utc).timestamp()
         until = self._sound_cooldown_until.get(guild_id, 0.0)
         if now < until:
@@ -2118,6 +2146,30 @@ class VoiceListenService:
         target = AISA_USERNAME.casefold()
         return name == target or global_name == target
 
+    def _aisa_disk_cache_key(self, text: str, voice: str) -> bool:
+        return (
+            voice.casefold().strip() == AISA_GREETING_VOICE
+            and text.strip() == AISA_GREETING_TEXT
+        )
+
+    def _read_aisa_disk_cache(self) -> bytes | None:
+        try:
+            if AISA_TTS_CACHE_PATH.is_file():
+                data = AISA_TTS_CACHE_PATH.read_bytes()
+                if data:
+                    return data
+        except OSError:
+            log.exception("Failed to read Aisa TTS disk cache")
+        return None
+
+    def _write_aisa_disk_cache(self, audio: bytes) -> None:
+        try:
+            AISA_TTS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            AISA_TTS_CACHE_PATH.write_bytes(audio)
+            log.info("Saved Aisa TTS disk cache (%s bytes)", len(audio))
+        except OSError:
+            log.exception("Failed to write Aisa TTS disk cache")
+
     async def synthesize_cached(
         self,
         text: str,
@@ -2128,11 +2180,18 @@ class VoiceListenService:
         cached = self._tts_cache.get(key)
         if cached:
             return cached
+        if self._aisa_disk_cache_key(text, voice):
+            disk = self._read_aisa_disk_cache()
+            if disk:
+                self._tts_cache[key] = disk
+                return disk
         audio = await self.ai.synthesize_speech(text, voice=voice, response_format="pcm")
         # Bound cache size — keep greetings / recent admin lines.
         if len(self._tts_cache) >= 24:
             self._tts_cache.pop(next(iter(self._tts_cache)))
         self._tts_cache[key] = audio
+        if self._aisa_disk_cache_key(text, voice):
+            self._write_aisa_disk_cache(audio)
         return audio
 
     @staticmethod
@@ -2163,7 +2222,7 @@ class VoiceListenService:
             raise ValueError("Пустое аудио")
         vc = self._clients.get(guild_id)
         if vc is None or not vc.is_connected():
-            raise ValueError("Бот не в голосовом канале — сначала /админ voice_listen")
+            raise ValueError("Бот не в голосовом канале — сначала /.admin voice_listen")
         if not isinstance(getattr(vc, "channel", None), discord.VoiceChannel):
             raise ValueError("TTS только в обычном войсе (не stage)")
 

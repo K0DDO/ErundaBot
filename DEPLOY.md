@@ -15,11 +15,24 @@ ssh deploy@107.172.44.182
 git clone https://github.com/K0DDO/ErundaBot.git ~/erunda
 cd ~/erunda
 cp .env.production.example .env.production
-# заполнить DISCORD_TOKEN, GROQ_API_KEY, OPENROUTER_API_KEY и TELEGRAM_BOT_TOKEN в .env.production
+# заполнить DISCORD_TOKEN, OWNER_USER_ID, GROQ_API_KEY, OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN
+# DATABASE_URL уже указывает на сервис postgres в compose
 mkdir -p data
+docker compose --env-file .env.production up -d postgres
+# дождаться healthy, затем (если есть старый SQLite) миграция:
+# docker compose run --rm -e DATABASE_URL=postgresql://erunda:erunda@postgres:5432/erunda erunda-bot \
+#   python scripts/migrate_sqlite_to_postgres.py --sqlite /app/data/erunda.db
 docker compose --env-file .env.production up -d --build
 docker logs erunda-bot --tail 50
 ```
+
+## Миграция SQLite → Postgres (один раз)
+
+1. Бэкап `./data/erunda.db`
+2. Поднять только Postgres: `docker compose up -d postgres`
+3. Прогнать `scripts/migrate_sqlite_to_postgres.py` с `DATABASE_URL` на контейнер postgres
+4. В `.env.production` оставить `DATABASE_URL=postgresql://erunda:erunda@postgres:5432/erunda` и `OWNER_USER_ID` / `HOME_GUILD_ID`
+5. `docker compose up -d --build` и smoke-test
 
 ## Обычный деплой
 
@@ -44,5 +57,5 @@ bash scripts/deploy.sh
 ## Важно
 
 - Не трогать контейнеры Amnezia, Briefly, Berrio и др.
-- SQLite база: `./data/erunda.db` (volume)
+- Postgres volume: `erunda_pgdata`; бот всё ещё монтирует `./data` (TTS-кэш и бэкап sqlite)
 - Не выполнять `docker compose down --remove-orphans` на всём хосте

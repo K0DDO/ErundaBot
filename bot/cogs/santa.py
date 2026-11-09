@@ -11,6 +11,7 @@ from discord.ext import commands
 
 from bot.services.santa_service import can_santa_draw
 from bot.utils.embeds import error_embed, success_embed
+from bot.utils.permissions import staff_denied_reason
 from bot.views.santa_views import refresh_santa_message, register_santa_views
 
 if TYPE_CHECKING:
@@ -32,7 +33,10 @@ class SantaCog(commands.Cog):
 
     santa = app_commands.Group(name="santa", description="Тайный Санта")
 
-    @santa.command(name="start", description="Провести розыгрыш и разослать ЛС")
+    @santa.command(
+        name="start",
+        description="Провести розыгрыш и разослать ЛС (админы сервера / владелец)",
+    )
     @app_commands.guild_only()
     async def santa_start(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
@@ -40,7 +44,7 @@ class SantaCog(commands.Cog):
         config = await self.bot.config_service.get(interaction.guild.id)
         if not can_santa_draw(interaction.user, config):
             await interaction.response.send_message(
-                embed=error_embed("Нужны права администратора или роль «Кино»"),
+                embed=error_embed(staff_denied_reason()),
                 ephemeral=True,
             )
             return

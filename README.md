@@ -28,9 +28,13 @@ cp .env.example .env
 
 ```env
 DISCORD_TOKEN=your_token_here
-DATABASE_PATH=./data/erunda.db
+DATABASE_URL=postgresql://erunda:erunda@localhost:5432/erunda
+OWNER_USER_ID=your_discord_user_id
+HOME_GUILD_ID=1497627892589531202
 DEFAULT_TIMEZONE=Europe/Moscow
 ```
+
+Локально удобно: `docker compose up -d postgres`, затем бот с `DATABASE_URL` на `localhost:5432`.
 
 ## Создание Discord Application
 

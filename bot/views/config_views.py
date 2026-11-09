@@ -8,7 +8,7 @@ import discord
 
 from bot.utils.embeds import error_embed, success_embed
 from bot.utils.formatting import bool_label, channel_mention, role_mention
-from bot.utils.permissions import bot_cannot_send_reason, can_edit_config, config_denied_reason
+from bot.utils.permissions import bot_cannot_send_reason, can_staff, staff_denied_reason
 from bot.utils.timezones import is_valid_timezone
 
 if TYPE_CHECKING:
@@ -34,9 +34,7 @@ FLAG_OPTIONS = (
 )
 
 ROLE_OPTIONS = (
-    ("config_role_id", "Доступ к /админ config"),
     ("fest_ping_role_id", "Пинг кинофестиваля"),
-    ("tgk_list_role_id", "Отладка /админ tgk_debug_add"),
 )
 
 
@@ -60,11 +58,7 @@ def config_overview_embed(config: GuildConfig) -> discord.Embed:
     )
     embed.add_field(
         name="Роли",
-        value=(
-            f"Доступ к /админ config: {role_mention(config.config_role_id)}\n"
-            f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}\n"
-            f"Отладка /админ tgk_debug_add: {role_mention(config.tgk_list_role_id)}"
-        ),
+        value=f"Пинг кинофестиваля: {role_mention(config.fest_ping_role_id)}",
         inline=False,
     )
     embed.add_field(
@@ -109,13 +103,9 @@ class ConfigPanel(discord.ui.View):
         member = interaction.user
         if not isinstance(member, discord.Member):
             return False
-        config = await self.bot.config_service.get(self.guild_id)
-        if not can_edit_config(member, config.config_role_id):
+        if not can_staff(member):
             await interaction.response.send_message(
-                embed=error_embed(
-                    "Недостаточно прав",
-                    config_denied_reason(config.config_role_id),
-                ),
+                embed=error_embed("Недостаточно прав", staff_denied_reason()),
                 ephemeral=True,
             )
             return False
@@ -248,6 +238,34 @@ class ChannelPicker(discord.ui.ChannelSelect):
             from bot.views.tgk_views import refresh_tgk_board
 
             await refresh_tgk_board(self.parent_view.bot, interaction.guild)
+        if field == "santa_channel_id" and interaction.guild is not None:
+            event = await self.parent_view.bot.db.get_active_santa_event(
+                self.parent_view.guild_id
+            )
+            if event is not None and not event.drawn:
+                from bot.views.santa_views import publish_santa_message
+
+                guild = interaction.guild
+                old_channel = (
+                    guild.get_channel(event.channel_id) if event.channel_id else None
+                )
+                if (
+                    old_channel is not None
+                    and event.message_id
+                    and hasattr(old_channel, "fetch_message")
+                ):
+                    try:
+                        old_msg = await old_channel.fetch_message(event.message_id)
+                        await old_msg.delete()
+                    except Exception:
+                        pass
+                await publish_santa_message(
+                    self.parent_view.bot,
+                    guild,
+                    event,
+                    channel,
+                    save=True,
+                )
 
 
 class ChannelConfigView(discord.ui.View):

@@ -4,44 +4,45 @@ from __future__ import annotations
 
 import discord
 
+from bot.settings import OWNER_MENTION, OWNER_ONLY_HINT, OWNER_USER_ID
+
+
+def is_owner(user: discord.abc.User | discord.Member | None) -> bool:
+    if user is None or OWNER_USER_ID <= 0:
+        return False
+    return int(user.id) == OWNER_USER_ID
+
 
 def is_guild_admin(member: discord.Member) -> bool:
     perms = member.guild_permissions
     return bool(perms.administrator or perms.manage_guild)
 
 
+def can_staff(member: discord.Member) -> bool:
+    """Owner or guild admin — replaces former Кино / config_role checks."""
+    return is_owner(member) or is_guild_admin(member)
+
+
+def staff_denied_reason() -> str:
+    return (
+        f"Нужны права администратора / Manage Server или доступ владельца "
+        f"({OWNER_MENTION})."
+    )
+
+
 def can_edit_config(member: discord.Member, config_role_id: int | None = None) -> bool:
-    if config_role_id is None:
-        return True
-    if any(role.id == config_role_id for role in member.roles):
-        return True
-    return is_guild_admin(member)
+    # config_role_id ignored — kept for call-site compatibility during refactor.
+    _ = config_role_id
+    return can_staff(member)
 
 
-def config_denied_reason(config_role_id: int | None) -> str:
-    if config_role_id is None:
-        return "Нужны права администратора или Manage Server."
-    return "Нужна роль доступа к /админ config или права администратора."
+def config_denied_reason(config_role_id: int | None = None) -> str:
+    _ = config_role_id
+    return staff_denied_reason()
 
 
-def can_use_tgk_debug(member: discord.Member, debug_role_id: int | None) -> bool:
-    if debug_role_id is not None and any(role.id == debug_role_id for role in member.roles):
-        return True
-    return is_guild_admin(member)
-
-
-def tgk_debug_denied_reason(debug_role_id: int | None) -> str:
-    if debug_role_id is None:
-        return "Настрой роль для /админ tgk_debug_add в /админ config → Роли."
-    return f"Нужна <@&{debug_role_id}> или права администратора."
-
-
-def can_use_tgk_list(member: discord.Member, list_role_id: int | None) -> bool:
-    return can_use_tgk_debug(member, list_role_id)
-
-
-def tgk_list_denied_reason(list_role_id: int | None) -> str:
-    return tgk_debug_denied_reason(list_role_id)
+def owner_denied_reason() -> str:
+    return f"Нужен доступ владельца ({OWNER_ONLY_HINT})."
 
 
 def find_member_by_nickname(guild: discord.Guild, nickname: str) -> discord.Member:

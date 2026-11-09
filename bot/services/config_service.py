@@ -7,12 +7,72 @@ from bot.database.models import GuildConfig
 from bot.utils.timezones import is_valid_timezone, parse_hhmm
 
 
+def _channel_or_name(channel_id: int | None, placeholder: str) -> str:
+    if channel_id:
+        return f"<#{channel_id}>"
+    return f"#{placeholder}"
+
+
 class ConfigService:
     def __init__(self, db: Database) -> None:
         self.db = db
 
     async def get(self, guild_id: int) -> GuildConfig:
         return await self.db.ensure_guild(guild_id)
+
+    def build_public_help(self, config: GuildConfig) -> str:
+        quotes = _channel_or_name(config.quotes_channel_id, "цитаты")
+        fest = _channel_or_name(config.fest_channel_id, "кинофестиваль")
+        events = _channel_or_name(config.events_channel_id, "ивенты")
+        birthday = _channel_or_name(config.birthday_channel_id, "дни-рождения")
+        tgk = _channel_or_name(config.tgk_channel_id, "тгк")
+        santa = _channel_or_name(config.santa_channel_id, "тайный-санта")
+        _ = channel_mention  # keep import used if helpers change
+        return (
+            "## Цитаты\n"
+            f"Канал: {quotes}\n"
+            "• `/quote add` — добавить цитату\n"
+            "• `/quote edit` — изменить свою\n"
+            "• `/quote delete` — удалить свою\n"
+            "• `/quote random` — случайная\n"
+            "• `/quote user` — цитаты участника\n"
+            "• ПКМ по сообщению → Apps → Add quote\n"
+            "\n"
+            "## Кинофестиваль\n"
+            f"Канал: {fest}\n"
+            "• Кнопки на карточке: предложить / убрать фильм, оценка\n"
+            "• `/fest new` · `/fest edit` · `/fest delete` · `/fest winner` · `/fest export` — staff (админы сервера / владелец)\n"
+            "\n"
+            "## Ивенты\n"
+            f"Канал: {events}\n"
+            "• `/event create` — создать (с ролью для пинга)\n"
+            "• `/event cancel` · `/event ended` — создатель\n"
+            "• Кнопки на карточке: присоединиться / покинуть\n"
+            "\n"
+            "## Дни рождения\n"
+            f"Канал: {birthday}\n"
+            "• Кнопки на доске: **Добавить ДР** / **Убрать ДР**\n"
+            "\n"
+            "## ТГК\n"
+            f"Канал: {tgk}\n"
+            "• Кнопки на доске: добавить / убрать телеграм-канал\n"
+            "\n"
+            "## Таро\n"
+            "• `/tarot` — карта дня\n"
+            "• `/tarot-shuffle` — перемешать колоду\n"
+            "\n"
+            "## Роли и статистика\n"
+            "• `/myrole edit` · `/myrole delete` — персональная роль\n"
+            "• `/stats profile` · `/stats top`\n"
+            "\n"
+            "## Тайный Санта\n"
+            f"Канал: {santa}\n"
+            "• Кнопка на карточке — записаться\n"
+            "• `/santa start` — розыгрыш (админы сервера / владелец)\n"
+            "\n"
+            "## Войс\n"
+            "• `/voice toggle` — Ерунда не слышит / снова слышит тебя"
+        )
 
     async def set_channel(
         self,
@@ -45,7 +105,7 @@ class ConfigService:
         return await self.db.update_guild(guild_id, **{field: int(enabled)})
 
     async def set_role(self, guild_id: int, field: str, role_id: int | None) -> GuildConfig:
-        allowed = {"fest_ping_role_id", "config_role_id", "tgk_list_role_id"}
+        allowed = {"fest_ping_role_id"}
         if field not in allowed:
             raise ValueError(f"Invalid role field: {field}")
         return await self.db.update_guild(guild_id, **{field: role_id})

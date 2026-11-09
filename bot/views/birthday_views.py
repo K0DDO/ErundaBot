@@ -23,18 +23,6 @@ async def refresh_birthday_board(bot: ErundaBot, guild: discord.Guild | None) ->
         pass
 
 
-class BirthdayHintLabel(ui.Button):
-    def __init__(self) -> None:
-        super().__init__(
-            label="← это кнопка, жми",
-            style=discord.ButtonStyle.secondary,
-            disabled=True,
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        pass
-
-
 class BirthdayAddButton(ui.Button):
     def __init__(self, bot: ErundaBot, guild_id: int) -> None:
         super().__init__(label="Добавить ДР", emoji="🎂", style=discord.ButtonStyle.secondary)
@@ -45,6 +33,30 @@ class BirthdayAddButton(ui.Button):
         await interaction.response.send_modal(
             BirthdaySetModal(self.bot, self.guild_id, interaction.user.id)
         )
+
+
+class BirthdayRemoveButton(ui.Button):
+    def __init__(self, bot: ErundaBot, guild_id: int) -> None:
+        super().__init__(label="Убрать ДР", style=discord.ButtonStyle.secondary)
+        self.bot = bot
+        self.guild_id = guild_id
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        removed = await self.bot.birthday_service.remove_birthday(
+            self.guild_id,
+            interaction.user.id,
+        )
+        if not removed:
+            await interaction.response.send_message(
+                embed=error_embed("День рождения не найден"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            embed=success_embed("День рождения удалён"),
+            ephemeral=True,
+        )
+        await refresh_birthday_board(self.bot, interaction.guild)
 
 
 class BirthdayListView(ui.LayoutView):
@@ -59,7 +71,7 @@ class BirthdayListView(ui.LayoutView):
         container.add_item(ui.TextDisplay(text))
         row = ui.ActionRow()
         row.add_item(BirthdayAddButton(bot, guild_id))
-        row.add_item(BirthdayHintLabel())
+        row.add_item(BirthdayRemoveButton(bot, guild_id))
         container.add_item(row)
         self.add_item(container)
 

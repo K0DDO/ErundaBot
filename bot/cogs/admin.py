@@ -1,4 +1,4 @@
-"""Admin / staff slash commands under /админ (sorts after Latin names)."""
+"""Staff slash commands: /.admin (owner|guild admin) and /.test_admin (owner only)."""
 
 from __future__ import annotations
 
@@ -18,24 +18,22 @@ from bot.services.ai_service import (
     OpenRouterRateLimited,
 )
 from bot.services.festival_service import normalize_film_title
-from bot.services.santa_service import has_kino_role
 from bot.services.voice_listen_service import (
     AISA_GREETING_TEXT,
     AISA_GREETING_UNTIL,
     AISA_GREETING_VOICE,
     AISA_USERNAME,
 )
+from bot.settings import OWNER_ONLY_HINT
 from bot.utils.embeds import base_embed, error_embed, success_embed
 from bot.utils.permissions import (
-    can_edit_config,
-    can_use_tgk_debug,
-    config_denied_reason,
-    find_member_by_nickname_async,
-    tgk_debug_denied_reason,
+    can_staff,
+    is_owner,
+    owner_denied_reason,
+    staff_denied_reason,
 )
 from bot.views.config_views import ConfigPanel, config_overview_embed
 from bot.views.santa_views import publish_santa_message, refresh_santa_message
-from bot.views.tgk_views import refresh_tgk_board
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
@@ -48,29 +46,40 @@ class AdminCog(commands.Cog):
         self.bot = bot
 
     admin = app_commands.Group(
-        name="админ",
-        description="Админские и служебные команды Ерунды",
+        name=".admin",
+        description="Админские команды (владелец или админ сервера)",
     )
+    test_admin = app_commands.Group(
+        name=".test_admin",
+        description=f"Служебные команды ({OWNER_ONLY_HINT})",
+    )
+
+    def _require_staff(self, interaction: discord.Interaction) -> str | None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return "Только на сервере"
+        if not can_staff(interaction.user):
+            return staff_denied_reason()
+        return None
+
+    def _require_owner(self, interaction: discord.Interaction) -> str | None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return "Только на сервере"
+        if not is_owner(interaction.user):
+            return owner_denied_reason()
+        return None
 
     @admin.command(name="config", description="Настройки Ерунды для этого сервера")
     @app_commands.guild_only()
     async def admin_config(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        denied = self._require_staff(interaction)
+        if denied:
             await interaction.response.send_message(
-                embed=error_embed("Только на сервере"),
+                embed=error_embed("Недостаточно прав", denied),
                 ephemeral=True,
             )
             return
+        assert interaction.guild is not None
         config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_edit_config(interaction.user, config.config_role_id):
-            await interaction.response.send_message(
-                embed=error_embed(
-                    "Недостаточно прав",
-                    config_denied_reason(config.config_role_id),
-                ),
-                ephemeral=True,
-            )
-            return
         view = ConfigPanel(self.bot, interaction.guild.id)
         await interaction.response.send_message(
             embed=config_overview_embed(config),
@@ -86,15 +95,15 @@ class AdminCog(commands.Cog):
         interaction: discord.Interaction,
         user: discord.Member | None = None,
     ) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_edit_config(interaction.user, config.config_role_id):
+        denied = self._require_staff(interaction)
+        if denied:
             await interaction.response.send_message(
-                embed=error_embed(config_denied_reason(config.config_role_id)),
-                ephemeral=True,
+                embed=error_embed(denied), ephemeral=True
             )
             return
+        assert interaction.guild is not None
+        assert isinstance(interaction.user, discord.Member)
+        config = await self.bot.config_service.get(interaction.guild.id)
         await interaction.response.defer(ephemeral=True, thinking=True)
         target = user or interaction.user
         today = datetime.now(ZoneInfo(config.timezone)).date()
@@ -139,79 +148,52 @@ class AdminCog(commands.Cog):
     @admin.command(name="quote_cleanup", description="Почистить канал цитат и переназначить номера")
     @app_commands.guild_only()
     async def admin_quote_cleanup(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_edit_config(interaction.user, config.config_role_id):
+        denied = self._require_staff(interaction)
+        if denied:
             await interaction.response.send_message(
-                embed=error_embed(config_denied_reason(config.config_role_id)),
-                ephemeral=True,
+                embed=error_embed(denied), ephemeral=True
             )
             return
-        if not config.quotes_channel_id:
+        assert interaction.guild is not None
+        config = await self.bot.config_service.get(interaction.guild.id)
+        if config.quotes_channel_id is None:
             await interaction.response.send_message(
-                embed=error_embed("Канал цитат не настроен в /админ config"),
+                embed=error_embed("Канал цитат не задан в /.admin config"),
                 ephemeral=True,
             )
             return
         channel = interaction.guild.get_channel(config.quotes_channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        if channel is None or not hasattr(channel, "history"):
             await interaction.response.send_message(
-                embed=error_embed("Канал цитат недоступен"),
+                embed=error_embed("Канал цитат не найден"),
                 ephemeral=True,
             )
             return
         await interaction.response.defer(ephemeral=True)
-        removed = await self.bot.quote_service.cleanup_channel(interaction.guild, channel)
+        removed = await self.bot.quote_service.cleanup_channel(
+            interaction.guild, channel  # type: ignore[arg-type]
+        )
         numbered = await self.bot.quote_service.renumber_and_sync(interaction.guild)
         await interaction.followup.send(
             embed=success_embed(
-                "Очистка завершена",
+                "Цитаты почищены",
                 f"Удалено сообщений: **{removed}** в {channel.mention}\n"
                 f"Номера переназначены: **{numbered}**, старше — меньше номер.",
             ),
-        )
-
-    @admin.command(name="quote_who", description="Кто добавил цитату (только роль Кино)")
-    @app_commands.describe(quote_id="Номер цитаты")
-    @app_commands.guild_only()
-    async def admin_quote_who(self, interaction: discord.Interaction, quote_id: int) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not has_kino_role(interaction.user, config):
-            await interaction.response.send_message(
-                embed=error_embed("Нужна роль «Кино»"),
-                ephemeral=True,
-            )
-            return
-        quote = await self.bot.quote_service.get(interaction.guild.id, quote_id)
-        if quote is None:
-            await interaction.response.send_message(
-                embed=error_embed("Цитата не найдена"),
-                ephemeral=True,
-            )
-            return
-        adder = interaction.guild.get_member(quote.added_by)
-        if adder is not None:
-            who = f"{adder.mention} (`{adder.id}`)"
-        else:
-            who = f"<@{quote.added_by}> (`{quote.added_by}`)"
-        preview = self.bot.quote_service.preview_text(quote.content, 120)
-        await interaction.response.send_message(
-            embed=base_embed(
-                title=f"Цитата #{quote.number}",
-                description=f"Добавил: {who}\n«{preview}»",
-            ),
-            ephemeral=True,
         )
 
     @admin.command(name="fest_stats", description="Оценки и присутствие на сеансе")
     @app_commands.describe(number="Номер кинофестиваля")
     @app_commands.guild_only()
     async def admin_fest_stats(self, interaction: discord.Interaction, number: int) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        denied = self._require_staff(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
             return
+        assert interaction.guild is not None
+        assert isinstance(interaction.user, discord.Member)
         config = await self.bot.config_service.get(interaction.guild.id)
         try:
             await self.bot.festival_service.require_staff(interaction.user, config)
@@ -273,54 +255,17 @@ class AdminCog(commands.Cog):
                 break
         return choices
 
-    @admin.command(name="tgk_debug_add", description="Добавить ТГК участнику по нику (отладка)")
-    @app_commands.describe(nickname="Ник на сервере", link="Ссылка на канал")
-    @app_commands.guild_only()
-    async def admin_tgk_debug_add(
-        self,
-        interaction: discord.Interaction,
-        nickname: str,
-        link: str,
-    ) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_use_tgk_debug(interaction.user, config.tgk_list_role_id):
-            await interaction.response.send_message(
-                embed=error_embed(
-                    "Недостаточно прав",
-                    tgk_debug_denied_reason(config.tgk_list_role_id),
-                ),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            target = await find_member_by_nickname_async(interaction.guild, nickname)
-            channel = await self.bot.tgk_service.add(
-                interaction.guild.id,
-                target.id,
-                link,
-            )
-        except ValueError as exc:
-            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        await refresh_tgk_board(self.bot, interaction.guild)
-        parts = [f"**{channel.title}**", f"Владелец: {target.display_name}"]
-        if channel.image_url:
-            parts.append("Картинка подтянулась.")
-        else:
-            parts.append("Название взял с t.me, картинку получить не удалось.")
-        await interaction.followup.send(
-            embed=success_embed(f"ТГК #{channel.number} добавлен", "\n".join(parts)),
-            ephemeral=True,
-        )
-
     @admin.command(name="santa_start", description="Новый тайный Санта — пустая карточка в канал")
     @app_commands.guild_only()
     async def admin_santa_start(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        denied = self._require_staff(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
             return
+        assert interaction.guild is not None
+        assert isinstance(interaction.user, discord.Member)
         config = await self.bot.config_service.get(interaction.guild.id)
         try:
             await self.bot.festival_service.require_staff(interaction.user, config)
@@ -341,7 +286,7 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(
                 embed=error_embed(
                     "Некуда отправить карточку",
-                    "Выбери канал «Тайный Санта» в /админ config",
+                    "Выбери канал «Тайный Санта» в /.admin config",
                 ),
                 ephemeral=True,
             )
@@ -371,46 +316,250 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
-    @commands.Cog.listener()
-    async def on_voice_state_update(
+    @admin.command(
+        name="santa_pairs",
+        description=f"Кто кому выпал ({OWNER_ONLY_HINT} или админ сервера)",
+    )
+    @app_commands.guild_only()
+    async def admin_santa_pairs(self, interaction: discord.Interaction) -> None:
+        denied = self._require_staff(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
+            return
+        assert interaction.guild is not None
+        try:
+            event = await self.bot.santa_service.require_active(interaction.guild.id)
+            text = await self.bot.santa_service.format_pairs(interaction.guild, event)
+        except ValueError as exc:
+            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            embed=base_embed(
+                title=f"Тайный Санта #{event.number}",
+                description=text,
+            ),
+            ephemeral=True,
+        )
+
+    @admin.command(name="voice_listen", description="Бот заходит в твой войс и слушает речь")
+    @app_commands.guild_only()
+    async def admin_voice_listen(self, interaction: discord.Interaction) -> None:
+        denied = self._require_staff(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
+            return
+        assert interaction.guild is not None
+        assert isinstance(interaction.user, discord.Member)
+        config = await self.bot.config_service.get(interaction.guild.id)
+        channel = interaction.user.voice.channel if interaction.user.voice else None
+        if channel is None:
+            await interaction.response.send_message(
+                embed=error_embed("Сначала зайди в голосовой канал"),
+                ephemeral=True,
+            )
+            return
+        if self.bot.ai_service.stt_credits_exhausted:
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Токены исчерпаны",
+                    "Лимит OpenRouter закончился — /.admin voice_listen недоступен, "
+                    "пока не пополнишь баланс и не перезапустишь бота.",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        announce_id = interaction.channel_id
+        try:
+            text = await self.bot.voice_listen_service.join(
+                self.bot,
+                channel,
+                announce_channel_id=announce_id,
+            )
+        except ValueError as exc:
+            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
+            return
+        except Exception:
+            log.exception("voice_listen join failed")
+            await interaction.followup.send(
+                embed=error_embed("Не получилось подключиться к войсу"),
+                ephemeral=True,
+            )
+            return
+        chat_note = (
+            "Реплики в этот чат можно выключить в `/.admin config` → флаги → «Войс → текст в чат»."
+            if announce_id is not None and config.voice_chat_transcripts
+            else (
+                "Постинг в чат выключен флагом «Войс → текст в чат»."
+                if announce_id is not None
+                else "Реплики только в «дело» (сюда писать некуда)."
+            )
+        )
+        await interaction.followup.send(
+            embed=success_embed(
+                "Слушаю войс",
+                f"{text}\n{chat_note}\nКопятся в «дело» (~04:10).",
+            ),
+            ephemeral=True,
+        )
+
+    @admin.command(name="voice_leave", description="Бот выходит из войса и перестаёт слушать")
+    @app_commands.guild_only()
+    async def admin_voice_leave(self, interaction: discord.Interaction) -> None:
+        denied = self._require_staff(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
+            return
+        assert interaction.guild is not None
+        text = await self.bot.voice_listen_service.leave(interaction.guild.id)
+        await interaction.response.send_message(
+            embed=success_embed(text),
+            ephemeral=True,
+        )
+
+    @admin.command(name="voice_dossier", description="Показать «дело» участника из войса")
+    @app_commands.describe(user="Участник")
+    @app_commands.guild_only()
+    async def admin_voice_dossier(
         self,
-        member: discord.Member,
-        before: discord.VoiceState,
-        after: discord.VoiceState,
+        interaction: discord.Interaction,
+        user: discord.Member,
     ) -> None:
-        await self.bot.voice_listen_service.handle_aisa_voice_greeting(
-            member, before, after
+        denied = self._require_staff(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
+            return
+        assert interaction.guild is not None
+        entries = await self.bot.db.list_voice_dossier(
+            interaction.guild.id,
+            user.id,
+            limit=12,
+        )
+        swears = await self.bot.db.sum_voice_swears(interaction.guild.id, user.id)
+        if not entries and not swears:
+            await interaction.response.send_message(
+                embed=base_embed(
+                    title=f"Дело — {user.display_name}",
+                    description=(
+                        "Пока пусто. Включи `/.admin voice_listen` и подожди "
+                        "суточную обработку."
+                    ),
+                ),
+                ephemeral=True,
+            )
+            return
+        lines = [f"• {item.fact} _(до {item.source_date})_" for item in entries]
+        if swears:
+            lines.append(f"Маты (всего зафиксировано): **{swears}**")
+        await interaction.response.send_message(
+            embed=base_embed(
+                title=f"Дело — {user.display_name}",
+                description="\n".join(lines) if lines else "Пусто",
+            ),
+            ephemeral=True,
         )
 
     @admin.command(
+        name="description",
+        description="Справка по командам для участников (без админских)",
+    )
+    @app_commands.describe(
+        visibility="Кому отправить: только тебе или в канал",
+    )
+    @app_commands.choices(
+        visibility=[
+            app_commands.Choice(name="to_myself", value="to_myself"),
+            app_commands.Choice(name="to_all", value="to_all"),
+        ]
+    )
+    @app_commands.guild_only()
+    async def admin_description(
+        self,
+        interaction: discord.Interaction,
+        visibility: app_commands.Choice[str],
+    ) -> None:
+        denied = self._require_staff(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
+            return
+        assert interaction.guild is not None
+        config = await self.bot.config_service.get(interaction.guild.id)
+        text = self.bot.config_service.build_public_help(config)
+        ephemeral = visibility.value != "to_all"
+        await interaction.response.send_message(content=text, ephemeral=ephemeral)
+
+    # --- owner-only ---
+
+    @test_admin.command(
+        name="quote_who",
+        description=f"Кто добавил цитату ({OWNER_ONLY_HINT})",
+    )
+    @app_commands.describe(quote_id="Номер цитаты")
+    @app_commands.guild_only()
+    async def test_quote_who(self, interaction: discord.Interaction, quote_id: int) -> None:
+        denied = self._require_owner(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
+            return
+        assert interaction.guild is not None
+        quote = await self.bot.quote_service.get(interaction.guild.id, quote_id)
+        if quote is None:
+            await interaction.response.send_message(
+                embed=error_embed("Цитата не найдена"),
+                ephemeral=True,
+            )
+            return
+        adder = interaction.guild.get_member(quote.added_by)
+        if adder is not None:
+            who = f"{adder.mention} (`{adder.id}`)"
+        else:
+            who = f"<@{quote.added_by}> (`{quote.added_by}`)"
+        preview = self.bot.quote_service.preview_text(quote.content, 120)
+        await interaction.response.send_message(
+            embed=base_embed(
+                title=f"Цитата #{quote.number}",
+                description=f"Добавил: {who}\n«{preview}»",
+            ),
+            ephemeral=True,
+        )
+
+    @test_admin.command(
         name="voice",
-        description="Сгенерировать TTS (HeyGen) и проиграть в войсе",
+        description=f"Сгенерировать TTS (HeyGen) и проиграть в войсе ({OWNER_ONLY_HINT})",
     )
     @app_commands.describe(
         voice="Голос HeyGen",
         text="Текст для озвучки",
     )
     @app_commands.choices(
-        voice=[
-            app_commands.Choice(name=name, value=name) for name in HEYGEN_VOICES
-        ]
+        voice=[app_commands.Choice(name=name, value=name) for name in HEYGEN_VOICES]
     )
     @app_commands.guild_only()
-    async def admin_voice(
+    async def test_voice(
         self,
         interaction: discord.Interaction,
         voice: str,
         text: str,
     ) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_edit_config(interaction.user, config.config_role_id):
+        denied = self._require_owner(interaction)
+        if denied:
             await interaction.response.send_message(
-                embed=error_embed(config_denied_reason(config.config_role_id)),
-                ephemeral=True,
+                embed=error_embed(denied), ephemeral=True
             )
             return
+        assert interaction.guild is not None
         cleaned = (text or "").strip()
         if not cleaned:
             await interaction.response.send_message(
@@ -422,7 +571,7 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Бот не в войсе",
-                    "Сначала `/админ voice_listen` в нужном канале.",
+                    "Сначала `/.admin voice_listen` в нужном канале.",
                 ),
                 ephemeral=True,
             )
@@ -460,7 +609,7 @@ class AdminCog(commands.Cog):
             )
             return
         except Exception:
-            log.exception("admin voice TTS failed")
+            log.exception("test_admin voice TTS failed")
             await interaction.followup.send(
                 embed=error_embed("Не удалось сгенерировать или проиграть голос"),
                 ephemeral=True,
@@ -482,156 +631,15 @@ class AdminCog(commands.Cog):
             ephemeral=True,
         )
 
-    @admin.command(name="voice_listen", description="Бот заходит в твой войс и слушает речь")
-    @app_commands.guild_only()
-    async def admin_voice_listen(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_edit_config(interaction.user, config.config_role_id):
-            await interaction.response.send_message(
-                embed=error_embed(config_denied_reason(config.config_role_id)),
-                ephemeral=True,
-            )
-            return
-        channel = interaction.user.voice.channel if interaction.user.voice else None
-        if channel is None:
-            await interaction.response.send_message(
-                embed=error_embed("Сначала зайди в голосовой канал"),
-                ephemeral=True,
-            )
-            return
-        if self.bot.ai_service.stt_credits_exhausted:
-            await interaction.response.send_message(
-                embed=error_embed(
-                    "Токены исчерпаны",
-                    "Лимит OpenRouter закончился — `/админ voice_listen` недоступен, "
-                    "пока не пополнишь баланс и не перезапустишь бота.",
-                ),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.defer(ephemeral=True)
-        # channel_id works for text, threads, and text-in-voice.
-        announce_id = interaction.channel_id
-        try:
-            text = await self.bot.voice_listen_service.join(
-                self.bot,
-                channel,
-                announce_channel_id=announce_id,
-            )
-        except ValueError as exc:
-            await interaction.followup.send(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        except Exception:
-            log.exception("voice_listen join failed")
-            await interaction.followup.send(
-                embed=error_embed("Не получилось подключиться к войсу"),
-                ephemeral=True,
-            )
-            return
-        chat_note = (
-            "Реплики в этот чат можно выключить в `/админ config` → флаги → «Войс → текст в чат»."
-            if announce_id is not None and config.voice_chat_transcripts
-            else (
-                "Постинг в чат выключен флагом «Войс → текст в чат»."
-                if announce_id is not None
-                else "Реплики только в «дело» (сюда писать некуда)."
-            )
-        )
-        await interaction.followup.send(
-            embed=success_embed(
-                "Слушаю войс",
-                f"{text}\n{chat_note}\nКопятся в «дело» (~04:10).",
-            ),
-            ephemeral=True,
-        )
-
-    @admin.command(name="voice_leave", description="Бот выходит из войса и перестаёт слушать")
-    @app_commands.guild_only()
-    async def admin_voice_leave(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_edit_config(interaction.user, config.config_role_id):
-            await interaction.response.send_message(
-                embed=error_embed(config_denied_reason(config.config_role_id)),
-                ephemeral=True,
-            )
-            return
-        text = await self.bot.voice_listen_service.leave(interaction.guild.id)
-        await interaction.response.send_message(
-            embed=success_embed(text),
-            ephemeral=True,
-        )
-
-    @admin.command(name="voice_dossier", description="Показать «дело» участника из войса")
-    @app_commands.describe(user="Участник")
-    @app_commands.guild_only()
-    async def admin_voice_dossier(
+    @commands.Cog.listener()
+    async def on_voice_state_update(
         self,
-        interaction: discord.Interaction,
-        user: discord.Member,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
     ) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not can_edit_config(interaction.user, config.config_role_id):
-            await interaction.response.send_message(
-                embed=error_embed(config_denied_reason(config.config_role_id)),
-                ephemeral=True,
-            )
-            return
-        entries = await self.bot.db.list_voice_dossier(
-            interaction.guild.id,
-            user.id,
-            limit=12,
-        )
-        swears = await self.bot.db.sum_voice_swears(interaction.guild.id, user.id)
-        if not entries and not swears:
-            await interaction.response.send_message(
-                embed=base_embed(
-                    title=f"Дело — {user.display_name}",
-                    description="Пока пусто. Включи `/админ voice_listen` и подожди суточную обработку.",
-                ),
-                ephemeral=True,
-            )
-            return
-        lines = [f"• {item.fact} _(до {item.source_date})_" for item in entries]
-        if swears:
-            lines.append(f"Маты (всего зафиксировано): **{swears}**")
-        await interaction.response.send_message(
-            embed=base_embed(
-                title=f"Дело — {user.display_name}",
-                description="\n".join(lines) if lines else "Пусто",
-            ),
-            ephemeral=True,
-        )
-
-    @admin.command(name="santa_pairs", description="Кто кому выпал (только роль Кино)")
-    @app_commands.guild_only()
-    async def admin_santa_pairs(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            return
-        config = await self.bot.config_service.get(interaction.guild.id)
-        if not has_kino_role(interaction.user, config):
-            await interaction.response.send_message(
-                embed=error_embed("Нужна роль «Кино»"),
-                ephemeral=True,
-            )
-            return
-        try:
-            event = await self.bot.santa_service.require_active(interaction.guild.id)
-            text = await self.bot.santa_service.format_pairs(interaction.guild, event)
-        except ValueError as exc:
-            await interaction.response.send_message(embed=error_embed(str(exc)), ephemeral=True)
-            return
-        await interaction.response.send_message(
-            embed=base_embed(
-                title=f"Тайный Санта #{event.number}",
-                description=text,
-            ),
-            ephemeral=True,
+        await self.bot.voice_listen_service.handle_aisa_voice_greeting(
+            member, before, after
         )
 
     @staticmethod
