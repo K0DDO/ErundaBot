@@ -778,7 +778,7 @@ class Database:
             INSERT INTO message_statistics (guild_id, user_id, channel_id, date, count)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id, channel_id, date) DO UPDATE SET
-                count = count + excluded.count
+                count = message_statistics.count + excluded.count
             """,
             (guild_id, user_id, channel_id, day, amount),
         )
@@ -797,7 +797,7 @@ class Database:
             INSERT INTO reaction_statistics (guild_id, user_id, date, count)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
-                count = GREATEST(0, count + excluded.count)
+                count = GREATEST(0, reaction_statistics.count + excluded.count)
             """,
             (guild_id, user_id, day, amount),
         )
@@ -2437,8 +2437,8 @@ class Database:
             INSERT INTO member_profiles (guild_id, user_id, score_f, score_m, gender)
             VALUES (?, ?, ?, ?, 'u')
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                score_f = score_f + excluded.score_f,
-                score_m = score_m + excluded.score_m,
+                score_f = member_profiles.score_f + excluded.score_f,
+                score_m = member_profiles.score_m + excluded.score_m,
                 updated_at = datetime('now')
             """,
             (guild_id, user_id, max(0, score_f), max(0, score_m)),
@@ -2669,7 +2669,7 @@ class Database:
             INSERT INTO voice_swear_stats (guild_id, user_id, day, count)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id, day) DO UPDATE SET
-                count = count + excluded.count
+                count = voice_swear_stats.count + excluded.count
             """,
             (guild_id, user_id, day, amount),
         )
