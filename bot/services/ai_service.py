@@ -31,9 +31,8 @@ OPENROUTER_TRANSCRIBE_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 OPENROUTER_SPEECH_URL = "https://openrouter.ai/api/v1/audio/speech"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 DEFAULT_OPENROUTER_CHAT = "google/gemini-2.5-flash"
-# Mini-transcribe: лучше RU/шум, чем turbo; не MAI (~$0.10/hr) и не full 4o-transcribe.
-# Fallback Whisper Large V3 ~$0.029/hr — дешёвый запасной.
-DEFAULT_OPENROUTER_STT = "openai/gpt-4o-mini-transcribe"
+# MAI-Transcribe 2 (~$0.10/hr) — лучше RU/шум; fallback Whisper Large ~$0.029/hr.
+DEFAULT_OPENROUTER_STT = "microsoft/mai-transcribe-2"
 DEFAULT_OPENROUTER_STT_FALLBACK = "openai/whisper-large-v3"
 DEFAULT_OPENROUTER_TTS = "heygen/heygen-voice-1-turbo:free"
 # HeyGen public voices (OpenRouter voice field).
