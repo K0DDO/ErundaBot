@@ -797,7 +797,7 @@ class Database:
             INSERT INTO reaction_statistics (guild_id, user_id, date, count)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id, date) DO UPDATE SET
-                count = MAX(0, count + excluded.count)
+                count = GREATEST(0, count + excluded.count)
             """,
             (guild_id, user_id, day, amount),
         )
@@ -815,8 +815,13 @@ class Database:
         await self.connection.execute(
             """
             UPDATE voice_sessions
-            SET ended_at = ?, duration_seconds = CAST(
-                (julianday(?) - julianday(started_at)) * 86400 AS INTEGER
+            SET ended_at = ?, duration_seconds = GREATEST(
+                0,
+                CAST(
+                    EXTRACT(
+                        EPOCH FROM (CAST(? AS TIMESTAMP) - CAST(started_at AS TIMESTAMP))
+                    ) AS INTEGER
+                )
             )
             WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL
             """,
@@ -841,8 +846,13 @@ class Database:
             """
             UPDATE voice_sessions
             SET ended_at = ?,
-                duration_seconds = CAST(
-                    (julianday(?) - julianday(started_at)) * 86400 AS INTEGER
+                duration_seconds = GREATEST(
+                    0,
+                    CAST(
+                        EXTRACT(
+                            EPOCH FROM (CAST(? AS TIMESTAMP) - CAST(started_at AS TIMESTAMP))
+                        ) AS INTEGER
+                    )
                 )
             WHERE guild_id = ? AND user_id = ? AND ended_at IS NULL
             """,
@@ -855,8 +865,13 @@ class Database:
             """
             UPDATE voice_sessions
             SET ended_at = ?,
-                duration_seconds = CAST(
-                    (julianday(?) - julianday(started_at)) * 86400 AS INTEGER
+                duration_seconds = GREATEST(
+                    0,
+                    CAST(
+                        EXTRACT(
+                            EPOCH FROM (CAST(? AS TIMESTAMP) - CAST(started_at AS TIMESTAMP))
+                        ) AS INTEGER
+                    )
                 )
             WHERE ended_at IS NULL
             """,
