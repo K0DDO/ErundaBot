@@ -35,7 +35,7 @@ class SantaCog(commands.Cog):
 
     @santa.command(
         name="start",
-        description="Провести розыгрыш и разослать ЛС (админы сервера / владелец)",
+        description="Провести розыгрыш и разослать ЛС",
     )
     @app_commands.guild_only()
     async def santa_start(self, interaction: discord.Interaction) -> None:

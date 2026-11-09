@@ -99,7 +99,7 @@ class EventsCog(commands.Cog):
                 break
         return choices
 
-    @event.command(name="cancel", description="Отменить ивент (создатель)")
+    @event.command(name="cancel", description="Отменить ивент")
     @app_commands.describe(number="Номер ивента")
     @app_commands.guild_only()
     async def event_cancel(self, interaction: discord.Interaction, number: int) -> None:
@@ -137,7 +137,7 @@ class EventsCog(commands.Cog):
         events = await self.bot.event_service.list_scheduled(interaction.guild.id)
         return await self._event_number_autocomplete(interaction, current, events)
 
-    @event.command(name="ended", description="Завершить ивент (создатель)")
+    @event.command(name="ended", description="Завершить ивент")
     @app_commands.describe(number="Номер ивента")
     @app_commands.guild_only()
     async def event_ended(self, interaction: discord.Interaction, number: int) -> None:

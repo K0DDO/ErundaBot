@@ -94,7 +94,7 @@ class FestivalCog(commands.Cog):
 
     @fest.command(
         name="new",
-        description="Открыть новый кинофестиваль (админы сервера / владелец)",
+        description="Открыть новый кинофестиваль",
     )
     @app_commands.guild_only()
     async def fest_new(self, interaction: discord.Interaction) -> None:
@@ -112,7 +112,7 @@ class FestivalCog(commands.Cog):
 
     @fest.command(
         name="edit",
-        description="Изменить дату и время сеанса (админы сервера / владелец)",
+        description="Изменить дату и время сеанса",
     )
     @app_commands.guild_only()
     async def fest_edit(self, interaction: discord.Interaction) -> None:
@@ -140,7 +140,7 @@ class FestivalCog(commands.Cog):
 
     @fest.command(
         name="delete",
-        description="Удалить кинофестиваль (админы сервера / владелец)",
+        description="Удалить кинофестиваль",
     )
     @app_commands.describe(number="Номер карточки, без номера — текущий открытый")
     @app_commands.guild_only()
@@ -198,7 +198,7 @@ class FestivalCog(commands.Cog):
 
     @fest.command(
         name="export",
-        description="Список имён для колеса (админы сервера / владелец)",
+        description="Список имён для колеса",
     )
     @app_commands.guild_only()
     async def fest_export(self, interaction: discord.Interaction) -> None:
@@ -220,7 +220,7 @@ class FestivalCog(commands.Cog):
 
     @fest.command(
         name="winner",
-        description="Отметить победителя колеса (админы сервера / владелец)",
+        description="Отметить победителя колеса",
     )
     @app_commands.describe(user="Кто выиграл в колесе")
     @app_commands.guild_only()

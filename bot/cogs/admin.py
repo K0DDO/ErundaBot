@@ -27,7 +27,6 @@ from bot.services.voice_listen_service import (
     AISA_GREETING_VOICE,
     AISA_USERNAME,
 )
-from bot.settings import OWNER_ONLY_HINT
 from bot.utils.embeds import base_embed, error_embed, success_embed
 from bot.utils.permissions import (
     can_staff,
@@ -50,11 +49,11 @@ class AdminCog(commands.Cog):
 
     admin = app_commands.Group(
         name="z-admin",
-        description="Админские команды (владелец или админ сервера)",
+        description="Админские команды",
     )
     test_admin = app_commands.Group(
         name="z-test-admin",
-        description=f"Служебные команды ({OWNER_ONLY_HINT})",
+        description="Служебные команды",
     )
 
     def _require_staff(self, interaction: discord.Interaction) -> str | None:
@@ -321,7 +320,7 @@ class AdminCog(commands.Cog):
 
     @admin.command(
         name="santa_pairs",
-        description=f"Кто кому выпал ({OWNER_ONLY_HINT} или админ сервера)",
+        description="Кто кому выпал",
     )
     @app_commands.guild_only()
     async def admin_santa_pairs(self, interaction: discord.Interaction) -> None:
@@ -505,7 +504,7 @@ class AdminCog(commands.Cog):
 
     @test_admin.command(
         name="quote_who",
-        description=f"Кто добавил цитату ({OWNER_ONLY_HINT})",
+        description="Кто добавил цитату",
     )
     @app_commands.describe(quote_id="Номер цитаты")
     @app_commands.guild_only()
@@ -540,7 +539,7 @@ class AdminCog(commands.Cog):
 
     @test_admin.command(
         name="voice",
-        description=f"Сгенерировать TTS (HeyGen) и проиграть в войсе ({OWNER_ONLY_HINT})",
+        description="Сгенерировать TTS (HeyGen) и проиграть в войсе",
     )
     @app_commands.describe(
         voice="Голос HeyGen",
