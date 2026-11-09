@@ -5,7 +5,9 @@ Discord forbids '.' in slash names; 'z-' keeps them near the end of the picker.
 
 from __future__ import annotations
 
+import io
 import logging
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -422,6 +424,137 @@ class AdminCog(commands.Cog):
         text = await self.bot.voice_listen_service.leave(interaction.guild.id)
         await interaction.response.send_message(
             embed=success_embed(text),
+            ephemeral=True,
+        )
+
+    @staticmethod
+    def _format_log_clock(created_at: str, tz: ZoneInfo) -> str:
+        raw = str(created_at or "").strip()
+        if not raw:
+            return "??:??:??"
+        try:
+            stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            return stamp.astimezone(tz).strftime("%H:%M:%S")
+        except ValueError:
+            return raw[:8] if len(raw) >= 8 else raw
+
+    @admin.command(
+        name="import",
+        description="Выгрузить войсовый текст за сегодня в .txt (в ЛС)",
+    )
+    @app_commands.guild_only()
+    async def admin_import(self, interaction: discord.Interaction) -> None:
+        denied = self._require_staff(interaction)
+        if denied:
+            await interaction.response.send_message(
+                embed=error_embed(denied), ephemeral=True
+            )
+            return
+        assert interaction.guild is not None
+        guild = interaction.guild
+        await interaction.response.defer(ephemeral=True)
+        config = await self.bot.config_service.get(guild.id)
+        tz = ZoneInfo(config.timezone or "Europe/Moscow")
+        day = datetime.now(tz).date().isoformat()
+        rows = await self.bot.db.list_daily_text_logs_for_guild_day(
+            guild.id,
+            day,
+            source="voice",
+        )
+        if not rows:
+            await interaction.followup.send(
+                embed=base_embed(
+                    title="Импорт войса",
+                    description=(
+                        f"За сегодня (`{day}`) на этом сервере нет голосовых реплик.\n"
+                        "Нужен `/z-admin voice_listen` и чтобы кто-то говорил."
+                    ),
+                ),
+                ephemeral=True,
+            )
+            return
+
+        member_names: dict[int, str] = {}
+        skipped_left = 0
+        for user_id in {row.user_id for row in rows}:
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except (discord.NotFound, discord.HTTPException):
+                    skipped_left += 1
+                    continue
+            member_names[user_id] = member.display_name
+
+        lines = [
+            f"Сервер: {guild.name} ({guild.id})",
+            f"День: {day} ({config.timezone or 'Europe/Moscow'})",
+            "Источник: voice (только этот сервер)",
+            "",
+        ]
+        kept = 0
+        for row in rows:
+            name = member_names.get(row.user_id)
+            if name is None:
+                continue
+            clock = self._format_log_clock(row.created_at, tz)
+            text = (row.text or "").replace("\r\n", "\n").replace("\r", "\n")
+            for part in text.split("\n"):
+                part = part.strip()
+                if not part:
+                    continue
+                lines.append(f"[{clock}] {name}: {part}")
+                kept += 1
+
+        if kept == 0:
+            await interaction.followup.send(
+                embed=base_embed(
+                    title="Импорт войса",
+                    description=(
+                        "Реплики за день есть в БД, но авторы уже не на этом сервере — "
+                        "в файл ничего не попало."
+                    ),
+                ),
+                ephemeral=True,
+            )
+            return
+
+        payload = "\n".join(lines) + "\n"
+        raw = payload.encode("utf-8-sig")
+        # Stay under typical Discord attachment limits for safety.
+        max_bytes = 7_500_000
+        if len(raw) > max_bytes:
+            raw = raw[:max_bytes] + "\n…(обрезано)\n".encode("utf-8")
+        safe_guild = re.sub(r"[^\w\-]+", "_", guild.name, flags=re.UNICODE)[:40] or "guild"
+        filename = f"voice_{safe_guild}_{day}.txt"
+        note = f"Строк: **{kept}**."
+        if skipped_left:
+            note += f" Пропущено ушедших с сервера: **{skipped_left}**."
+        try:
+            await interaction.user.send(
+                content=f"Войсовый текст за `{day}` — **{guild.name}**.\n{note}",
+                file=discord.File(io.BytesIO(raw), filename=filename),
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                embed=error_embed(
+                    "Не могу написать в ЛС",
+                    "Открой личные сообщения от участников серверов и повтори.",
+                ),
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            log.exception("Failed to DM voice import to user %s", interaction.user.id)
+            await interaction.followup.send(
+                embed=error_embed("Не удалось отправить файл в ЛС"),
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send(
+            embed=success_embed(f"Отправил `{filename}` тебе в ЛС. {note}"),
             ephemeral=True,
         )
 

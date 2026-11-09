@@ -2526,6 +2526,38 @@ class Database:
         rows = await cursor.fetchall()
         return [DailyTextLog.from_row(row) for row in rows]
 
+    async def list_daily_text_logs_for_guild_day(
+        self,
+        guild_id: int,
+        day: str,
+        *,
+        source: str | None = "voice",
+        limit: int = 5000,
+    ) -> list[DailyTextLog]:
+        """Guild-scoped day transcript (never crosses other servers)."""
+        if source:
+            cursor = await self.connection.execute(
+                """
+                SELECT * FROM daily_text_logs
+                WHERE guild_id = ? AND day = ? AND source = ?
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (guild_id, day, source, limit),
+            )
+        else:
+            cursor = await self.connection.execute(
+                """
+                SELECT * FROM daily_text_logs
+                WHERE guild_id = ? AND day = ?
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?
+                """,
+                (guild_id, day, limit),
+            )
+        rows = await cursor.fetchall()
+        return [DailyTextLog.from_row(row) for row in rows]
+
     async def delete_daily_text_logs(
         self,
         guild_id: int,
