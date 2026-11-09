@@ -2222,7 +2222,7 @@ class VoiceListenService:
             raise ValueError("Пустое аудио")
         vc = self._clients.get(guild_id)
         if vc is None or not vc.is_connected():
-            raise ValueError("Бот не в голосовом канале — сначала /.admin voice_listen")
+            raise ValueError("Бот не в голосовом канале — сначала /z-admin voice_listen")
         if not isinstance(getattr(vc, "channel", None), discord.VoiceChannel):
             raise ValueError("TTS только в обычном войсе (не stage)")
 

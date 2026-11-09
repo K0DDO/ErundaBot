@@ -74,6 +74,8 @@ def adapt_schema_sql(sql: str) -> str:
     text = re.sub(r"PRAGMA\s+[^;]+;?", "", text, flags=re.IGNORECASE)
     text = _DATETIME_NOW.sub("NOW()", text)
     text = _AUTOINCREMENT.sub("BIGSERIAL PRIMARY KEY", text)
+    # Discord snowflakes exceed int32 — use BIGINT for all integer columns.
+    text = re.sub(r"\bINTEGER\b", "BIGINT", text, flags=re.IGNORECASE)
     return text
 
 

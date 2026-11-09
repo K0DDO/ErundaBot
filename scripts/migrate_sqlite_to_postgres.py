@@ -61,7 +61,11 @@ async def copy_table(
     for row in rows:
         values = []
         for v in row:
-            values.append(v)
+            # Discord snowflakes are 64-bit; ensure Python int (not truncated).
+            if isinstance(v, int):
+                values.append(int(v))
+            else:
+                values.append(v)
         try:
             status = await pg.execute(sql, *values)
             if status.endswith("1"):

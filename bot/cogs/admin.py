@@ -1,4 +1,7 @@
-"""Staff slash commands: /.admin (owner|guild admin) and /.test_admin (owner only)."""
+"""Staff slash commands: /z-admin (owner|guild admin) and /z-test-admin (owner only).
+
+Discord forbids '.' in slash names; 'z-' keeps them near the end of the picker.
+"""
 
 from __future__ import annotations
 
@@ -46,11 +49,11 @@ class AdminCog(commands.Cog):
         self.bot = bot
 
     admin = app_commands.Group(
-        name=".admin",
+        name="z-admin",
         description="Админские команды (владелец или админ сервера)",
     )
     test_admin = app_commands.Group(
-        name=".test_admin",
+        name="z-test-admin",
         description=f"Служебные команды ({OWNER_ONLY_HINT})",
     )
 
@@ -158,7 +161,7 @@ class AdminCog(commands.Cog):
         config = await self.bot.config_service.get(interaction.guild.id)
         if config.quotes_channel_id is None:
             await interaction.response.send_message(
-                embed=error_embed("Канал цитат не задан в /.admin config"),
+                embed=error_embed("Канал цитат не задан в /z-admin config"),
                 ephemeral=True,
             )
             return
@@ -286,7 +289,7 @@ class AdminCog(commands.Cog):
             await interaction.followup.send(
                 embed=error_embed(
                     "Некуда отправить карточку",
-                    "Выбери канал «Тайный Санта» в /.admin config",
+                    "Выбери канал «Тайный Санта» в /z-admin config",
                 ),
                 ephemeral=True,
             )
@@ -366,7 +369,7 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Токены исчерпаны",
-                    "Лимит OpenRouter закончился — /.admin voice_listen недоступен, "
+                    "Лимит OpenRouter закончился — /z-admin voice_listen недоступен, "
                     "пока не пополнишь баланс и не перезапустишь бота.",
                 ),
                 ephemeral=True,
@@ -391,7 +394,7 @@ class AdminCog(commands.Cog):
             )
             return
         chat_note = (
-            "Реплики в этот чат можно выключить в `/.admin config` → флаги → «Войс → текст в чат»."
+            "Реплики в этот чат можно выключить в `/z-admin config` → флаги → «Войс → текст в чат»."
             if announce_id is not None and config.voice_chat_transcripts
             else (
                 "Постинг в чат выключен флагом «Войс → текст в чат»."
@@ -449,7 +452,7 @@ class AdminCog(commands.Cog):
                 embed=base_embed(
                     title=f"Дело — {user.display_name}",
                     description=(
-                        "Пока пусто. Включи `/.admin voice_listen` и подожди "
+                        "Пока пусто. Включи `/z-admin voice_listen` и подожди "
                         "суточную обработку."
                     ),
                 ),
@@ -571,7 +574,7 @@ class AdminCog(commands.Cog):
             await interaction.response.send_message(
                 embed=error_embed(
                     "Бот не в войсе",
-                    "Сначала `/.admin voice_listen` в нужном канале.",
+                    "Сначала `/z-admin voice_listen` в нужном канале.",
                 ),
                 ephemeral=True,
             )

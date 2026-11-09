@@ -92,7 +92,7 @@ class SantaService:
     async def require_active(self, guild_id: int) -> SantaEvent:
         event = await self.db.get_active_santa_event(guild_id)
         if event is None:
-            raise ValueError("Нет активного тайного санты — сначала /.admin santa_start")
+            raise ValueError("Нет активного тайного санты — сначала /z-admin santa_start")
         return event
 
     async def create_event(self, guild_id: int) -> tuple[SantaEvent, SantaEvent | None]:

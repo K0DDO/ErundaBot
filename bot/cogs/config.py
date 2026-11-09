@@ -1,4 +1,4 @@
-"""Legacy config cog removed — use /.admin config."""
+"""Legacy config cog removed — use /z-admin config."""
 
 from __future__ import annotations
 
