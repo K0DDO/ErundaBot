@@ -56,13 +56,7 @@ CHAT_TIMEOUT_SECONDS = 90
 STT_TIMEOUT_SECONDS = 60
 FILM_TITLE_TIMEOUT_SECONDS = 20
 STT_KEYWORD_PHRASES = (
-    "six seven",
-    "6-7",
-    "67",
-    "сикс севен",
     "сиксевен",
-    "секс севен",
-    "шесть семь",
     "ерунда",
     "ерунды",
     "ерундушка",
@@ -480,8 +474,7 @@ class AIService:
             "model": chosen,
             "response_format": "json",
             "prompt": (
-                "six seven, 6-7, 67, сикс севен, сек севен, сексаван, сексеон, "
-                "sex seven, sick seven, шесть семь. "
+                "сиксевен. "
                 "ерунда, ерунды, ерундушка, erunda. "
                 "блядь, блять, нахуй, сука, пиздец, ебать, хуй."
             ),

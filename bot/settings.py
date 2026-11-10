@@ -10,5 +10,34 @@ OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0") or "0")
 HOME_GUILD_ID = int(
     os.getenv("HOME_GUILD_ID", "1497627892589531202") or "1497627892589531202"
 )
+# Voice→text / voice_listen only on these guilds (Ерундульки + второй сервер).
+_DEFAULT_VOICE_LISTEN_GUILDS = f"{HOME_GUILD_ID},830377763395469312"
+
+
+def _parse_snowflake_set(raw: str) -> frozenset[int]:
+    values: set[int] = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            values.add(int(part))
+        except ValueError:
+            continue
+    return frozenset(values)
+
+
+VOICE_LISTEN_GUILD_IDS = _parse_snowflake_set(
+    os.getenv("VOICE_LISTEN_GUILD_IDS", _DEFAULT_VOICE_LISTEN_GUILDS)
+    or _DEFAULT_VOICE_LISTEN_GUILDS
+)
+if not VOICE_LISTEN_GUILD_IDS:
+    VOICE_LISTEN_GUILD_IDS = frozenset({HOME_GUILD_ID})
+
+
 def is_home_guild(guild_id: int) -> bool:
     return int(guild_id) == HOME_GUILD_ID
+
+
+def voice_listen_allowed(guild_id: int) -> bool:
+    return int(guild_id) in VOICE_LISTEN_GUILD_IDS

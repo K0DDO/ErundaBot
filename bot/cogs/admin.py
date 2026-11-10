@@ -30,6 +30,7 @@ from bot.services.voice_listen_service import (
     AISA_USERNAME,
 )
 from bot.utils.embeds import base_embed, error_embed, success_embed
+from bot.settings import voice_listen_allowed
 from bot.utils.permissions import (
     can_staff,
     is_owner,
@@ -358,6 +359,15 @@ class AdminCog(commands.Cog):
             return
         assert interaction.guild is not None
         assert isinstance(interaction.user, discord.Member)
+        if not voice_listen_allowed(interaction.guild.id):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Войс → текст здесь выключен",
+                    "Только на Ерундульках и разрешённом втором сервере.",
+                ),
+                ephemeral=True,
+            )
+            return
         config = await self.bot.config_service.get(interaction.guild.id)
         channel = interaction.user.voice.channel if interaction.user.voice else None
         if channel is None:
@@ -454,6 +464,15 @@ class AdminCog(commands.Cog):
             return
         assert interaction.guild is not None
         guild = interaction.guild
+        if not voice_listen_allowed(guild.id):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Войс → текст здесь выключен",
+                    "Импорт доступен только на Ерундульках и разрешённом втором сервере.",
+                ),
+                ephemeral=True,
+            )
+            return
         await interaction.response.defer(ephemeral=True)
         config = await self.bot.config_service.get(guild.id)
         tz = ZoneInfo(config.timezone or "Europe/Moscow")
@@ -695,6 +714,15 @@ class AdminCog(commands.Cog):
             )
             return
         assert interaction.guild is not None
+        if not voice_listen_allowed(interaction.guild.id):
+            await interaction.response.send_message(
+                embed=error_embed(
+                    "Войс → текст здесь выключен",
+                    "Только на Ерундульках и разрешённом втором сервере.",
+                ),
+                ephemeral=True,
+            )
+            return
         cleaned = (text or "").strip()
         if not cleaned:
             await interaction.response.send_message(

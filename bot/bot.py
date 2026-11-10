@@ -24,6 +24,7 @@ from bot.services.tarot_service import TarotService
 from bot.services.tgk_service import TgkService
 from bot.services.dossier_service import DossierService
 from bot.services.voice_listen_service import VoiceListenService
+from bot.settings import OWNER_USER_ID, voice_listen_allowed
 from bot.tasks.background import BackgroundTasks
 
 log = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class ErundaBot(commands.Bot):
         self.voice_listen_service.dossier_service = self.dossier_service
         self.background = BackgroundTasks(self)
         self._synced = False
+        self._owner_guilds_reported = False
 
     async def setup_hook(self) -> None:
         await self.db.connect()
@@ -100,14 +102,51 @@ class ErundaBot(commands.Bot):
             self._synced = True
             log.info("Synced %s application command(s)", len(synced))
 
+    def _format_guild_lines(self) -> list[str]:
+        lines: list[str] = []
+        for guild in sorted(self.guilds, key=lambda g: g.name.casefold()):
+            voice = "voice✓" if voice_listen_allowed(guild.id) else "voice✗"
+            lines.append(f"• {guild.name} (`{guild.id}`) [{voice}]")
+        return lines
+
+    async def _dm_owner(self, content: str) -> None:
+        if OWNER_USER_ID <= 0:
+            return
+        try:
+            user = self.get_user(OWNER_USER_ID) or await self.fetch_user(OWNER_USER_ID)
+            await user.send(content)
+        except Exception:
+            log.exception("Failed to DM owner %s", OWNER_USER_ID)
+
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id=%s)", self.user, self.user and self.user.id)
         for guild in self.guilds:
             await self.db.ensure_guild(guild.id)
+            if not voice_listen_allowed(guild.id) and self.voice_listen_service.is_listening(
+                guild.id
+            ):
+                try:
+                    await self.voice_listen_service.leave(
+                        guild.id, flush=False, clear_resume=True
+                    )
+                    log.info("Left voice on non-allowed guild %s", guild.id)
+                except Exception:
+                    log.exception("Failed leaving voice on guild %s", guild.id)
+        if not self._owner_guilds_reported:
+            self._owner_guilds_reported = True
+            lines = self._format_guild_lines()
+            body = "\n".join(lines) if lines else "• (нет серверов)"
+            await self._dm_owner(
+                f"Ерунда онлайн. Серверы сейчас ({len(self.guilds)}):\n{body}"
+            )
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
         await self.db.ensure_guild(guild.id)
         log.info("Joined guild %s (%s)", guild.name, guild.id)
+        voice = "voice разрешён" if voice_listen_allowed(guild.id) else "voice запрещён"
+        await self._dm_owner(
+            f"Ерунду добавили на сервер **{guild.name}** (`{guild.id}`). {voice}."
+        )
 
     async def close(self) -> None:
         await self.background.stop()
