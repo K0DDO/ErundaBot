@@ -20,7 +20,11 @@ import discord
 from discord.opus import OpusError
 
 from bot.database.database import Database
-from bot.services.ai_service import HEYGEN_VOICES, OpenRouterCreditsExhausted
+from bot.services.ai_service import (
+    HEYGEN_VOICES,
+    OpenRouterCreditsExhausted,
+    OpenRouterRateLimited,
+)
 from bot.settings import is_home_guild, voice_listen_allowed
 
 if TYPE_CHECKING:
@@ -69,7 +73,8 @@ VOICE_DAVE_FAIL_WINDOW_SECONDS = 12.0
 VOICE_DAVE_FAIL_RECOVER_COUNT = 40
 VOICE_NO_RTP_RECOVER_SECONDS = 50.0
 # Resume join only if Discord already dropped us — never leave+join while connected.
-VOICE_RESUME_JOIN_COOLDOWN_SECONDS = 180.0
+# Was 180s — felt like «вернётся через несколько минут».
+VOICE_RESUME_JOIN_COOLDOWN_SECONDS = 25.0
 # Ops visibility only — never leave+join / remount to "heal" a live DAVE session.
 VOICE_HEALTH_STATUS_EVERY = 60.0
 # If STT task dies/hangs without clearing flushing, unblock the user buffer.
@@ -1209,6 +1214,8 @@ class VoiceListenService:
         bot = self._bot
         if bot is None:
             return
+        if self.ai.stt_credits_exhausted:
+            return
         vc = self._clients.get(guild_id)
         if vc is not None and vc.is_connected():
             log.info(
@@ -1218,12 +1225,25 @@ class VoiceListenService:
             )
             self._schedule_heal(guild_id, reason=f"skip_resume:{reason}")
             return
+        # discord.py may already be reconnecting — don't force a second connect.
+        guild = bot.get_guild(guild_id)
+        guild_vc = guild.voice_client if guild is not None else None
+        if guild_vc is not None and guild_vc.is_connected():
+            self._clients[guild_id] = guild_vc
+            log.info(
+                "Skip resume join guild=%s — guild.voice_client already up (%s)",
+                guild_id,
+                reason,
+            )
+            return
         now = datetime.now(timezone.utc).timestamp()
         if guild_id in self._healing:
             return
         last = self._last_hard_reconnect_at.get(guild_id, 0.0)
         if now - last < VOICE_RESUME_JOIN_COOLDOWN_SECONDS:
             return
+        # Stamp cooldown immediately so health spam cannot queue parallel joins.
+        self._last_hard_reconnect_at[guild_id] = now
         log.warning(
             "Scheduling voice resume join guild=%s (%s)",
             guild_id,
@@ -1788,6 +1808,12 @@ class VoiceListenService:
             else:
                 await self.db.add_voice_snippet(guild_id, user_id, text[:2000])
             await self._announce_transcript(bot, guild_id, user_id, text)
+        except OpenRouterRateLimited:
+            log.warning(
+                "STT rate limited / in-flight budget user=%s guild=%s — keep listening",
+                user_id,
+                guild_id,
+            )
         except OpenRouterCreditsExhausted:
             log.warning("OpenRouter 402 — leaving voice and disabling listen")
             await self.leave_all_credits_exhausted()

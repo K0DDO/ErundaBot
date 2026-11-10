@@ -513,6 +513,18 @@ class AIService:
             body_text = exc.read().decode("utf-8", errors="replace")[:500]
             log.error("OpenRouter STT HTTP %s model=%s: %s", exc.code, chosen, body_text)
             if exc.code == 402:
+                # Temporary in-flight budget — not a real empty balance.
+                # Treating it as hard exhausted left voice dead until restart.
+                body_l = body_text.casefold()
+                if (
+                    "in_flight" in body_l
+                    or "in-flight" in body_l
+                    or "retry-after" in body_l
+                    or "retry after" in body_l
+                ):
+                    raise OpenRouterRateLimited(
+                        f"OpenRouter STT in-flight budget (402) model={chosen}"
+                    ) from exc
                 raise OpenRouterCreditsExhausted(
                     "Токены OpenRouter исчерпаны (402)"
                 ) from exc
