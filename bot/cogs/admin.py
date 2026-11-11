@@ -452,7 +452,7 @@ class AdminCog(commands.Cog):
 
     @admin.command(
         name="import",
-        description="Выгрузить войсовый текст за сегодня в .txt (в ЛС)",
+        description="Выгрузить голос + чат войса за сегодня в .txt (в ЛС)",
     )
     @app_commands.guild_only()
     async def admin_import(self, interaction: discord.Interaction) -> None:
@@ -477,18 +477,21 @@ class AdminCog(commands.Cog):
         config = await self.bot.config_service.get(guild.id)
         tz = ZoneInfo(config.timezone or "Europe/Moscow")
         day = datetime.now(tz).date().isoformat()
-        rows = await self.bot.db.list_daily_text_logs_for_guild_day(
+        listen_ids: list[int] = []
+        if config.voice_listen_channel_id:
+            listen_ids.append(int(config.voice_listen_channel_id))
+        rows = await self.bot.db.list_voice_import_logs_for_guild_day(
             guild.id,
             day,
-            source="voice",
+            listen_channel_ids=listen_ids,
         )
         if not rows:
             await interaction.followup.send(
                 embed=base_embed(
                     title="Импорт войса",
                     description=(
-                        f"За сегодня (`{day}`) на этом сервере нет голосовых реплик.\n"
-                        "Нужен `/z-admin voice_listen` и чтобы кто-то говорил."
+                        f"За сегодня (`{day}`) нет голоса и чата войса.\n"
+                        "Нужен `/z-admin voice_listen`, речь или сообщения в чате этого войса."
                     ),
                 ),
                 ephemeral=True,
@@ -510,7 +513,7 @@ class AdminCog(commands.Cog):
         lines = [
             f"Сервер: {guild.name} ({guild.id})",
             f"День: {day} ({config.timezone or 'Europe/Moscow'})",
-            "Источник: voice (только этот сервер)",
+            "Источник: voice + chat войса (только этот сервер)",
             "",
         ]
         kept = 0
@@ -519,12 +522,13 @@ class AdminCog(commands.Cog):
             if name is None:
                 continue
             clock = self._format_log_clock(row.created_at, tz)
+            tag = "voice" if row.source == "voice" else "chat"
             text = (row.text or "").replace("\r\n", "\n").replace("\r", "\n")
             for part in text.split("\n"):
                 part = part.strip()
                 if not part:
                     continue
-                lines.append(f"[{clock}] {name}: {part}")
+                lines.append(f"[{clock}] [{tag}] {name}: {part}")
                 kept += 1
 
         if kept == 0:
@@ -553,7 +557,9 @@ class AdminCog(commands.Cog):
             note += f" Пропущено ушедших с сервера: **{skipped_left}**."
         try:
             await interaction.user.send(
-                content=f"Войсовый текст за `{day}` — **{guild.name}**.\n{note}",
+                content=(
+                    f"Голос + чат войса за `{day}` — **{guild.name}**.\n{note}"
+                ),
                 file=discord.File(io.BytesIO(raw), filename=filename),
             )
         except discord.Forbidden:

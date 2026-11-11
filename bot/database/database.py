@@ -2558,6 +2558,52 @@ class Database:
         rows = await cursor.fetchall()
         return [DailyTextLog.from_row(row) for row in rows]
 
+    async def list_voice_import_logs_for_guild_day(
+        self,
+        guild_id: int,
+        day: str,
+        *,
+        listen_channel_ids: list[int] | None = None,
+        limit: int = 5000,
+    ) -> list[DailyTextLog]:
+        """Voice STT + text-in-voice chat for listen channel(s) that day."""
+        cursor = await self.connection.execute(
+            """
+            SELECT DISTINCT channel_id FROM daily_text_logs
+            WHERE guild_id = ? AND day = ? AND source = 'voice' AND channel_id > 0
+            """,
+            (guild_id, day),
+        )
+        channel_ids: set[int] = {
+            int(row["channel_id"]) for row in await cursor.fetchall()
+        }
+        for cid in listen_channel_ids or ():
+            if cid:
+                channel_ids.add(int(cid))
+
+        if not channel_ids:
+            return await self.list_daily_text_logs_for_guild_day(
+                guild_id, day, source="voice", limit=limit
+            )
+
+        placeholders = ", ".join("?" for _ in channel_ids)
+        ids = list(channel_ids)
+        cursor = await self.connection.execute(
+            f"""
+            SELECT * FROM daily_text_logs
+            WHERE guild_id = ? AND day = ?
+              AND (
+                source = 'voice'
+                OR (source = 'chat' AND channel_id IN ({placeholders}))
+              )
+            ORDER BY created_at ASC, id ASC
+            LIMIT ?
+            """,
+            (guild_id, day, *ids, limit),
+        )
+        rows = await cursor.fetchall()
+        return [DailyTextLog.from_row(row) for row in rows]
+
     async def delete_daily_text_logs(
         self,
         guild_id: int,
