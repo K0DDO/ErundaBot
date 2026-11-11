@@ -632,6 +632,8 @@ def _patch_voice_recv() -> None:
                         )
                 except Exception as exc:
                     exc_text = repr(exc)
+                    # Stale SSRC→user after rejoin/MLS epoch — remap next packet.
+                    self._cached_id = None
                     if "UnencryptedWhenPassthroughDisabled" in exc_text:
                         # Valid transport Opus during epoch transition (pycord #3139).
                         packet.decrypted_data = _strip_dave_passthrough_trailers(
@@ -907,7 +909,7 @@ class VoiceListenService:
                         config.guild_id,
                     )
                 continue
-            if self.is_listening(config.guild_id):
+            if self.is_listening(config.guild_id) or config.guild_id in self._healing:
                 continue
             guild = bot.get_guild(config.guild_id)
             if guild is None:
@@ -980,8 +982,9 @@ class VoiceListenService:
                         voice_listen_channel_id=int(channel.id),
                         voice_announce_channel_id=self._announce_channels.get(guild.id),
                     )
-                    # Sink can die while vc stays connected — always rebind.
-                    self._bind_listen_sink(bot, guild, existing)
+                    # Already on the right channel — never stop/start listen mid-call
+                    # (that desyncs DAVE and is the main «went deaf» cause).
+                    self._bind_listen_sink(bot, guild, existing, restart=False)
                     self._ensure_watchdog(bot)
                     tip = await self._soundboard_status(guild, channel)
                     return f"Уже слушаю {channel.mention}\n{tip}"
@@ -997,40 +1000,42 @@ class VoiceListenService:
                     "libopus не загружен — распознавание речи и саундборд недоступны"
                 )
 
-            vc = await channel.connect(
-                cls=voice_recv.VoiceRecvClient,
-                self_deaf=False,
-                self_mute=False,
-            )
-            self._clients[guild.id] = vc
-            self._buffers[guild.id] = {}
-            self._reset_voice_counters(guild.id)
-            if announce_channel_id is not None:
-                self._announce_channels[guild.id] = int(announce_channel_id)
-                log.info(
-                    "Voice announce channel for guild %s → %s",
-                    guild.id,
-                    announce_channel_id,
+            self._healing.add(guild.id)
+            try:
+                vc = await channel.connect(
+                    cls=voice_recv.VoiceRecvClient,
+                    self_deaf=False,
+                    self_mute=False,
                 )
-            # Grace/session clock BEFORE bind so early RTP counts as real traffic.
-            self._mark_voice_join_grace(guild.id)
-            # Start listener first so Discord begins RTP, then wait for MLS keys.
-            self._bind_listen_sink(bot, guild, vc)
-            await _wait_for_dave(vc, timeout=10.0)
-            await asyncio.sleep(0.8)
-            # Rebind after DAVE ready — first bind can miss the key window.
-            self._bind_listen_sink(bot, guild, vc)
-            self._ensure_watchdog(bot)
-            await self.db.update_guild(
-                guild.id,
-                voice_listen_channel_id=int(channel.id),
-                voice_announce_channel_id=self._announce_channels.get(guild.id),
-            )
-            tip = await self._soundboard_status(guild, channel)
-            where = ""
-            if guild.id in self._announce_channels:
-                where = f"\nРеплики пишу в <#{self._announce_channels[guild.id]}>"
-            return f"Слушаю {channel.mention}\n{tip}{where}"
+                self._clients[guild.id] = vc
+                self._buffers[guild.id] = {}
+                self._reset_voice_counters(guild.id)
+                if announce_channel_id is not None:
+                    self._announce_channels[guild.id] = int(announce_channel_id)
+                    log.info(
+                        "Voice announce channel for guild %s → %s",
+                        guild.id,
+                        announce_channel_id,
+                    )
+                # Grace/session clock BEFORE bind so early RTP counts as real traffic.
+                self._mark_voice_join_grace(guild.id)
+                # Bind once. Decrypt path re-reads dave_session per packet — a second
+                # stop_listening/listen after DAVE-ready poisons nonces and goes deaf.
+                self._bind_listen_sink(bot, guild, vc, restart=True)
+                await _wait_for_dave(vc, timeout=10.0)
+                self._ensure_watchdog(bot)
+                await self.db.update_guild(
+                    guild.id,
+                    voice_listen_channel_id=int(channel.id),
+                    voice_announce_channel_id=self._announce_channels.get(guild.id),
+                )
+                tip = await self._soundboard_status(guild, channel)
+                where = ""
+                if guild.id in self._announce_channels:
+                    where = f"\nРеплики пишу в <#{self._announce_channels[guild.id]}>"
+                return f"Слушаю {channel.mention}\n{tip}{where}"
+            finally:
+                self._healing.discard(guild.id)
 
     def _reset_voice_counters(self, guild_id: int) -> None:
         self._pcm_packets[guild_id] = 0
@@ -1765,6 +1770,20 @@ class VoiceListenService:
                     session.set_passthrough_mode(True, 600)
             except Exception:
                 pass
+
+            # Sink thread died but VC still up — start listen without stop/restart.
+            try:
+                listening = bool(getattr(vc, "is_listening", lambda: False)())
+            except Exception:
+                listening = False
+            if not listening:
+                guild = bot.get_guild(guild_id)
+                if guild is not None:
+                    log.warning(
+                        "Voice sink not listening while connected guild=%s — start listen",
+                        guild_id,
+                    )
+                    self._bind_listen_sink(bot, guild, vc, restart=False)
 
             if status_due:
                 last_cb = self._last_callback_at.get(guild_id, 0.0)
