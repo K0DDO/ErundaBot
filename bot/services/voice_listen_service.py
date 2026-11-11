@@ -121,9 +121,58 @@ SWEAR_RE = re.compile(
     r")"
     r"[а-яёa-z]*"
 )
-# Strict meme trigger only: «сиксевен» (+ склонения). No 67 / 6-7 / шесть семь / etc.
+# Whisper mangles the meme hard: «6, 7», сексон, «Зигг сервон», «сюксалон»…
+_SIX_SEP = r"[\s\-–—./,;:…]*"
+# First half of the meme as Whisper hears it.
+_SIX_STEM = (
+    r"(?:сикс|сик\s*с?|секс|сек\s*с?|сыкс|сакс|сюкс|сукс|сухс|цикс|сигг?|"
+    r"six|sick|sik|sex|see|zick|zigg?|zik|"
+    r"зигг+|зиг|зик)"
+)
+# Second half.
+_SEVEN_STEM = (
+    r"(?:севен|севон|сервон|серван|саван|сайон|саён|салон|семь|"
+    r"seven|sevon|servon|servan|sevan|sion|salon)"
+)
 SIXSEVEN_RE = re.compile(
-    r"(?<![а-яёa-z0-9])сикс[\s\-]*евен[а-яё]*(?![а-яёa-z0-9])"
+    r"(?:"
+    rf"six{_SIX_SEP}seven|"
+    rf"sick{_SIX_SEP}seven|"
+    rf"see{_SIX_SEP}seven|"
+    rf"c{_SIX_SEP}seven|"
+    r"six\s*7|"
+    rf"6{_SIX_SEP}seven|"
+    rf"sex{_SIX_SEP}seven|"
+    r"sexon|sixon|sexion|sixion|"
+    rf"(?<!\d)6{_SIX_SEP}7(?!\d)|"
+    rf"сикс{_SIX_SEP}севен|"
+    rf"сик\s*с?{_SIX_SEP}севен|"
+    r"сикс[аеэ]?в[аеэ]?н|"
+    r"сикс[ао]?в[аеэ]н|"
+    # Whisper: «Сексеон», «сексион», «сиксеон»…
+    r"сикс[еёиыао]?[оае]?н|"
+    # Live 2026-11-08: «Суксал», «Сюксалон», «Сексуя», «сухсад»
+    r"с[июуы]кс[аеоуыи]?л?[аоеу]?н?|"
+    r"с[ею]кс[уиы][яею]|"
+    r"сухс[аеоу]д|сукс[аеоу]д|"
+    rf"сек\s*с?{_SIX_SEP}севен|"
+    rf"секс{_SIX_SEP}севен|"
+    r"секс[ао]?в[аеэ]н|"
+    r"сексев[аеэ]н|"
+    r"секс[еёиыао]?[оае]?н|"
+    r"сексон|циксон|сиксон|сексан|сексеон|сексион|сиксеон|"
+    # Whisper: «Секфа он.» (2026-11-07)
+    r"секфа\s*он|секфаон|сикфа\s*он|сикфаон|"
+    r"экс[еэ]в[еэ]н|exseven|x\s*seven|"
+    rf"сыкс{_SIX_SEP}севен|"
+    rf"сакс{_SIX_SEP}севен|"
+    rf"шесть{_SIX_SEP}семь|"
+    rf"6{_SIX_SEP}семь|"
+    rf"6{_SIX_SEP}саван|"
+    r"шесть\s*7|"
+    # Live Whisper mangling observed 2026-11-07: «Зигг, сервон!» / «Zick, servon!»
+    rf"{_SIX_STEM}{_SIX_SEP}{_SEVEN_STEM}"
+    r")"
 )
 # Whisper noise / music hallucinations on bad / encrypted-as-noise audio.
 JUNK_TRANSCRIPT_RE = re.compile(
@@ -191,25 +240,77 @@ def _normalize_stt_text(text: str) -> str:
 
 def _normalize_sixseven_text(text: str) -> str:
     cleaned = _normalize_stt_text(text)
-    return re.sub(r"\s+", " ", cleaned).strip()
+    # Whisper often sticks punctuation to digits/words: «6-7.», «6, 7».
+    cleaned = re.sub(r"(?<!\d)6[\s\-–—./,;:…]+7(?!\d)", "67", cleaned)
+    # Collapse observed RU/EN mangling toward canonical stems before regex.
+    replacements = (
+        (r"зигг+", "сикс"),
+        (r"\bзиг\b", "сикс"),
+        (r"\bзик\b", "сикс"),
+        (r"\bсигг+\b", "сикс"),
+        (r"\bсиг\b", "сикс"),
+        (r"сюкс", "сикс"),
+        (r"сукс", "сикс"),
+        (r"сухс", "сикс"),
+        (r"\bzick\b", "six"),
+        (r"\bzigg+\b", "six"),
+        (r"\bzig\b", "six"),
+        (r"\bzik\b", "six"),
+        (r"сервон", "севен"),
+        (r"серван", "севен"),
+        (r"севон", "севен"),
+        (r"сайон", "севен"),
+        (r"саён", "севен"),
+        (r"салон", "севен"),
+        (r"сексуя+", "сексон"),
+        (r"сексуй", "сексон"),
+        (r"\bservon\b", "seven"),
+        (r"\bservan\b", "seven"),
+        (r"\bsevon\b", "seven"),
+        (r"\bsevan\b", "seven"),
+        (r"\bsion\b", "seven"),
+        (r"\bsalon\b", "seven"),
+    )
+    for pattern, repl in replacements:
+        cleaned = re.sub(pattern, repl, cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def mentions_sixseven(text: str) -> bool:
-    """True only for «сиксевен» (+ склонения / лёгкий пробел)."""
     cleaned = _normalize_sixseven_text(text)
     if SIXSEVEN_RE.search(cleaned):
         return True
-    compact = re.sub(r"[^а-яё]+", "", cleaned)
-    return bool(re.search(r"сиксевен[а-яё]*", compact))
+    # Compact one-token shout: «сюксалонсюксалон» / «суксал.»
+    compact = re.sub(r"[^a-zа-я0-9]+", "", cleaned)
+    if not compact:
+        return False
+    return bool(
+        re.search(
+            r"(?:"
+            r"с[июуы]кс[аеоуыилнд]{1,6}|"
+            r"с[еэ]кс[уиы][яею]|"
+            r"сикс[аеоу]?л?[аоеу]?н|"
+            r"сексон|сиксон|сексеон|"
+            r"sixseven|sexseven|sexon"
+            r")",
+            compact,
+        )
+    )
 
 
 def maybe_sixseven_near_miss(text: str) -> bool:
-    """Near-miss only around «сиксевен» — no 67 / шесть семь."""
+    """Cheap hint that Whisper mangled the meme — worth a no-lang retry."""
     cleaned = _normalize_sixseven_text(text)
     if not cleaned or mentions_sixseven(cleaned):
         return False
-    compact = re.sub(r"[^а-яё]+", "", cleaned)
-    return bool(re.search(r"сикс(?:ев|еве|евен)", compact))
+    return bool(
+        re.search(
+            rf"(?:{_SIX_STEM}|{_SEVEN_STEM}|шесть|67|сюкс|сукс|сухс|сексу|"
+            r"(?<!\d)6\D{0,4}7(?!\d)|(?<!\d)6\b)",
+            cleaned,
+        )
+    )
 
 
 def mentions_erunda(text: str) -> bool:
@@ -1371,13 +1472,11 @@ class VoiceListenService:
         user_id: int,
         text: str,
     ) -> tuple[bool, str]:
-        """Match «сиксевен» in this chunk only (no cross-pause number glue)."""
-        cleaned = (text or "").strip()
-        # Keep a short history for debugging / future use, but do not combine
-        # chunks for matching — that caused false hits on «шесть… семь».
+        """Match meme in this chunk or across a short pause (сикс + севен)."""
         now = datetime.now(timezone.utc).timestamp()
         key = (guild_id, user_id)
         chunks = self._recent_stt[key]
+        cleaned = (text or "").strip()
         if cleaned:
             chunks.append((now, cleaned))
         cutoff = now - SIXSEVEN_CONTEXT_SECONDS
@@ -1386,6 +1485,9 @@ class VoiceListenService:
         ]
         if mentions_sixseven(cleaned):
             return True, cleaned
+        combined = " ".join(part for _, part in chunks)
+        if len(chunks) >= 2 and mentions_sixseven(combined):
+            return True, combined
         return False, cleaned
 
     def _resolve_speaker_id(
