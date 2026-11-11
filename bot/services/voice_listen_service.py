@@ -75,11 +75,10 @@ VOICE_NO_RTP_RECOVER_SECONDS = 50.0
 # Resume join only if Discord already dropped us — never leave+join while connected.
 # Was 180s — felt like «вернётся через несколько минут».
 VOICE_RESUME_JOIN_COOLDOWN_SECONDS = 25.0
-# Connected but deaf (no PCM/callbacks): force leave+rejoin. Soft DAVE remount is unsafe;
-# a true zombie session is already dead — hard resume is the recovery path.
-VOICE_ZOMBIE_FORCE_RESUME_SECONDS = 90.0
 # Ops visibility only — never leave+join / remount to "heal" a live DAVE session.
 VOICE_HEALTH_STATUS_EVERY = 60.0
+# After repeated no-RTP resumes, back off so empty/quiet channels don't flap.
+VOICE_RESUME_FAIL_BACKOFF_SECONDS = 180.0
 # If STT task dies/hangs without clearing flushing, unblock the user buffer.
 VOICE_FLUSH_STUCK_SECONDS = 45.0
 # Opus DTX silence frame (pycord / cursedshrine): keeps decoder alive on decrypt miss.
@@ -816,6 +815,7 @@ class VoiceListenService:
         self._last_useful_stt_at: dict[int, float] = {}
         self._last_heal_at: dict[int, float] = {}
         self._last_hard_reconnect_at: dict[int, float] = {}
+        self._resume_fail_streak: dict[int, int] = defaultdict(int)
         self._recover_grace_until: dict[int, float] = {}
         self._session_started_at: dict[int, float] = {}
         self._last_soft_rebind_at: dict[int, float] = {}
@@ -1351,91 +1351,26 @@ class VoiceListenService:
         if guild_id in self._healing:
             return
         last = self._last_hard_reconnect_at.get(guild_id, 0.0)
-        if now - last < VOICE_RESUME_JOIN_COOLDOWN_SECONDS:
+        fails = self._resume_fail_streak.get(guild_id, 0)
+        cooldown = VOICE_RESUME_JOIN_COOLDOWN_SECONDS
+        if fails >= 2:
+            cooldown = VOICE_RESUME_FAIL_BACKOFF_SECONDS
+        if now - last < cooldown:
             return
         # Stamp cooldown immediately so health spam cannot queue parallel joins.
         self._last_hard_reconnect_at[guild_id] = now
         log.warning(
-            "Scheduling voice resume join guild=%s (%s)",
+            "Scheduling voice resume join guild=%s (%s) fails=%s cooldown=%.0fs",
             guild_id,
             reason,
+            fails,
+            cooldown,
         )
 
         def _go() -> None:
             asyncio.create_task(self._resume_join_if_disconnected(guild_id, reason=reason))
 
         bot.loop.call_soon_threadsafe(_go)
-
-    def _schedule_zombie_rejoin(self, guild_id: int, *, reason: str) -> None:
-        """Force leave+join while keeping DB resume — for connected-but-deaf sessions."""
-        bot = self._bot
-        if bot is None or self.ai.stt_credits_exhausted:
-            return
-        if guild_id in self._healing:
-            return
-        now = datetime.now(timezone.utc).timestamp()
-        last = self._last_hard_reconnect_at.get(guild_id, 0.0)
-        if now - last < VOICE_RESUME_JOIN_COOLDOWN_SECONDS:
-            return
-        self._last_hard_reconnect_at[guild_id] = now
-        log.warning("Scheduling zombie rejoin guild=%s (%s)", guild_id, reason)
-
-        def _go() -> None:
-            asyncio.create_task(self._zombie_rejoin(guild_id, reason=reason))
-
-        bot.loop.call_soon_threadsafe(_go)
-
-    async def _zombie_rejoin(self, guild_id: int, *, reason: str) -> None:
-        bot = self._bot
-        if bot is None or self.ai.stt_credits_exhausted:
-            return
-        if guild_id in self._healing:
-            return
-        self._healing.add(guild_id)
-        self._last_hard_reconnect_at[guild_id] = datetime.now(timezone.utc).timestamp()
-        try:
-            config = await self.db.get_guild(guild_id)
-            channel_id = config.voice_listen_channel_id if config else None
-            announce_id = self._announce_channels.get(guild_id)
-            if announce_id is None and config is not None:
-                announce_id = config.voice_announce_channel_id
-            if not channel_id:
-                log.warning("Zombie rejoin aborted: no resume channel guild=%s", guild_id)
-                return
-            # Drop dead/zombie client but keep DB resume target.
-            await self.leave(guild_id, flush=False, clear_resume=False)
-            # leave() cleared in-memory announce — restore for join
-            if announce_id is not None:
-                self._announce_channels[guild_id] = int(announce_id)
-            # Re-assert resume id (leave with clear_resume=False keeps it, but be safe).
-            await self.db.update_guild(
-                guild_id,
-                voice_listen_channel_id=int(channel_id),
-                voice_announce_channel_id=announce_id,
-            )
-            guild = bot.get_guild(guild_id)
-            channel = guild.get_channel(channel_id) if guild else None
-            if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
-                log.warning("Zombie rejoin aborted: channel missing guild=%s", guild_id)
-                return
-            log.warning(
-                "Zombie rejoin guild=%s channel=%s (%s)",
-                guild_id,
-                channel.id,
-                reason,
-            )
-            _reset_dave_stats()
-            await self.join(bot, channel, announce_channel_id=announce_id)
-            _reset_dave_stats()
-            ok = await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
-            if ok:
-                log.info("Zombie rejoin got RTP guild=%s", guild_id)
-            else:
-                log.error("Zombie rejoin still no RTP guild=%s", guild_id)
-        except Exception:
-            log.exception("Zombie rejoin failed guild=%s", guild_id)
-        finally:
-            self._healing.discard(guild_id)
 
     async def _resume_join_if_disconnected(self, guild_id: int, *, reason: str) -> None:
         bot = self._bot
@@ -1500,10 +1435,21 @@ class VoiceListenService:
             _reset_dave_stats()
             ok = await self._wait_for_rtp(guild_id, timeout=VOICE_RTP_WAIT_SECONDS)
             if ok:
+                self._resume_fail_streak[guild_id] = 0
                 log.info("Resume join got RTP guild=%s", guild_id)
             else:
-                log.error("Resume join still no RTP guild=%s", guild_id)
+                self._resume_fail_streak[guild_id] = (
+                    self._resume_fail_streak.get(guild_id, 0) + 1
+                )
+                log.error(
+                    "Resume join still no RTP guild=%s fails=%s",
+                    guild_id,
+                    self._resume_fail_streak[guild_id],
+                )
         except Exception:
+            self._resume_fail_streak[guild_id] = (
+                self._resume_fail_streak.get(guild_id, 0) + 1
+            )
             log.exception("Voice resume join failed guild=%s", guild_id)
         finally:
             self._healing.discard(guild_id)
@@ -1820,25 +1766,11 @@ class VoiceListenService:
             except Exception:
                 pass
 
-            last_cb = self._last_callback_at.get(guild_id, 0.0)
-            last_pcm = self._last_pcm_at.get(guild_id, 0.0)
-            cb_age = (now - last_cb) if last_cb > 0 else 1e9
-            pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
-            # Zombie: still "connected" but deaf for too long — force hard resume.
-            if (
-                pcm_age >= VOICE_ZOMBIE_FORCE_RESUME_SECONDS
-                and cb_age >= VOICE_ZOMBIE_FORCE_RESUME_SECONDS
-            ):
-                log.warning(
-                    "Voice zombie guild=%s pcm_age=%.0fs cb_age=%.0fs — force resume",
-                    guild_id,
-                    pcm_age,
-                    cb_age,
-                )
-                self._schedule_zombie_rejoin(guild_id, reason="zombie_no_audio")
-                continue
-
             if status_due:
+                last_cb = self._last_callback_at.get(guild_id, 0.0)
+                last_pcm = self._last_pcm_at.get(guild_id, 0.0)
+                cb_age = (now - last_cb) if last_cb > 0 else 1e9
+                pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
                 empty = self._empty_pcm_streak.get(guild_id, 0)
                 fails, oks = _dave_fail_counts()
                 log.info(
