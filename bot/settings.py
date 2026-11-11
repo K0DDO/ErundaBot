@@ -10,6 +10,9 @@ OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0") or "0")
 HOME_GUILD_ID = int(
     os.getenv("HOME_GUILD_ID", "1497627892589531202") or "1497627892589531202"
 )
+# Owner DM when VPS root used space reaches this many GiB (30G disk → ~5G free).
+DISK_ALERT_USED_GIB = float(os.getenv("DISK_ALERT_USED_GIB", "25") or "25")
+DISK_ALERT_PATH = os.getenv("DISK_ALERT_PATH", "/") or "/"
 # Voice→text / voice_listen: Ерундульки + Пепелендовский экологический центр.
 _DEFAULT_VOICE_LISTEN_GUILDS = f"{HOME_GUILD_ID},1546175604032802907"
 

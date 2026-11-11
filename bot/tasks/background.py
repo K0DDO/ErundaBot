@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -10,6 +11,7 @@ from zoneinfo import ZoneInfo
 from discord.ext import tasks
 import discord
 
+from bot.settings import DISK_ALERT_PATH, DISK_ALERT_USED_GIB
 from bot.utils.embeds import base_embed
 from bot.views.event_views import refresh_event_card, retire_event
 
@@ -17,6 +19,8 @@ log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from bot.bot import ErundaBot
+
+_GIB = 1024**3
 
 
 class BackgroundTasks:
@@ -27,6 +31,7 @@ class BackgroundTasks:
         self._started = False
         self._fest_phase: dict[int, str] = {}
         self._tgk_meta_date: dict[int, date] = {}
+        self._disk_alert_active = False
 
     @property
     def started(self) -> bool:
@@ -49,6 +54,8 @@ class BackgroundTasks:
             self.tgk_meta_loop.start()
         if not self.voice_dossier_loop.is_running():
             self.voice_dossier_loop.start()
+        if not self.disk_alert_loop.is_running():
+            self.disk_alert_loop.start()
         await self.bot.voice_listen_service.start(self.bot)
         log.info("Background tasks started")
 
@@ -63,6 +70,7 @@ class BackgroundTasks:
             self.birthday_rgb_loop,
             self.tgk_meta_loop,
             self.voice_dossier_loop,
+            self.disk_alert_loop,
         ):
             if loop.is_running():
                 loop.cancel()
@@ -322,4 +330,46 @@ class BackgroundTasks:
 
     @voice_dossier_loop.before_loop
     async def before_voice_dossier_loop(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @tasks.loop(minutes=5)
+    async def disk_alert_loop(self) -> None:
+        await self.bot.wait_until_ready()
+        try:
+            usage = shutil.disk_usage(DISK_ALERT_PATH)
+        except OSError:
+            log.exception("Disk alert: failed to read %s", DISK_ALERT_PATH)
+            return
+
+        used_gib = usage.used / _GIB
+        total_gib = usage.total / _GIB
+        free_gib = usage.free / _GIB
+        over = used_gib >= DISK_ALERT_USED_GIB
+
+        if over and not self._disk_alert_active:
+            self._disk_alert_active = True
+            pct = (100.0 * usage.used / usage.total) if usage.total else 0.0
+            await self.bot._dm_owner(
+                "⚠️ Диск VPS почти полный: "
+                f"**{used_gib:.1f}** / {total_gib:.1f} ГиБ занято "
+                f"({pct:.0f}%), свободно ~{free_gib:.1f} ГиБ.\n"
+                f"Порог оповещения: {DISK_ALERT_USED_GIB:g} ГиБ. "
+                "Иначе Postgres/бот снова лягут."
+            )
+            log.warning(
+                "Disk alert DM sent: %.1f/%.1f GiB used on %s",
+                used_gib,
+                total_gib,
+                DISK_ALERT_PATH,
+            )
+        elif not over and self._disk_alert_active:
+            self._disk_alert_active = False
+            log.info(
+                "Disk alert cleared: %.1f GiB used (threshold %g)",
+                used_gib,
+                DISK_ALERT_USED_GIB,
+            )
+
+    @disk_alert_loop.before_loop
+    async def before_disk_alert_loop(self) -> None:
         await self.bot.wait_until_ready()
