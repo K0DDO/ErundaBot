@@ -820,6 +820,8 @@ class VoiceListenService:
         self._sink_dead_streak: dict[int, int] = defaultdict(int)
         self._hallucination_streak: dict[int, int] = defaultdict(int)
         self._healing: set[int] = set()
+        # Guilds where we initiated disconnect (leave/join/resume) — ignore voice_state leave.
+        self._expecting_disconnect: set[int] = set()
         self._health_tick: float = 0.0
         self._health_status_tick: float = 0.0
         self._empty_pcm_streak: dict[int, int] = defaultdict(int)
@@ -980,7 +982,12 @@ class VoiceListenService:
                     self._ensure_watchdog(bot)
                     tip = await self._soundboard_status(guild, channel)
                     return f"Уже слушаю {channel.mention}\n{tip}"
-                await existing.disconnect(force=True)
+                self._expecting_disconnect.add(guild.id)
+                try:
+                    await existing.disconnect(force=True)
+                except Exception:
+                    self._expecting_disconnect.discard(guild.id)
+                    raise
 
             if not discord.opus.is_loaded():
                 raise ValueError(
@@ -1375,15 +1382,19 @@ class VoiceListenService:
             # does not trip over a half-dead connection object.
             dead = self._clients.pop(guild_id, None)
             if dead is not None:
+                self._expecting_disconnect.add(guild_id)
                 try:
                     await dead.disconnect(force=True)
                 except Exception:
+                    self._expecting_disconnect.discard(guild_id)
                     log.exception("Failed to drop dead voice client guild=%s", guild_id)
             guild = bot.get_guild(guild_id)
             if guild is not None and guild.voice_client is not None:
+                self._expecting_disconnect.add(guild_id)
                 try:
                     await guild.voice_client.disconnect(force=True)
                 except Exception:
+                    self._expecting_disconnect.discard(guild_id)
                     log.exception("Failed to drop guild.voice_client guild=%s", guild_id)
 
             announce_id = self._announce_channels.get(guild_id)
@@ -1391,9 +1402,18 @@ class VoiceListenService:
             if announce_id is None and config is not None:
                 announce_id = config.voice_announce_channel_id
             channel_id = config.voice_listen_channel_id if config else None
+            # Kick via Discord UI clears resume — abort if already cleared.
+            if not channel_id:
+                log.info("Resume join aborted: listen cleared guild=%s (%s)", guild_id, reason)
+                return
             channel = guild.get_channel(channel_id) if guild and channel_id else None
             if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
                 log.warning("Resume join aborted: no channel guild=%s", guild_id)
+                return
+            # Re-check after awaits — external kick may have cleared resume mid-flight.
+            config = await self.db.get_guild(guild_id)
+            if config is None or not config.voice_listen_channel_id:
+                log.info("Resume join aborted: listen cleared mid-flight guild=%s", guild_id)
                 return
             log.warning(
                 "Resume join after Discord drop guild=%s channel=%s (%s)",
@@ -1462,9 +1482,45 @@ class VoiceListenService:
                 vc.stop_listening()
             except Exception:
                 pass
-            await vc.disconnect(force=True)
+            self._expecting_disconnect.add(guild_id)
+            try:
+                await vc.disconnect(force=True)
+            except Exception:
+                self._expecting_disconnect.discard(guild_id)
+                raise
             return "Вышел из войса"
         return "Бот не был в войсе"
+
+    async def handle_bot_voice_disconnect(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        """Discord UI kick/disconnect → same as /z-admin voice_leave (no auto-rejoin)."""
+        bot = self._bot
+        if bot is None or bot.user is None:
+            return
+        if member.id != bot.user.id:
+            return
+        if before.channel is None or after.channel is not None:
+            return
+        guild_id = member.guild.id
+        if guild_id in self._expecting_disconnect:
+            self._expecting_disconnect.discard(guild_id)
+            return
+        # Only if we were listening / had a resume target — ignore unrelated leaves.
+        had_client = guild_id in self._clients
+        config = await self.db.get_guild(guild_id)
+        had_resume = bool(config and config.voice_listen_channel_id)
+        if not had_client and not had_resume:
+            return
+        log.info(
+            "Bot kicked/disconnected from voice via Discord guild=%s channel=%s — clear resume",
+            guild_id,
+            before.channel.id,
+        )
+        await self.leave(guild_id, flush=True, clear_resume=True)
 
     def _sixseven_from_context(
         self,

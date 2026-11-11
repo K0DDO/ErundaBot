@@ -807,6 +807,9 @@ class AdminCog(commands.Cog):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
+        await self.bot.voice_listen_service.handle_bot_voice_disconnect(
+            member, before, after
+        )
         await self.bot.voice_listen_service.handle_aisa_voice_greeting(
             member, before, after
         )
