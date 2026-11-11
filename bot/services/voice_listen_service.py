@@ -1179,7 +1179,100 @@ class VoiceListenService:
                 pcm_bytes,
             )
 
-        vc.listen(voice_recv.BasicSink(on_voice, decode=True))
+        def _after_listen(exc: BaseException | None) -> None:
+            if exc is not None:
+                log.exception(
+                    "Voice AudioReader stopped with error guild=%s: %r",
+                    guild.id,
+                    exc,
+                )
+            else:
+                log.warning("Voice AudioReader stopped guild=%s", guild.id)
+
+        vc.listen(voice_recv.BasicSink(on_voice, decode=True), after=_after_listen)
+
+    @staticmethod
+    def _reader_health(vc: discord.VoiceProtocol) -> dict[str, float | int | None]:
+        reader = getattr(vc, "_reader", None)
+        if reader is None or reader is discord.utils.MISSING:
+            return {}
+        health = getattr(reader, "health", None)
+        if callable(health):
+            try:
+                return dict(health())
+            except Exception:
+                return {}
+        return {
+            "decrypt_ok": int(getattr(reader, "decrypt_ok", 0) or 0),
+            "crypto_errors": int(getattr(reader, "crypto_errors", 0) or 0),
+            "key_resyncs": int(getattr(reader, "key_resyncs", 0) or 0),
+        }
+
+    def _sync_reader_secret_key(self, guild_id: int, vc: discord.VoiceProtocol) -> bool:
+        """Re-read voice_client.secret_key into AudioReader (fixes stale-key deafness)."""
+        reader = getattr(vc, "_reader", None)
+        if reader is None or reader is discord.utils.MISSING:
+            return False
+        key = getattr(vc, "secret_key", None)
+        if not key:
+            return False
+        try:
+            key_b = bytes(key)
+        except Exception:
+            return False
+        decryptor = getattr(reader, "decryptor", None)
+        if decryptor is None:
+            return False
+        current = getattr(decryptor, "key", None)
+        if current == key_b:
+            return False
+        update = getattr(reader, "update_secret_key", None)
+        if not callable(update):
+            return False
+        update(key_b)
+        log.warning(
+            "Synced stale voice reader secret key guild=%s (transport decrypt was using old key)",
+            guild_id,
+        )
+        return True
+
+    def _maybe_refresh_deaf_reader(
+        self,
+        bot: ErundaBot,
+        guild_id: int,
+        vc: discord.VoiceProtocol,
+        *,
+        rh: dict[str, float | int | None],
+    ) -> None:
+        """If UDP transport decrypt is dead, remount AudioReader only (not leave channel).
+
+        This is the real fix for discord-ext-voice-recv upstream #59 (secret_key
+        rotated under the reader). Do NOT remount while decrypt_ok is flowing —
+        that poisons DAVE nonces.
+        """
+        guild = bot.get_guild(guild_id)
+        if guild is None:
+            return
+        crypto_errors = int(rh.get("crypto_errors") or 0)
+        decrypt_ok = int(rh.get("decrypt_ok") or 0)
+        last_ok_age = rh.get("last_decrypt_ok_age")
+        transport_dead = crypto_errors >= 20 and (
+            decrypt_ok == 0
+            or (isinstance(last_ok_age, (int, float)) and float(last_ok_age) >= 15.0)
+        )
+        if not transport_dead:
+            return
+        now = datetime.now(timezone.utc).timestamp()
+        if now - self._last_soft_rebind_at.get(guild_id, 0.0) < VOICE_SOFT_REBIND_COOLDOWN_SECONDS:
+            return
+        self._last_soft_rebind_at[guild_id] = now
+        log.warning(
+            "Transport decrypt dead guild=%s crypto_errors=%s decrypt_ok=%s — refresh AudioReader",
+            guild_id,
+            crypto_errors,
+            decrypt_ok,
+        )
+        self._bind_listen_sink(bot, guild, vc, restart=True)
 
     def _schedule_soft_rebind(self, guild_id: int, *, reason: str) -> None:
         """Only touch sink when RTP/callbacks are actually dead.
@@ -1781,6 +1874,12 @@ class VoiceListenService:
             except Exception:
                 pass
 
+            # Stale secret_key under AudioReader → every RTP CryptoError → silent deafness.
+            self._sync_reader_secret_key(guild_id, vc)
+            rh = self._reader_health(vc)
+            if rh:
+                self._maybe_refresh_deaf_reader(bot, guild_id, vc, rh=rh)
+
             # Sink thread died but VC still up — start listen without stop/restart.
             try:
                 listening = bool(getattr(vc, "is_listening", lambda: False)())
@@ -1808,7 +1907,8 @@ class VoiceListenService:
                     listening = False
                 log.info(
                     "Voice health guild=%s listening=%s connected=%s "
-                    "cb_age=%.0fs pcm_age=%.0fs empty=%s dave_fail=%s dave_ok=%s",
+                    "cb_age=%.0fs pcm_age=%.0fs empty=%s dave_fail=%s dave_ok=%s "
+                    "udp_ok=%s udp_crypt_err=%s key_resyncs=%s",
                     guild_id,
                     listening,
                     bool(vc.is_connected()),
@@ -1817,6 +1917,9 @@ class VoiceListenService:
                     empty,
                     fails,
                     oks,
+                    rh.get("decrypt_ok"),
+                    rh.get("crypto_errors"),
+                    rh.get("key_resyncs"),
                 )
 
         # Also catch guilds that fell out of _clients but still have a DB resume
