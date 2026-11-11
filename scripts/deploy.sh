@@ -33,7 +33,8 @@ git reset --hard origin/main
 echo "Host SHA $(git rev-parse --short HEAD)"
 
 echo "==> Build and restart"
-if ! "${COMPOSE[@]}" build --no-cache; then
+# Cache layers (apt/ffmpeg ~710MB) — --no-cache filled the 30G VPS in a few deploys.
+if ! "${COMPOSE[@]}" build; then
   rollback
 fi
 if ! "${COMPOSE[@]}" up -d --force-recreate; then

@@ -1263,12 +1263,12 @@ class VoiceListenService:
         if vc is not None and vc.is_connected():
             log.info("Resume join skipped guild=%s — already connected (%s)", guild_id, reason)
             return
-        now = datetime.now(timezone.utc).timestamp()
-        last = self._last_hard_reconnect_at.get(guild_id, 0.0)
-        if now - last < VOICE_RESUME_JOIN_COOLDOWN_SECONDS:
-            return
+        # Cooldown is stamped in _schedule_resume_if_disconnected so health spam
+        # cannot queue parallel joins. Do NOT re-check it here — that made every
+        # scheduled resume return immediately without joining (0 joins / hundreds
+        # of "Scheduling" logs).
         self._healing.add(guild_id)
-        self._last_hard_reconnect_at[guild_id] = now
+        self._last_hard_reconnect_at[guild_id] = datetime.now(timezone.utc).timestamp()
         try:
             # Drop zombie VoiceClient after failed Discord reconnect so join()
             # does not trip over a half-dead connection object.
