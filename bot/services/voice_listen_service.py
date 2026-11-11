@@ -1017,12 +1017,22 @@ class VoiceListenService:
                         guild.id,
                         announce_channel_id,
                     )
-                # Grace/session clock BEFORE bind so early RTP counts as real traffic.
-                self._mark_voice_join_grace(guild.id)
-                # Bind once. Decrypt path re-reads dave_session per packet — a second
-                # stop_listening/listen after DAVE-ready poisons nonces and goes deaf.
-                self._bind_listen_sink(bot, guild, vc, restart=True)
+                # Wait MLS/DAVE first, then bind listen exactly once.
+                # Binding before keys + remounting after was the deafness cycle:
+                # stop_listening/listen mid-session poisons DAVE nonces permanently.
                 await _wait_for_dave(vc, timeout=10.0)
+                self._mark_voice_join_grace(guild.id)
+                self._bind_listen_sink(bot, guild, vc, restart=True)
+                try:
+                    listening = bool(getattr(vc, "is_listening", lambda: False)())
+                except Exception:
+                    listening = False
+                log.info(
+                    "Voice listen bound guild=%s channel=%s listening=%s",
+                    guild.id,
+                    channel.id,
+                    listening,
+                )
                 self._ensure_watchdog(bot)
                 await self.db.update_guild(
                     guild.id,
@@ -1792,10 +1802,16 @@ class VoiceListenService:
                 pcm_age = (now - last_pcm) if last_pcm > 0 else 1e9
                 empty = self._empty_pcm_streak.get(guild_id, 0)
                 fails, oks = _dave_fail_counts()
+                try:
+                    listening = bool(getattr(vc, "is_listening", lambda: False)())
+                except Exception:
+                    listening = False
                 log.info(
-                    "Voice health guild=%s cb_age=%.0fs pcm_age=%.0fs empty=%s "
-                    "dave_fail=%s dave_ok=%s",
+                    "Voice health guild=%s listening=%s connected=%s "
+                    "cb_age=%.0fs pcm_age=%.0fs empty=%s dave_fail=%s dave_ok=%s",
                     guild_id,
+                    listening,
+                    bool(vc.is_connected()),
                     cb_age if cb_age < 1e8 else -1,
                     pcm_age if pcm_age < 1e8 else -1,
                     empty,
