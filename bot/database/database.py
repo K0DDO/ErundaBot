@@ -1291,16 +1291,14 @@ class Database:
         limit: int = 10,
     ) -> list[Quote]:
         if author_id is not None:
+            # author_ids is TEXT JSON array; jsonb @> works on Postgres (no sqlite json_each).
             cursor = await self.connection.execute(
                 """
                 SELECT * FROM quotes
                 WHERE guild_id = ?
                   AND (
                     author_id = ?
-                    OR EXISTS (
-                      SELECT 1 FROM json_each(COALESCE(author_ids, '[]'))
-                      WHERE CAST(json_each.value AS INTEGER) = ?
-                    )
+                    OR COALESCE(author_ids, '[]')::jsonb @> jsonb_build_array(?::bigint)
                   )
                 ORDER BY saved_at DESC LIMIT ?
                 """,
@@ -1330,10 +1328,7 @@ class Database:
                 WHERE guild_id = ?
                   AND (
                     author_id = ?
-                    OR EXISTS (
-                      SELECT 1 FROM json_each(COALESCE(author_ids, '[]'))
-                      WHERE CAST(json_each.value AS INTEGER) = ?
-                    )
+                    OR COALESCE(author_ids, '[]')::jsonb @> jsonb_build_array(?::bigint)
                   )
                 """,
                 (guild_id, author_id, author_id),

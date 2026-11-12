@@ -125,60 +125,90 @@ class BackgroundTasks:
 
                 announcements = await self.bot.birthday_service.due_announcements(config, now)
                 for birthday in announcements:
-                    member = await self.bot.birthday_star_service.resolve_member(
-                        guild, birthday.user_id
-                    )
-                    if member is not None:
+                    try:
+                        member = await self.bot.birthday_star_service.resolve_member(
+                            guild, birthday.user_id
+                        )
+                        if member is not None:
+                            try:
+                                await self.bot.birthday_star_service.grant(
+                                    guild, member, granted_on=local_today
+                                )
+                            except Exception:
+                                log.exception(
+                                    "Failed to grant birthday star to %s", birthday.user_id
+                                )
+                        else:
+                            log.warning(
+                                "Birthday announce without member cache/fetch for %s in guild %s",
+                                birthday.user_id,
+                                config.guild_id,
+                            )
+                        # Mention only in message content — embeds show raw IDs on mobile.
+                        embed, _used_ai = await self.bot.birthday_service.announce_embed(
+                            guild,
+                            birthday,
+                            local_today,
+                            self.bot.ai_service,
+                            mention=False,
+                        )
+                        message = await channel.send(
+                            content=f"<@{birthday.user_id}>",
+                            embed=embed,
+                            allowed_mentions=discord.AllowedMentions(users=True),
+                        )
+                        await self.bot.birthday_service.mark_notified(
+                            config.guild_id,
+                            birthday.user_id,
+                            local_today,
+                            "announce",
+                            channel_id=channel.id,
+                            message_id=message.id,
+                        )
                         try:
-                            await self.bot.birthday_star_service.grant(
-                                guild, member, granted_on=local_today
+                            await self.bot.birthday_service.delete_reminder_message(
+                                guild, birthday.user_id, local_today
                             )
                         except Exception:
-                            log.exception("Failed to grant birthday star to %s", birthday.user_id)
-                    else:
-                        log.warning(
-                            "Birthday announce without member cache/fetch for %s in guild %s",
-                            birthday.user_id,
+                            log.exception(
+                                "Failed to delete birthday reminder for %s",
+                                birthday.user_id,
+                            )
+                        log.info(
+                            "Birthday announce sent guild=%s user=%s",
                             config.guild_id,
+                            birthday.user_id,
                         )
-                    # Mention only in message content — embeds show raw IDs on mobile.
-                    embed, _used_ai = await self.bot.birthday_service.announce_embed(
-                        guild,
-                        birthday,
-                        local_today,
-                        self.bot.ai_service,
-                        mention=False,
-                    )
-                    message = await channel.send(
-                        content=f"<@{birthday.user_id}>",
-                        embed=embed,
-                        allowed_mentions=discord.AllowedMentions(users=True),
-                    )
-                    await self.bot.birthday_service.mark_notified(
-                        config.guild_id,
-                        birthday.user_id,
-                        local_today,
-                        "announce",
-                        channel_id=channel.id,
-                        message_id=message.id,
-                    )
+                    except Exception:
+                        log.exception(
+                            "Birthday announce failed guild=%s user=%s",
+                            config.guild_id,
+                            birthday.user_id,
+                        )
 
                 reminders = await self.bot.birthday_service.due_reminders(config, now)
                 for birthday, event_date in reminders:
-                    embed = self.bot.birthday_service.reminder_embed(
-                        guild,
-                        birthday,
-                        days=config.birthday_reminder_days,
-                    )
-                    message = await channel.send(embed=embed)
-                    await self.bot.birthday_service.mark_notified(
-                        config.guild_id,
-                        birthday.user_id,
-                        event_date,
-                        "reminder",
-                        channel_id=channel.id,
-                        message_id=message.id,
-                    )
+                    try:
+                        embed = self.bot.birthday_service.reminder_embed(
+                            guild,
+                            birthday,
+                            days=config.birthday_reminder_days,
+                        )
+                        message = await channel.send(embed=embed)
+                        await self.bot.birthday_service.mark_notified(
+                            config.guild_id,
+                            birthday.user_id,
+                            event_date,
+                            "reminder",
+                            channel_id=channel.id,
+                            message_id=message.id,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Birthday reminder failed guild=%s user=%s",
+                            config.guild_id,
+                            birthday.user_id,
+                        )
             except Exception:
                 log.exception("Birthday loop failed for guild %s", config.guild_id)
 

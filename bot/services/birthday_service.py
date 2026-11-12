@@ -294,7 +294,8 @@ class BirthdayService:
         hour, minute = parsed
 
         local_now = now.astimezone(ZoneInfo(config.timezone))
-        if local_now.hour != hour or local_now.minute != minute:
+        # After announce_time keep retrying until marked notified (missed minute / transient errors).
+        if (local_now.hour, local_now.minute) < (hour, minute):
             return []
 
         today = local_now.date()
@@ -320,7 +321,7 @@ class BirthdayService:
         hour, minute = parsed
 
         local_now = now.astimezone(ZoneInfo(config.timezone))
-        if local_now.hour != hour or local_now.minute != minute:
+        if (local_now.hour, local_now.minute) < (hour, minute):
             return []
 
         today = local_now.date()
@@ -398,7 +399,10 @@ class BirthdayService:
             return removed
 
         board_id = config.birthday_board_message_id
-        stale_titles = {"День рождения", "Скоро день рождения"}
+        # Only sweep past announce embeds here. Reminder ("Скоро…") is removed via
+        # DB rows after the birthday day, or right after a successful announce —
+        # never on the birthday morning before congratulate is sent.
+        stale_titles = {"День рождения"}
         try:
             tz = ZoneInfo(config.timezone)
         except Exception:
@@ -429,6 +433,35 @@ class BirthdayService:
             )
         return removed
 
+    async def delete_reminder_message(
+        self,
+        guild: discord.Guild,
+        user_id: int,
+        event_date: date,
+    ) -> None:
+        """Remove the pre-birthday reminder once congratulate is posted."""
+        rows = await self.db.list_birthday_notification_messages(
+            guild.id,
+            user_id=user_id,
+            event_date=event_date.isoformat(),
+        )
+        for _uid, channel_id, message_id, stored_date, kind in rows:
+            if kind != "reminder":
+                continue
+            channel = guild.get_channel(channel_id)
+            if channel is not None and hasattr(channel, "fetch_message"):
+                try:
+                    message = await channel.fetch_message(message_id)
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+            await self.db.clear_birthday_notification_message(
+                guild.id,
+                user_id,
+                stored_date,
+                kind,
+            )
+
     def reminder_embed(
         self,
         guild: discord.Guild,
@@ -455,34 +488,49 @@ class BirthdayService:
     ) -> tuple[list[str], list[str]]:
         facts: list[str] = []
         allowed: list[str] = []
-        record = await self.db.get_personal_role(guild.id, user_id)
-        if record is not None:
-            role = guild.get_role(record.role_id)
-            if role is not None:
-                facts.append(f"персональная роль называется «{role.name}»")
-                allowed.append(role.name)
-        quotes = await self.db.count_quotes(guild.id, user_id)
-        if quotes:
-            facts.append("на сервере сохранены цитаты этого человека")
-        wins = sum(
-            1
-            for festival in await self.db.list_guild_festivals(guild.id)
-            if festival.winner_user_id == user_id
-        )
-        if wins:
-            facts.append("фильм этого человека побеждал в кинофестивале сервера")
-        config = await self.db.get_guild(guild.id)
-        tz_name = config.timezone if config is not None else "Europe/Moscow"
-        now_iso = datetime.now(ZoneInfo(tz_name)).isoformat()
-        voice = await self.db.sum_voice_seconds(guild.id, user_id, None, None, now_iso)
-        if isinstance(voice, int) and voice >= 50 * 3600:
-            facts.append("много времени проводит с друзьями в войсе")
-        dossier = await self.db.list_voice_dossier(guild.id, user_id, limit=3)
-        for entry in dossier:
-            fact = entry.fact.strip()
-            if fact:
-                facts.append(fact)
-                allowed.append(fact)
+        try:
+            record = await self.db.get_personal_role(guild.id, user_id)
+            if record is not None:
+                role = guild.get_role(record.role_id)
+                if role is not None:
+                    facts.append(f"персональная роль называется «{role.name}»")
+                    allowed.append(role.name)
+        except Exception:
+            log.exception("Birthday facts: personal role failed user=%s", user_id)
+        try:
+            quotes = await self.db.count_quotes(guild.id, user_id)
+            if quotes:
+                facts.append("на сервере сохранены цитаты этого человека")
+        except Exception:
+            log.exception("Birthday facts: quotes failed user=%s", user_id)
+        try:
+            wins = sum(
+                1
+                for festival in await self.db.list_guild_festivals(guild.id)
+                if festival.winner_user_id == user_id
+            )
+            if wins:
+                facts.append("фильм этого человека побеждал в кинофестивале сервера")
+        except Exception:
+            log.exception("Birthday facts: festivals failed user=%s", user_id)
+        try:
+            config = await self.db.get_guild(guild.id)
+            tz_name = config.timezone if config is not None else "Europe/Moscow"
+            now_iso = datetime.now(ZoneInfo(tz_name)).isoformat()
+            voice = await self.db.sum_voice_seconds(guild.id, user_id, None, None, now_iso)
+            if isinstance(voice, int) and voice >= 50 * 3600:
+                facts.append("много времени проводит с друзьями в войсе")
+        except Exception:
+            log.exception("Birthday facts: voice failed user=%s", user_id)
+        try:
+            dossier = await self.db.list_voice_dossier(guild.id, user_id, limit=3)
+            for entry in dossier:
+                fact = entry.fact.strip()
+                if fact:
+                    facts.append(fact)
+                    allowed.append(fact)
+        except Exception:
+            log.exception("Birthday facts: dossier failed user=%s", user_id)
         return facts, allowed
 
     async def announce_embed(
@@ -494,8 +542,20 @@ class BirthdayService:
         *,
         mention: bool = True,
     ) -> tuple[discord.Embed, bool]:
-        facts, extra_allowed = await self.collect_congrats_facts(guild, birthday.user_id)
-        gender = await self.db.get_member_gender(guild.id, birthday.user_id)
+        try:
+            facts, extra_allowed = await self.collect_congrats_facts(guild, birthday.user_id)
+        except Exception:
+            log.exception(
+                "Birthday facts collection failed guild=%s user=%s — plain congrats",
+                guild.id,
+                birthday.user_id,
+            )
+            facts, extra_allowed = [], []
+        try:
+            gender = await self.db.get_member_gender(guild.id, birthday.user_id)
+        except Exception:
+            log.exception("Birthday gender lookup failed user=%s", birthday.user_id)
+            gender = "u"
         description, used_ai = await ai_service.build_announce_embed_description(
             guild,
             birthday,
