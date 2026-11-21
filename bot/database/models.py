@@ -7,6 +7,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _row_keys(row: Any) -> set[str]:
+    """Materialize column names.
+
+    asyncpg.Record.keys() returns a one-shot iterator — reusing it for several
+    ``\"col\" in keys`` checks silently drops later columns (festival posters/ages).
+    """
+    return set(row.keys())
+
+
 @dataclass(slots=True)
 class GuildConfig:
     guild_id: int
@@ -44,7 +53,7 @@ class GuildConfig:
 
     @classmethod
     def _parse_tgk_board_message_ids(cls, row: Any) -> list[int] | None:
-        keys = row.keys()
+        keys = _row_keys(row)
         if "tgk_board_message_ids" in keys and row["tgk_board_message_ids"]:
             try:
                 parsed = json.loads(row["tgk_board_message_ids"])
@@ -58,15 +67,16 @@ class GuildConfig:
 
     @classmethod
     def from_row(cls, row: Any) -> GuildConfig:
+        keys = _row_keys(row)
         return cls(
             guild_id=row["guild_id"],
             timezone=row["timezone"],
             birthday_channel_id=row["birthday_channel_id"],
             events_channel_id=row["events_channel_id"],
             quotes_channel_id=row["quotes_channel_id"],
-            fest_channel_id=row["fest_channel_id"] if "fest_channel_id" in row.keys() else None,
-            tgk_channel_id=row["tgk_channel_id"] if "tgk_channel_id" in row.keys() else None,
-            santa_channel_id=row["santa_channel_id"] if "santa_channel_id" in row.keys() else None,
+            fest_channel_id=row["fest_channel_id"] if "fest_channel_id" in keys else None,
+            tgk_channel_id=row["tgk_channel_id"] if "tgk_channel_id" in keys else None,
+            santa_channel_id=row["santa_channel_id"] if "santa_channel_id" in keys else None,
             statistics_enabled=bool(row["statistics_enabled"]),
             personal_roles_enabled=bool(row["personal_roles_enabled"]),
             rgb_enabled=bool(row["rgb_enabled"]),
@@ -75,47 +85,47 @@ class GuildConfig:
             event_reminder_minutes=row["event_reminder_minutes"],
             rgb_interval_seconds=row["rgb_interval_seconds"],
             birthday_board_message_id=row["birthday_board_message_id"]
-            if "birthday_board_message_id" in row.keys()
+            if "birthday_board_message_id" in keys
             else None,
             birthday_star_role_id=row["birthday_star_role_id"]
-            if "birthday_star_role_id" in row.keys()
+            if "birthday_star_role_id" in keys
             else None,
             fest_staff_role_id=row["fest_staff_role_id"]
-            if "fest_staff_role_id" in row.keys()
+            if "fest_staff_role_id" in keys
             else None,
             fest_ping_role_id=row["fest_ping_role_id"]
-            if "fest_ping_role_id" in row.keys()
+            if "fest_ping_role_id" in keys
             else None,
             config_role_id=row["config_role_id"]
-            if "config_role_id" in row.keys()
+            if "config_role_id" in keys
             else None,
             fest_reminder_minutes=int(row["fest_reminder_minutes"])
-            if "fest_reminder_minutes" in row.keys() and row["fest_reminder_minutes"] is not None
+            if "fest_reminder_minutes" in keys and row["fest_reminder_minutes"] is not None
             else 60,
             fest_presence_check=bool(row["fest_presence_check"])
-            if "fest_presence_check" in row.keys()
+            if "fest_presence_check" in keys
             else True,
             tarot_reset_minutes=int(row["tarot_reset_minutes"])
-            if "tarot_reset_minutes" in row.keys() and row["tarot_reset_minutes"]
+            if "tarot_reset_minutes" in keys and row["tarot_reset_minutes"]
             else 10,
             tarot_show_meaning=bool(row["tarot_show_meaning"])
-            if "tarot_show_meaning" in row.keys()
+            if "tarot_show_meaning" in keys
             else True,
             voice_chat_transcripts=bool(row["voice_chat_transcripts"])
-            if "voice_chat_transcripts" in row.keys()
+            if "voice_chat_transcripts" in keys
             else True,
             voice_listen_channel_id=row["voice_listen_channel_id"]
-            if "voice_listen_channel_id" in row.keys()
+            if "voice_listen_channel_id" in keys
             else None,
             voice_announce_channel_id=row["voice_announce_channel_id"]
-            if "voice_announce_channel_id" in row.keys()
+            if "voice_announce_channel_id" in keys
             else None,
             tgk_board_message_id=row["tgk_board_message_id"]
-            if "tgk_board_message_id" in row.keys()
+            if "tgk_board_message_id" in keys
             else None,
             tgk_board_message_ids=cls._parse_tgk_board_message_ids(row),
             tgk_list_role_id=row["tgk_list_role_id"]
-            if "tgk_list_role_id" in row.keys()
+            if "tgk_list_role_id" in keys
             else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -133,7 +143,7 @@ class Birthday:
 
     @classmethod
     def from_row(cls, row: Any) -> Birthday:
-        keys = row.keys()
+        keys = _row_keys(row)
         return cls(
             guild_id=row["guild_id"],
             user_id=row["user_id"],
@@ -161,7 +171,7 @@ class Event:
 
     @classmethod
     def from_row(cls, row: Any) -> Event:
-        keys = row.keys()
+        keys = _row_keys(row)
         number = row["number"] if "number" in keys else None
         ping_role = row["ping_role_id"] if "ping_role_id" in keys else None
         return cls(
@@ -209,7 +219,7 @@ class Quote:
 
     @classmethod
     def from_row(cls, row: Any) -> Quote:
-        keys = row.keys()
+        keys = _row_keys(row)
         number = row["number"] if "number" in keys else None
         raw_ids = row["author_ids"] if "author_ids" in keys else "[]"
         try:
@@ -300,7 +310,7 @@ class Festival:
 
     @classmethod
     def from_row(cls, row: Any) -> Festival:
-        keys = row.keys()
+        keys = _row_keys(row)
         return cls(
             id=row["id"],
             guild_id=row["guild_id"],
@@ -326,7 +336,7 @@ class FestivalFilm:
 
     @classmethod
     def from_row(cls, row: Any) -> FestivalFilm:
-        keys = row.keys()
+        keys = _row_keys(row)
         runtime = row["runtime_minutes"] if "runtime_minutes" in keys else None
         return cls(
             festival_id=row["festival_id"],
@@ -378,7 +388,7 @@ class TgChannel:
 
     @classmethod
     def from_row(cls, row: Any) -> TgChannel:
-        keys = row.keys()
+        keys = _row_keys(row)
         chat_id = row["telegram_chat_id"] if "telegram_chat_id" in keys else None
         return cls(
             id=row["id"],

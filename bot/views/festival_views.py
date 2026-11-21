@@ -158,7 +158,12 @@ async def refresh_festival_message(
         msg = await channel.fetch_message(festival.message_id)
         await msg.edit(content=None, embeds=[], view=view, allowed_mentions=FEST_MENTIONS)
     except discord.HTTPException:
-        pass
+        log.exception(
+            "Failed to refresh festival card guild=%s number=%s message=%s",
+            festival.guild_id,
+            festival.number,
+            festival.message_id,
+        )
 
 
 async def delete_festival_message(bot: ErundaBot, festival: Festival) -> None:
